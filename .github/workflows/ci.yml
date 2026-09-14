@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 1. Every source file parses. Explicit set -e so a parse error in any
+      #    file fails the step, not just the last one checked.
+      - name: syntax
+        run: |
+          set -e
+          for f in src/*.js tools/*.mjs; do echo "check $f"; node --check "$f"; done
+
+      # 2. The engine rebuilds from source. No emscripten: this is a
+      #    freestanding wasm32 link against nothing.
+      - name: build
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq clang lld
+          ./tools/build.sh
+
+      # 3. dist/ must not drift from src/. The .js and .html in dist/ are
+      #    straight copies (tools/build.sh); if they differ, someone edited
+      #    src without rebuilding and jsDelivr would serve a stale module.
+      - name: dist is in sync with src
+        run: |
+          fail=0
+          for f in engine.js test.html; do
+            if ! diff -u "src/$f" "dist/$f"; then
+              echo "::error file=dist/$f::out of sync with src/$f — run tools/build.sh"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      # 4. The engine decodes a real frame and agrees with measurements taken
+      #    off the camera that produced it.
+      - name: smoke
+        run: node tools/smoke.mjs

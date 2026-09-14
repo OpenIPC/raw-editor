@@ -1,0 +1,85 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>raw-editor engine harness</title>
+<style>
+  body { margin:0; background:#14161c; color:#e6e8ee; font:13px/1.5 system-ui,sans-serif; }
+  header { padding:14px 18px; border-bottom:1px solid #2c313d; display:flex; gap:14px; align-items:center; }
+  main { padding:18px; display:flex; gap:18px; align-items:flex-start; }
+  canvas { background:#0d0f14; border:1px solid #2c313d; border-radius:8px; max-width:70vw; }
+  #drop { border:1.5px dashed #2c313d; border-radius:12px; padding:40px; text-align:center; color:#878a94; }
+  #drop.over { border-color:#5c70e8; color:#e6e8ee; }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:5px 14px; margin:0; min-width:280px; }
+  dt { color:#878a94; font-size:11px; font-weight:600; letter-spacing:.07em; text-transform:uppercase; }
+  dd { margin:0; text-align:right; font-family:'PT Mono',ui-monospace,monospace; font-size:12px; }
+  select,button { background:#232734; color:#e6e8ee; border:1px solid #2c313d; border-radius:8px; padding:5px 10px; font:inherit; font-size:12px; }
+  .err { color:#ea868f; }
+</style>
+<header>
+  <strong>raw-editor engine</strong>
+  <select id="demosaic"><option value="1">bilinear</option><option value="0">none (mosaic)</option></select>
+  <select id="cfa"><option value="-1">CFA from file</option><option value="0">RGGB</option><option value="1">GRBG</option><option value="2">GBRG</option><option value="3">BGGR</option></select>
+  <select id="step"><option value="1">full</option><option value="2">1/2</option><option value="4">1/4</option></select>
+  <span id="msg"></span>
+</header>
+<main>
+  <div>
+    <div id="drop">Drop a .dng here</div>
+    <canvas id="cv" hidden></canvas>
+  </div>
+  <dl id="info"></dl>
+</main>
+<script type="module">
+import { loadEngine, DEMOSAIC } from './engine.js';
+
+const msg = document.getElementById('msg');
+const drop = document.getElementById('drop');
+const cv = document.getElementById('cv');
+const info = document.getElementById('info');
+let engine = null, loaded = false;
+
+loadEngine('./engine.wasm').then((e) => { engine = e; msg.textContent = 'engine ready'; })
+	.catch((e) => { msg.textContent = e.message; msg.className = 'err'; });
+
+for (const ev of ['dragenter', 'dragover']) drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); });
+for (const ev of ['dragleave', 'drop']) drop.addEventListener(ev, () => drop.classList.remove('over'));
+drop.addEventListener('drop', async (e) => {
+	e.preventDefault();
+	const f = e.dataTransfer.files[0];
+	if (!f || !engine) return;
+	try {
+		const meta = engine.open(new Uint8Array(await f.arrayBuffer()));
+		loaded = true;
+		const probe = engine.probeCFA();
+		info.innerHTML = Object.entries({
+			file: f.name, size: `${meta.width}x${meta.height}`, depth: `${meta.bits}-bit`,
+			cfa: meta.cfaName, black: meta.black, white: meta.white,
+			iso: meta.iso, exposure: `${(meta.exposure * 1000).toFixed(1)} ms`,
+			model: meta.model || '(none)',
+			neutral: meta.neutral.map((v) => v.toFixed(4)).join(' '),
+			forward: meta.hasForward ? 'present' : 'absent',
+			'cfa probe': probe.survivors.map((s) => s.name).join(' or '),
+		}).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+		render();
+	} catch (err) {
+		msg.textContent = err.message; msg.className = 'err';
+	}
+});
+
+function render() {
+	if (!loaded) return;
+	const cfaSel = +document.getElementById('cfa').value;
+	const t = performance.now();
+	const out = engine.develop({
+		demosaic: +document.getElementById('demosaic').value,
+		step: +document.getElementById('step').value,
+		...(cfaSel >= 0 ? { cfa: cfaSel } : {}),
+	});
+	const ms = performance.now() - t;
+	cv.hidden = false; drop.hidden = true;
+	cv.width = out.width; cv.height = out.height;
+	cv.getContext('2d').putImageData(new ImageData(out.pixels, out.width, out.height), 0, 0);
+	msg.textContent = `${out.width}x${out.height} in ${ms.toFixed(1)} ms`;
+	msg.className = '';
+}
+for (const id of ['demosaic', 'cfa', 'step']) document.getElementById(id).addEventListener('change', render);
+</script>
