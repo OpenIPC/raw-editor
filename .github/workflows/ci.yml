@@ -34,7 +34,7 @@ jobs:
       - name: dist is in sync with src
         run: |
           fail=0
-          for f in engine.js test.html; do
+          for f in engine.js worker.js editor.js editor.css demo.html test.html; do
             if ! diff -u "src/$f" "dist/$f"; then
               echo "::error file=dist/$f::out of sync with src/$f — run tools/build.sh"
               fail=1
@@ -46,3 +46,12 @@ jobs:
       #    off the camera that produced it.
       - name: smoke
         run: node tools/smoke.mjs
+
+      # 5. The interface, in a real browser. Everything above passed while the
+      #    editor was visibly broken — a prompt painted over the picture, a
+      #    preview shrunk to a thumbnail, a canvas that would not grow — so the
+      #    engine being right is not evidence that the page is.
+      - name: ui
+        run: |
+          sudo apt-get install -y -qq chromium-browser || sudo apt-get install -y -qq chromium
+          node tools/ui-check.mjs

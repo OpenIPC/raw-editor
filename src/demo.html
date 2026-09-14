@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>raw editor</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&family=PT+Mono&display=swap">
+<style>body { margin: 0; background: #14161c; }</style>
+<div id="root"></div>
+<!-- No editor.css link: mountEditor loads its own stylesheet. -->
+<script type="module">
+import { mountEditor } from './editor.js';
+const editor = mountEditor(document.getElementById('root'), { base: './' });
+// The host page decides where a frame comes from; here it is a drop or a
+// ?dng= for automated checks.
+const src = new URLSearchParams(location.search).get('dng');
+if (src) {
+	fetch(src).then((r) => r.arrayBuffer())
+		.then((b) => editor.open(new Uint8Array(b), src.split('/').pop()));
+}
+window.__editor = editor;
+</script>

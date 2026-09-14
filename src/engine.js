@@ -49,7 +49,13 @@ export async function loadEngine(wasmUrl) {
 export class Engine {
 	constructor(x) {
 		this.x = x;
+		// Scratch buffers live as long as the frame does. The engine's
+		// allocator is a bump allocator with no free, so allocating these per
+		// render grows memory for as long as a slider is moving — a minute of
+		// dragging is thousands of renders.
 		this.gammaPtr = 0;
+		this.fwdPtr = 0;
+		this.histPtr = 0;
 	}
 
 	get mem() {
@@ -61,7 +67,7 @@ export class Engine {
 	open(bytes) {
 		const x = this.x;
 		x.reset_alloc();
-		this.gammaPtr = 0;
+		this.gammaPtr = this.fwdPtr = this.histPtr = 0;
 
 		const p = x.alloc(bytes.length);
 		if (!p) throw new Error('out of memory holding the file');
@@ -119,7 +125,8 @@ export class Engine {
 		}
 		let fp = 0;
 		if (o.useForward) {
-			fp = x.alloc(9 * 4);
+			if (!this.fwdPtr) this.fwdPtr = x.alloc(9 * 4);
+			fp = this.fwdPtr;
 			new Float32Array(x.memory.buffer, fp, 9).set(o.forward);
 		}
 		const g = this.#gamma();
@@ -134,9 +141,9 @@ export class Engine {
 
 	histogram() {
 		const x = this.x, px = this.lastPixels || (this.info.width * this.info.height);
-		const p = x.alloc(768 * 4);
-		x.histogram(this.rgbaPtr, px, p);
-		const b = new Uint32Array(x.memory.buffer, p, 768);
+		if (!this.histPtr) this.histPtr = x.alloc(768 * 4);
+		x.histogram(this.rgbaPtr, px, this.histPtr);
+		const b = new Uint32Array(x.memory.buffer, this.histPtr, 768);
 		return { r: b.slice(0, 256), g: b.slice(256, 512), b: b.slice(512, 768) };
 	}
 

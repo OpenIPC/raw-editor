@@ -18,5 +18,7 @@ clang --target=wasm32 -O2 -flto -nostdlib -ffreestanding \
 
 # Copied verbatim; CI diffs dist/ against src/ so an edit without a
 # rebuild cannot ship a stale copy.
-for f in engine.js test.html; do cp "src/$f" dist/; done
+for f in engine.js worker.js editor.js editor.css demo.html test.html; do
+  cp "src/$f" dist/
+done
 ls -l dist/

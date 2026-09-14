@@ -122,5 +122,20 @@ const hist = engine.histogram();
 const total = hist.r.reduce((a, b) => a + b, 0);
 check('histogram counts every pixel', total, 256 * 256);
 
+console.log('\nrepeated renders are free');
+// The engine allocates from a bump allocator with no free, reset only when a
+// frame is opened. Scratch buffers therefore have to be per-frame, or a minute
+// of dragging a slider is thousands of allocations that are never reclaimed.
+const memBefore = engine.x.memory.buffer.byteLength;
+for (let i = 0; i < 300; i++) { engine.develop({ demosaic: DEMOSAIC.bilinear, step: 4 }); engine.histogram(); }
+const memAfter = engine.x.memory.buffer.byteLength;
+assert('300 develop+histogram cycles grow wasm memory by nothing',
+	memAfter === memBefore, `${memBefore} -> ${memAfter} bytes`);
+
+console.log('\nhostile metadata stays data');
+const hostile = engine.open(readFileSync(new URL('../tests/hostile-model.dng', import.meta.url)));
+check('the model is carried through verbatim', hostile.model, '<img src=x onerror="window.__pwned=1">');
+check('and the frame still reads correctly', [hostile.width, hostile.cfaName, hostile.black], [256, 'RGGB', 50]);
+
 console.log(failures ? `\n${failures} FAILED` : '\nall checks passed');
 process.exit(failures ? 1 : 0);
