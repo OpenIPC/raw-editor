@@ -33,6 +33,17 @@
 	background: #1c1f27; border-bottom: 1px solid #2c313d; }
 .re-top > * { flex: 0 0 auto; }
 .re-top > .re-rule { flex: 1 1 auto; }
+/* The top bar holds an identity on the left and actions on the right, and on a
+ * phone there is not room for both. The frame's name is the first thing to go:
+ * it is repeated in the footer, while the buttons are the only way to do
+ * anything. */
+@media (max-width: 720px) {
+	.re-top { gap: 8px; padding: 0 9px; }
+	.re-top > .re-chip { display: none; }
+	.re-btn > span { display: none; }
+	.re-btn { padding: 6px 8px; }
+}
+
 .re-mid { flex: 1 1 auto; display: flex; min-height: 0; }
 .re-stage { flex: 1 1 auto; position: relative; display: flex; align-items: center;
 	justify-content: center; background: #0d0f14; min-width: 0; overflow: auto; }

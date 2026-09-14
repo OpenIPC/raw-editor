@@ -36,6 +36,57 @@ try {
 	t('the editor opened the frame', false, e.message);
 }
 
+/* Capture and Download live in the editor's own chrome now, so the host page
+ * does not need a page of its own around it. Both halves matter: the button
+ * must not appear when there is nothing behind it, and it must actually work
+ * when there is. */
+try {
+	t('no Capture button without a capture provider',
+		!document.querySelector('#root .re-top [data-act="capture"]'));
+	const save = document.querySelector('#root .re-top [data-act="save"]');
+	t('Download is offered once a frame is open', !!save && !save.disabled);
+} catch (e) {
+	t('the chrome reflects what the host provides', false, e.message);
+}
+
+try {
+	const host = document.createElement('div');
+	document.body.append(host);
+	let asked = 0;
+	const withCapture = mountEditor(host, {
+		base: '../dist/',
+		styles: false,
+		capture: async () => {
+			asked++;
+			const b = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
+			return { bytes: b, name: 'captured.dng' };
+		},
+	});
+	const cap = host.querySelector('.re-top [data-act="capture"]');
+	const save = host.querySelector('.re-top [data-act="save"]');
+	t('a capture provider grows a Capture button', !!cap);
+	t('Download is refused until there is something to save', !!save && save.disabled);
+	t('the empty state offers the capture too',
+		!!host.querySelector('.re-drop [data-act="capture"]'));
+
+	cap.click();
+	// The click is synchronous; the frame it asks for is not.
+	for (let i = 0; i < 60 && !host.querySelector('.re-stage canvas:not([hidden])'); i++)
+		await new Promise((r) => setTimeout(r, 100));
+
+	t('pressing it asks the host exactly once', asked === 1, 'asked ' + asked);
+	t('and the captured frame is developed',
+		!!host.querySelector('.re-stage canvas:not([hidden])'));
+	t('which is then downloadable', !!save && !save.disabled);
+	const name = host.querySelector('.re-top span');
+	t('named by what the host called it',
+		!!name && /captured\.dng/.test(host.querySelector('.re-top').textContent));
+	withCapture.destroy();
+	host.remove();
+} catch (e) {
+	t('the capture path works end to end', false, e.message);
+}
+
 /* A module that never arrives must fail fast and say so, not leave the caller
  * waiting for ever on a worker that will never answer. */
 try {

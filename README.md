@@ -39,13 +39,28 @@ The studio is mounted by the host page, not by itself:
 
 ```js
 import { mountEditor } from './editor.js';
-const editor = mountEditor(document.getElementById('root'), { base: './' });
-editor.open(bytes, 'frame.dng');
+const editor = mountEditor(document.getElementById('root'), {
+	base: './',
+	capture: async () => {
+		const r = await fetch('/image.dng', { credentials: 'same-origin' });
+		if (!r.ok) throw new Error('The camera answered ' + r.status + '.');
+		return { bytes: new Uint8Array(await r.arrayBuffer()), name: 'frame.dng' };
+	},
+	onExit: () => history.back(),
+});
+editor.open(bytes, 'frame.dng');   // optional: a frame you already have
 ```
 
 `base` is where the module's own files live, which is the CDN directory in
 production. The editor owns everything inside the root it is given: markup,
 styles and its worker.
+
+`capture` is how a frame gets in without a file to drag. Give it an async
+function returning `{ bytes, name }` and the editor grows its own **Capture**
+button, in the chrome and in the empty state; leave it out and neither appears,
+because a button that cannot work is worse than no button. **Download** hands
+back the bytes exactly as they arrived — not the developed preview — and is
+offered as soon as a frame is open, whatever it was opened from.
 
 ## What the engine does, and what it does not
 
