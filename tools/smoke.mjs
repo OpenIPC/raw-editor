@@ -169,6 +169,84 @@ console.log('\npicking a neutral');
 		/outside the frame/.test(refused), refused || '(no error)');
 }
 
+console.log('\ncalibration recovers a matrix it was not given');
+// The only honest test of a solver is ground truth: plant a known camera
+// response, generate the patches a chart would produce through it, and check
+// that what comes back is what went in. A solve always returns SOMETHING, so
+// "it ran" proves nothing at all.
+{
+	const { solveFromPatches, patchCentres, CHART_XYZ50, apply3, CHART_SRGB } =
+		await import('../src/calibrate.js');
+
+	// Measured off the lab gk7205v300's own ISP, so the shape is a real one.
+	const PLANTED = [
+		1.1209, -0.4122, -0.3991,
+		-0.2130, 1.2110, 0.0651,
+		-0.0550, 0.3546, 0.8493,
+	];
+	const patches = CHART_XYZ50.map((xyz) => apply3(PLANTED, xyz));
+	const got = solveFromPatches(patches);
+
+	let worst = 0;
+	for (let i = 0; i < 9; i++) worst = Math.max(worst, Math.abs(got.colorMatrix[i] - PLANTED[i]));
+	assert('ColorMatrix1 comes back as the one that was planted', worst < 1e-6,
+		'largest entry error ' + worst.toExponential(2));
+
+	// The white balance is not fitted; it is read off the neutral row, so it is
+	// an independent check on the same data. Close but not equal on purpose:
+	// the chart's neutral patches are not exactly neutral -- white is published
+	// as 243,243,242 and the 5 step as 122,122,121 -- so their mean ratio
+	// cannot land exactly on the response to D50 white, and a tolerance that
+	// demanded it would be testing the chart rather than the code.
+	const wb = apply3(PLANTED, [0.9642, 1.0, 0.8249]);
+	assert('and the white balance matches the planted response to D50 white',
+		Math.abs(got.neutral[0] - wb[0] / wb[1]) < 5e-3 &&
+		Math.abs(got.neutral[2] - wb[2] / wb[1]) < 5e-3,
+		`${got.neutral.map((v) => v.toFixed(4))} vs ${[wb[0] / wb[1], 1, wb[2] / wb[1]].map((v) => v.toFixed(4))}`);
+
+	assert('the live matrix keeps a neutral neutral', [0, 1, 2].every((r) => {
+		const sum = got.ccm[r * 3] + got.ccm[r * 3 + 1] + got.ccm[r * 3 + 2];
+		return Math.abs(sum - 1) < 1e-9;
+	}), JSON.stringify(got.ccm.map((v) => +v.toFixed(4))));
+
+	// Noiseless input through an exactly-recovered matrix: the residual is the
+	// chart's own non-linearity against a 3x3, not the solver's error.
+	assert('and the fit it reports is the fit it achieved',
+		got.fit.meanDeltaE < 3 && got.fit.maxDeltaE < 12,
+		`mean dE ${got.fit.meanDeltaE.toFixed(2)}, max ${got.fit.maxDeltaE.toFixed(2)}`);
+
+	let refused = '';
+	try { solveFromPatches(patches.slice(0, 23)); } catch (e) { refused = e.message; }
+	assert('a short measurement is refused rather than fitted', /24 patches/.test(refused), refused);
+	refused = '';
+	try { solveFromPatches(patches.map((p, i) => (i === 3 ? [NaN, 1, 1] : p))); }
+	catch (e) { refused = e.message; }
+	assert('and so is one with a patch that is not a number',
+		/three finite numbers/.test(refused), refused);
+
+	check('the chart is 24 patches', CHART_SRGB.length, 24);
+
+	// Corners on an axis-aligned rectangle: the grid is then arithmetic anyone
+	// can check by hand.
+	const centres = patchCentres([[0, 0], [600, 0], [600, 400], [0, 400]]);
+	check('24 centres', centres.length, 24);
+	assert('the first patch sits half a cell in from the top-left corner',
+		Math.abs(centres[0].x - 50) < 1e-6 && Math.abs(centres[0].y - 50) < 1e-6,
+		`${centres[0].x}, ${centres[0].y}`);
+	assert('and the last half a cell in from the bottom-right',
+		Math.abs(centres[23].x - 550) < 1e-6 && Math.abs(centres[23].y - 350) < 1e-6,
+		`${centres[23].x}, ${centres[23].y}`);
+
+	// A chart photographed at an angle: the far edge is shorter, so a blend
+	// would drift and a homography does not. The top edge here is half the
+	// length of the bottom one.
+	const skew = patchCentres([[150, 0], [450, 0], [600, 400], [0, 400]]);
+	const topRun = skew[5].x - skew[0].x, bottomRun = skew[23].x - skew[18].x;
+	assert('a tilted chart keeps its patches inside their cells',
+		topRun > 0 && bottomRun > topRun * 1.6,
+		`top row spans ${topRun.toFixed(1)}, bottom ${bottomRun.toFixed(1)}`);
+}
+
 console.log('\nhostile metadata stays data');
 const hostile = engine.open(readFileSync(new URL('../tests/hostile-model.dng', import.meta.url)));
 check('the model is carried through verbatim', hostile.model, '<img src=x onerror="window.__pwned=1">');

@@ -34,7 +34,7 @@ jobs:
       - name: dist is in sync with src
         run: |
           fail=0
-          for f in engine.js worker.js editor.js editor.css demo.html test.html; do
+          for f in engine.js worker.js editor.js calibrate.js editor.css demo.html test.html; do
             if ! diff -u "src/$f" "dist/$f"; then
               echo "::error file=dist/$f::out of sync with src/$f — run tools/build.sh"
               fail=1
