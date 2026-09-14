@@ -811,13 +811,31 @@ export function mountEditor(root, {
 				} catch (e) {
 					text.textContent = 'Could not put it back: ' + e.message;
 				}
-			} else {
-				bar.classList.remove('re-warn');
-				text.textContent = 'Kept. The camera will use this after a restart too.';
-				// The host may be holding its own way back; this is the only
-				// signal that it should let go.
-				try { await calibrate.keep?.(); } catch (e) { /* kept either way */ }
+				send.disabled = false;
+				return;
 			}
+
+			/*
+			 * Confirming is only real once the host has been told. It is the
+			 * host's single signal to stand down whatever it armed to undo
+			 * this, so saying "kept" when that signal failed to arrive would
+			 * be the worst answer available: the operator stops watching, and
+			 * the change is taken back anyway.
+			 */
+			if (calibrate.keep) {
+				text.textContent = 'Confirming…';
+				try {
+					await calibrate.keep();
+				} catch (e) {
+					bar.append(acts);
+					text.textContent = 'Applied, but confirming did not reach the camera: ' +
+						e.message + ' It may still be put back on its own — try again.';
+					send.disabled = false;
+					return;
+				}
+			}
+			bar.classList.remove('re-warn');
+			text.textContent = 'Kept. The camera will use this after a restart too.';
 			send.disabled = false;
 		};
 		keep.addEventListener('click', () => finish(false));
