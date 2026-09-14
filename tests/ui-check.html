@@ -116,6 +116,35 @@ try {
 		before.join(',') + ' -> ' + after.join(','));
 	t('the panel says what it was set from',
 		/Set from the picture/.test(document.querySelector('#root .re-insp').textContent));
+
+	/* The click above landed on the exact centre of the canvas. The engine can
+	 * be asked the same question independently, and the two answers must agree
+	 * -- which is what catches a mapping off by a scale factor or an offset,
+	 * where "the sliders moved" would not.
+	 *
+	 * That comparison rests on the canvas centre being the image centre, which
+	 * is only exactly true when the preview is unstepped: a stepped canvas is
+	 * floor(width / step) wide, so its midpoint maps back to a coordinate up to
+	 * half a step away. So the premise is asserted rather than assumed. It is
+	 * deliberately NOT fixed by sharing the picker's own arithmetic -- a test
+	 * that computes the expected answer the way the code does would agree with
+	 * the code however wrong both were. */
+	const { instantiate } = await import('../dist/engine.js');
+	const probe = await instantiate(await (await fetch('../dist/engine.wasm')).arrayBuffer());
+	const pinfo = probe.open(new Uint8Array(await (await fetch('./hostile-model.dng')).arrayBuffer()));
+	const shownCanvas = document.querySelector('#root .re-stage canvas');
+	t('this frame previews unstepped, so the centres really are the same point',
+		shownCanvas.width === pinfo.width && shownCanvas.height === pinfo.height,
+		`canvas ${shownCanvas.width}x${shownCanvas.height} vs frame ${pinfo.width}x${pinfo.height}`);
+	const want = probe.samplePatch(Math.round(pinfo.width / 2), Math.round(pinfo.height / 2), 6);
+	const shown = Array.from(document.querySelectorAll('#root .re-rnum'))
+		.map((n) => parseFloat(n.textContent));
+	// Red and Blue are the third and fourth readouts: Black, White, Red, Blue,
+	// Exposure.
+	const gotRed = shown[2], gotBlue = shown[3];
+	t('the click mapped to the centre of the frame, not near it',
+		Math.abs(gotRed - want.neutral[0]) < 0.02 && Math.abs(gotBlue - want.neutral[2]) < 0.02,
+		`ui ${gotRed} / ${gotBlue}  vs engine ${want.neutral[0].toFixed(3)} / ${want.neutral[2].toFixed(3)}`);
 } catch (e) {
 	t('the neutral picker works', false, e.message);
 }
