@@ -535,58 +535,91 @@ export function mountEditor(root, {
 			[w * 0.7, h * 0.72], [w * 0.3, h * 0.72]];
 	}
 
-	function drawChart() {
-		chart.replaceChildren();
-		if (mode !== 'calibrate' || !corners || !state.info) return;
-		const pts = corners.map(([x, y]) => stageCoords(x, y));
-		if (pts.some((p) => !p)) return;
+	/*
+	 * The overlay is built ONCE and afterwards only moved.
+	 *
+	 * It used to be rebuilt on every pointermove, which made the corners
+	 * undraggable: replacing the node under the pointer destroys the element
+	 * holding the pointer capture, so the corner jumped to wherever the first
+	 * move landed and then stopped following. The drag also listens on the
+	 * window rather than the grip, so it survives anything that does replace
+	 * the overlay mid-gesture.
+	 */
+	let chartParts = null;
 
-		const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+	function buildChartOnce() {
+		if (chartParts) return chartParts;
+		const NS = 'http://www.w3.org/2000/svg';
+		const svg = document.createElementNS(NS, 'svg');
 		svg.setAttribute('class', 're-chart-svg');
-		const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-		poly.setAttribute('points', pts.map((p) => `${p.x},${p.y}`).join(' '));
-		poly.setAttribute('class', 're-chart-quad');
-		svg.append(poly);
-		// The cells, so it is obvious before measuring whether the grid has
-		// actually landed on the patches.
-		let cells;
-		try { cells = patchCentres(corners); } catch { cells = []; }
-		for (const c of cells) {
-			const at = stageCoords(c.x, c.y);
-			if (!at) continue;
-			const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-			const t = viewTransform();
-			dot.setAttribute('cx', at.x);
-			dot.setAttribute('cy', at.y);
-			dot.setAttribute('r', Math.max(2, (c.radius / (t?.step || 1)) * (t?.scale || 1)));
-			dot.setAttribute('class', 're-chart-cell');
-			svg.append(dot);
+		const quad = document.createElementNS(NS, 'polygon');
+		quad.setAttribute('class', 're-chart-quad');
+		svg.append(quad);
+		const cells = [];
+		for (let i = 0; i < CHART_COLS * CHART_ROWS; i++) {
+			const c = document.createElementNS(NS, 'circle');
+			c.setAttribute('class', 're-chart-cell');
+			svg.append(c);
+			cells.push(c);
 		}
 		chart.append(svg);
 
-		pts.forEach((p, i) => {
-			const h = el('div', 're-chart-grip');
-			h.style.left = p.x + 'px';
-			h.style.top = p.y + 'px';
-			h.title = ['top left', 'top right', 'bottom right', 'bottom left'][i];
-			h.addEventListener('pointerdown', (ev) => {
+		const grips = [];
+		for (let i = 0; i < 4; i++) {
+			const g = el('div', 're-chart-grip');
+			g.dataset.corner = String(i);
+			g.title = ['top left', 'top right', 'bottom right', 'bottom left'][i];
+			g.addEventListener('pointerdown', (ev) => {
 				ev.preventDefault();
-				h.setPointerCapture(ev.pointerId);
 				const move = (e) => {
 					const at = frameCoords(e);
-					if (!at) return;
+					if (!at || !corners) return;
 					corners[i] = [at.x, at.y];
-					drawChart();
+					positionChart();
 				};
 				const up = () => {
-					h.removeEventListener('pointermove', move);
-					h.removeEventListener('pointerup', up);
+					window.removeEventListener('pointermove', move);
+					window.removeEventListener('pointerup', up);
+					window.removeEventListener('pointercancel', up);
 				};
-				h.addEventListener('pointermove', move);
-				h.addEventListener('pointerup', up);
+				window.addEventListener('pointermove', move);
+				window.addEventListener('pointerup', up);
+				window.addEventListener('pointercancel', up);
 			});
-			chart.append(h);
+			chart.append(g);
+			grips.push(g);
+		}
+		chartParts = { quad, cells, grips };
+		return chartParts;
+	}
+
+	function positionChart() {
+		if (mode !== 'calibrate' || !corners || !state.info || !chartParts) return;
+		const pts = corners.map(([x, y]) => stageCoords(x, y));
+		if (pts.some((p) => !p)) return;
+		chartParts.quad.setAttribute('points', pts.map((p) => `${p.x},${p.y}`).join(' '));
+
+		let cells = [];
+		try { cells = patchCentres(corners); } catch { cells = []; }
+		const t = viewTransform();
+		chartParts.cells.forEach((dot, i) => {
+			const c = cells[i];
+			const at = c && stageCoords(c.x, c.y);
+			if (!at) { dot.setAttribute('r', 0); return; }
+			dot.setAttribute('cx', at.x);
+			dot.setAttribute('cy', at.y);
+			dot.setAttribute('r', Math.max(2, (c.radius / (t?.step || 1)) * (t?.scale || 1)));
 		});
+		chartParts.grips.forEach((g, i) => {
+			g.style.left = pts[i].x + 'px';
+			g.style.top = pts[i].y + 'px';
+		});
+	}
+
+	function drawChart() {
+		if (mode !== 'calibrate' || !corners || !state.info) return;
+		buildChartOnce();
+		positionChart();
 	}
 
 	async function measureChart() {

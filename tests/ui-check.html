@@ -178,6 +178,40 @@ try {
 	t('and a dot per patch', host.querySelectorAll('.re-chart-cell').length === 24,
 		String(host.querySelectorAll('.re-chart-cell').length));
 
+	/* The corners have to actually drag. The first version rebuilt every grip
+	 * on each pointermove, which destroyed the node holding the pointer
+	 * capture: the corner jumped to the first move and then stopped following.
+	 * Two moves is what separates "it moved" from "it is being dragged". */
+	{
+		const grip = host.querySelector('.re-chart-grip[data-corner="0"]');
+		const before = grip.style.left;
+		const r = grip.getBoundingClientRect();
+		grip.dispatchEvent(new PointerEvent('pointerdown',
+			{ bubbles: true, pointerId: 7, clientX: r.left + 9, clientY: r.top + 9 }));
+		const stage = host.querySelector('.re-stage').getBoundingClientRect();
+		const p1 = { clientX: stage.left + stage.width * 0.30, clientY: stage.top + stage.height * 0.30 };
+		const p2 = { clientX: stage.left + stage.width * 0.42, clientY: stage.top + stage.height * 0.44 };
+		window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 7, ...p1 }));
+		const after1 = grip.style.left;
+		window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 7, ...p2 }));
+		const after2 = grip.style.left;
+		window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 7, ...p2 }));
+
+		t('a corner follows the first move', after1 !== before, `${before} -> ${after1}`);
+		t('and keeps following the second, rather than stopping',
+			after2 !== after1, `${after1} -> ${after2}`);
+		t('the same node is still the grip, not a replacement',
+			host.querySelector('.re-chart-grip[data-corner="0"]') === grip);
+		t('and it stops when the pointer goes up', (() => {
+			const held = grip.style.left;
+			window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 7,
+				clientX: stage.left + stage.width * 0.6, clientY: stage.top + stage.height * 0.6 }));
+			return grip.style.left === held;
+		})());
+		host.querySelector('.re-btn').parentElement
+			&& [...host.querySelectorAll('.re-btn')].find((b) => b.textContent === 'Reset corners')?.click();
+	}
+
 	host.querySelector('[data-act="measure"]').click();
 	for (let i = 0; i < 100 && !host.querySelector('[data-act="apply-to-camera"]'); i++)
 		await new Promise((r) => setTimeout(r, 100));
