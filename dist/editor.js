@@ -43,6 +43,10 @@ const ICON = {
 	warn: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" ' +
 		'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
 		'<path d="M12 4.6 21.2 19.4H2.8z"/><path d="M12 10.2v4"/><path d="M12 17.1h.01"/></svg>',
+	shutter: svg('<circle cx="10" cy="10" r="6.4"/><path d="M10 3.6 13.2 9"/>' +
+		'<path d="M16.1 12.6H9.8"/><path d="M6.8 15.6 10 10"/>', 15),
+	save: svg('<path d="M10 3.4v8.4"/><path d="M6.6 8.6 10 12l3.4-3.4"/>' +
+		'<path d="M4 13.6v2.2h12v-2.2"/>', 15),
 };
 
 /*
@@ -154,6 +158,11 @@ function histogramSVG(h) {
 
 export function mountEditor(root, {
 	base = './', onExit, styles = true,
+	/* Where a frame comes from when nobody dragged one in. An async function
+	 * returning { bytes, name }; the editor shows its own Capture button only
+	 * when it is given one, so a host with nothing to capture from -- a plain
+	 * file viewer -- gets no button that cannot work. */
+	capture,
 	/* How long to wait for the module to arrive and answer. The camera's own
 	 * loader gives the CDN eight seconds; a test harness under a virtual clock
 	 * needs a number well above whatever budget the browser is running on. */
@@ -164,7 +173,11 @@ export function mountEditor(root, {
 	if (styles) acquireStylesheet(base);
 
 	const state = { info: null, probe: null, cfa: 0, demosaic: 1, black: 0, white: 1023,
-		neutral: [1, 1, 1], gain: 1, fit: true, busy: false };
+		neutral: [1, 1, 1], gain: 1, fit: true, busy: false,
+		/* The file exactly as it arrived. Developing happens on a copy inside
+		 * the worker, so this is what Download must hand back -- re-encoding
+		 * what is on the canvas would save a preview, not the raw frame. */
+		bytes: null, name: null };
 
 	/* ---- chrome ---- */
 	const top = el('div', 're-top');
@@ -179,15 +192,58 @@ export function mountEditor(root, {
 		{ label: 'Diagnose', value: 'diagnose', disabled: true, title: 'Not in this version' },
 		{ label: 'Calibrate', value: 'calibrate', disabled: true, title: 'Not in this version' },
 	], 0, () => {}, { wide: false });
-	top.append(backBtn, nameEl, sensorChip, el('span', 're-rule'), modeSeg, el('span', 're-rule'));
+	// Not created at all without a provider, rather than created and hidden: a
+	// disabled-looking control that can never work is worse than none, and a
+	// host reading the DOM should find only what is really on offer.
+	const capBtn = capture ? el('button', 're-btn re-pri', ICON.shutter) : null;
+	if (capBtn) {
+		capBtn.dataset.act = 'capture';
+		capBtn.append(Object.assign(el('span'), { textContent: 'Capture' }));
+		capBtn.title = 'Take a raw frame from the camera';
+	}
+	const saveBtn = el('button', 're-btn', ICON.save);
+	saveBtn.dataset.act = 'save';
+	saveBtn.append(Object.assign(el('span'), { textContent: 'Download' }));
+	saveBtn.title = 'Save this frame as a .dng file';
+	saveBtn.disabled = true;
+	top.append(backBtn, nameEl, sensorChip, el('span', 're-rule'), modeSeg,
+		el('span', 're-rule'));
+	if (capBtn) top.append(capBtn);
+	top.append(saveBtn);
 	if (onExit) backBtn.addEventListener('click', onExit); else backBtn.hidden = true;
 
 	const stage = el('div', 're-stage re-fit');
 	const canvas = el('canvas');
 	canvas.hidden = true;
-	const drop = el('div', 're-drop',
-		'<div style="font-size:14px">Drop a .dng here</div>' +
-		'<div class="re-note">or open one from the camera</div>');
+	const drop = el('div', 're-drop');
+	/* Rebuilt rather than written once: a failure replaces the contents of the
+	 * drop zone, and what it replaces them with still has to offer the way
+	 * forward. */
+	function emptyState(message) {
+		const parts = [];
+		if (message) {
+			const box = el('div', 're-notice re-warn', ICON.warn);
+			box.style.maxWidth = '520px';
+			box.append(Object.assign(el('div'), { textContent: message }));
+			parts.push(box);
+		} else {
+			parts.push(Object.assign(el('div'), {
+				textContent: 'Drop a .dng here',
+				style: 'font-size:14px',
+			}));
+		}
+		if (capture) {
+			const b = el('button', 're-btn re-pri', ICON.shutter);
+			b.dataset.act = 'capture';
+			b.append(Object.assign(el('span'), { textContent: 'Capture a frame' }));
+			b.addEventListener('click', takeFrame);
+			parts.push(b);
+		} else if (!message) {
+			parts.push(Object.assign(el('div', 're-note'),
+				{ textContent: 'or open one from the camera' }));
+		}
+		drop.replaceChildren(...parts);
+	}
 	const busy = el('div', 're-busy', 'working');
 	busy.hidden = true;
 	const hud = el('div', 're-hud');
@@ -280,11 +336,50 @@ export function mountEditor(root, {
 	function fail(message) {
 		drop.hidden = false;
 		canvas.hidden = true;
-		const box = el('div', 're-notice re-warn', ICON.warn);
-		box.style.maxWidth = '520px';
-		box.append(Object.assign(el('div'), { textContent: message }));
-		drop.replaceChildren(box);
+		emptyState(message);
 	}
+
+	/* Ask the host for a frame. The editor knows nothing about where it comes
+	 * from -- a camera, a file picker, a fixture in a test -- only that it
+	 * takes a moment and can fail. */
+	async function takeFrame() {
+		if (!capture || state.busy) return;
+		state.busy = true;
+		if (capBtn) capBtn.disabled = true;
+		busy.textContent = 'capturing';
+		busy.hidden = false;
+		try {
+			const got = await capture();
+			await openBytes(got.bytes, got.name);
+		} catch (e) {
+			fail(e && e.message ? e.message : 'The frame could not be captured.');
+		} finally {
+			state.busy = false;
+			if (capBtn) capBtn.disabled = false;
+			busy.textContent = 'working';
+			busy.hidden = true;
+		}
+	}
+
+	/* The file as it arrived, not what is on the canvas: the canvas holds a
+	 * developed preview at whatever step the zoom asked for, and saving that
+	 * would hand back a JPEG-shaped thing wearing a .dng name. */
+	function saveFrame() {
+		if (!state.bytes) return;
+		const url = URL.createObjectURL(new Blob([state.bytes],
+			{ type: 'image/x-adobe-dng' }));
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = state.name || 'frame.dng';
+		a.click();
+		// Revoked on a timer: a download that has not begun by now never will,
+		// and revoking immediately races the browser in Firefox.
+		setTimeout(() => URL.revokeObjectURL(url), 10000);
+	}
+
+	capBtn?.addEventListener('click', takeFrame);
+	saveBtn.addEventListener('click', saveFrame);
+	emptyState();
 
 	/* ---- rendering ---- */
 	let queued = null, running = false;
@@ -442,6 +537,9 @@ export function mountEditor(root, {
 			// frame, and transferring would detach a buffer the caller still
 			// owns. A few MB costs a couple of milliseconds.
 			const exact = bytes.slice();
+			// A second copy, kept here: the one above is transferred into the
+			// worker and this side's view of it is detached the moment it goes.
+			const exactCopy = bytes.slice();
 			const r = await call('open', { bytes: exact.buffer }, [exact.buffer]);
 			state.info = r.info;
 			state.probe = r.probe;
@@ -449,6 +547,9 @@ export function mountEditor(root, {
 				cfa: r.info.cfa, black: r.info.black, white: r.info.white,
 				neutral: r.info.neutral.slice(), gain: 1,
 			});
+			state.bytes = exactCopy;
+			state.name = label;
+			saveBtn.disabled = false;
 			nameEl.textContent = label;
 			sensorChip.hidden = false;
 			// UniqueCameraModel comes out of the file, so anyone who can hand
