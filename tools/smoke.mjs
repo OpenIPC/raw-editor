@@ -187,10 +187,18 @@ console.log('\ncalibration recovers a matrix it was not given');
 	const patches = CHART_XYZ50.map((xyz) => apply3(PLANTED, xyz));
 	const got = solveFromPatches(patches);
 
-	let worst = 0;
-	for (let i = 0; i < 9; i++) worst = Math.max(worst, Math.abs(got.colorMatrix[i] - PLANTED[i]));
-	assert('ColorMatrix1 comes back as the one that was planted', worst < 1e-6,
-		'largest entry error ' + worst.toExponential(2));
+	// Recovered up to the scale the convention fixes, so the test is that it is
+	// one scalar multiple of what was planted -- every entry sharing a single
+	// ratio -- and that the scale it chose is the conventional one.
+	const ratios = PLANTED.map((v, i) => (Math.abs(v) > 1e-6 ? got.colorMatrix[i] / v : null))
+		.filter((v) => v !== null);
+	const spread = Math.max(...ratios) - Math.min(...ratios);
+	assert('ColorMatrix1 comes back as the one that was planted, to a scale',
+		spread < 1e-9, 'entry ratios spread by ' + spread.toExponential(2));
+	const wp = apply3(got.colorMatrix, [0.9642, 1.0, 0.8249]);
+	assert('and scaled the way every real one is: D50 white peaks at 1',
+		Math.abs(Math.max(...wp.map(Math.abs)) - 1) < 1e-9,
+		'peak ' + Math.max(...wp.map(Math.abs)).toFixed(6));
 
 	// The white balance is not fitted; it is read off the neutral row, so it is
 	// an independent check on the same data. Close but not equal on purpose:
