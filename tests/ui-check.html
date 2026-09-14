@@ -202,6 +202,34 @@ try {
 			after2 !== after1, `${after1} -> ${after2}`);
 		t('the same node is still the grip, not a replacement',
 			host.querySelector('.re-chart-grip[data-corner="0"]') === grip);
+		/* Two fingers, two corners. Window listeners hear every pointer, so a
+		 * gesture that does not check which one it is will have one finger
+		 * dragging both corners and the first lift ending both. */
+		{
+			const g0 = host.querySelector('.re-chart-grip[data-corner="0"]');
+			const g1 = host.querySelector('.re-chart-grip[data-corner="1"]');
+			const r0 = g0.getBoundingClientRect(), r1 = g1.getBoundingClientRect();
+			g0.dispatchEvent(new PointerEvent('pointerdown',
+				{ bubbles: true, pointerId: 11, clientX: r0.left + 9, clientY: r0.top + 9 }));
+			g1.dispatchEvent(new PointerEvent('pointerdown',
+				{ bubbles: true, pointerId: 12, clientX: r1.left + 9, clientY: r1.top + 9 }));
+			const was1 = g1.style.left;
+			const st = host.querySelector('.re-stage').getBoundingClientRect();
+			window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 11,
+				clientX: st.left + st.width * 0.2, clientY: st.top + st.height * 0.2 }));
+			t('one finger moves only its own corner', g1.style.left === was1,
+				`the other corner went ${was1} -> ${g1.style.left}`);
+			window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 11,
+				clientX: st.left + st.width * 0.2, clientY: st.top + st.height * 0.2 }));
+			const held1 = g1.style.left;
+			window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 12,
+				clientX: st.left + st.width * 0.8, clientY: st.top + st.height * 0.5 }));
+			t('and lifting it does not end the other drag', g1.style.left !== held1,
+				`${held1} -> ${g1.style.left}`);
+			window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 12,
+				clientX: st.left + st.width * 0.8, clientY: st.top + st.height * 0.5 }));
+		}
+
 		t('and it stops when the pointer goes up', (() => {
 			const held = grip.style.left;
 			window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 7,
@@ -210,6 +238,45 @@ try {
 		})());
 		host.querySelector('.re-btn').parentElement
 			&& [...host.querySelectorAll('.re-btn')].find((b) => b.textContent === 'Reset corners')?.click();
+	}
+
+	/* A new frame must take the old frame's chart with it. Leaving the corners
+	 * where the previous picture put them is worse than useless: they look
+	 * placed, and they are measuring the wrong thing. */
+	{
+		// Both fixtures are 256x256, so the DEFAULT corners land in the same
+		// place for either. Dragging one away first is what makes "reset" and
+		// "left alone" tell apart at all.
+		const grip = host.querySelector('.re-chart-grip[data-corner="0"]');
+		const atDefault = grip.style.left;
+		// Aimed at the MIDDLE of the canvas. The element is as wide as the stage
+		// while a square frame is letterboxed inside it by object-fit, so a
+		// point at 15% of the element is still in that margin -- outside the
+		// frame, where frameCoords rightly refuses it and nothing moves.
+		const cv = host.querySelector('.re-stage canvas').getBoundingClientRect();
+		const gr = grip.getBoundingClientRect();
+		const to = { clientX: cv.left + cv.width * 0.55, clientY: cv.top + cv.height * 0.25 };
+		grip.dispatchEvent(new PointerEvent('pointerdown',
+			{ bubbles: true, pointerId: 21, clientX: gr.left + 9, clientY: gr.top + 9 }));
+		window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 21, ...to }));
+		window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 21, ...to }));
+		const dragged = grip.style.left;
+		t('the corner really did move off its default first', dragged !== atDefault,
+			`default ${atDefault}, after drag ${dragged}`);
+
+		await ed.open(new Uint8Array(await (await fetch('./hostile-model.dng')).arrayBuffer()),
+			'hostile-model.dng');
+		await new Promise((r) => setTimeout(r, 400));
+		t('opening a frame in Calibrate keeps Calibrate', !host.querySelector('.re-chart').hidden &&
+			!!host.querySelector('[data-act="measure"]'));
+		t('and the corners go back to the default rather than staying where the old frame left them',
+			host.querySelector('.re-chart-grip[data-corner="0"]').style.left === atDefault,
+			`dragged to ${dragged}, now ${host.querySelector('.re-chart-grip[data-corner="0"]').style.left}, default ${atDefault}`);
+		t('with the previous result cleared rather than left to be applied',
+			!host.querySelector('[data-act="apply-to-camera"]'));
+		// Back to the frame the rest of this block measures.
+		await ed.open(new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer()), 'fixture.dng');
+		await new Promise((r) => setTimeout(r, 400));
 	}
 
 	host.querySelector('[data-act="measure"]').click();

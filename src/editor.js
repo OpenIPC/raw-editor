@@ -571,13 +571,19 @@ export function mountEditor(root, {
 			g.title = ['top left', 'top right', 'bottom right', 'bottom left'][i];
 			g.addEventListener('pointerdown', (ev) => {
 				ev.preventDefault();
+				// Listening on the window means hearing every pointer on it, so
+				// the gesture has to name its own: two fingers on two corners
+				// otherwise drive each other and the first one lifted ends both.
+				const id = ev.pointerId;
 				const move = (e) => {
+					if (e.pointerId !== id) return;
 					const at = frameCoords(e);
 					if (!at || !corners) return;
 					corners[i] = [at.x, at.y];
 					positionChart();
 				};
-				const up = () => {
+				const up = (e) => {
+					if (e.pointerId !== id) return;
 					window.removeEventListener('pointermove', move);
 					window.removeEventListener('pointerup', up);
 					window.removeEventListener('pointercancel', up);
@@ -815,7 +821,7 @@ export function mountEditor(root, {
 	function setMode(m) {
 		mode = m;
 		if (m === 'calibrate') {
-			if (!corners) corners = defaultCorners();
+			if (!corners) { corners = defaultCorners(); solved = null; }
 			chart.hidden = false;
 			buildCalibrate();
 		} else {
@@ -973,6 +979,7 @@ export function mountEditor(root, {
 			});
 			state.bytes = exactCopy;
 			state.name = label;
+			// The chart belonged to the frame that has just been replaced.
 			corners = null;
 			solved = null;
 			saveBtn.disabled = false;
@@ -988,7 +995,11 @@ export function mountEditor(root, {
 			metaEl.textContent = `${r.info.bits}-bit · ${r.info.cfaName}` +
 				(r.info.iso ? ` · ISO ${r.info.iso}` : '') +
 				(r.info.exposure ? ` · ${(r.info.exposure * 1000).toFixed(1)} ms` : '');
-			buildInspector();
+			// setMode rather than buildInspector: opening a frame while
+			// Calibrate is selected used to draw Develop's controls under
+			// Calibrate's heading and leave the old frame's corners floating
+			// over the new picture, inert.
+			setMode(mode);
 			await commit();
 		} catch (e) {
 			fail(e.message);
