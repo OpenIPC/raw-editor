@@ -168,9 +168,14 @@ export function mountEditor(root, {
 	 * file viewer -- gets no button that cannot work. */
 	capture,
 	/* How a solved matrix reaches the camera, and how it is taken back:
-	 * { apply({colorMatrix, ccm, neutral}), revert(), holdSeconds }. Without
-	 * one, Calibrate still measures and solves -- the numbers are useful on
-	 * their own -- and simply offers nothing to write them with. */
+	 * { apply({colorMatrix, ccm, neutral}), revert(), keep(), holdSeconds }.
+	 * Without one, Calibrate still measures and solves -- the numbers are
+	 * useful on their own -- and simply offers nothing to write them with.
+	 *
+	 * keep() is how the host learns the operator confirmed, and it is not
+	 * optional politeness: a host that arms anything to undo the change -- a
+	 * timer, an unload handler -- has no other way to know it must stand down,
+	 * and would take back a calibration that was deliberately kept. */
 	calibrate,
 	/* How long to wait for the module to arrive and answer. The camera's own
 	 * loader gives the CDN eight seconds; a test harness under a virtual clock
@@ -809,6 +814,9 @@ export function mountEditor(root, {
 			} else {
 				bar.classList.remove('re-warn');
 				text.textContent = 'Kept. The camera will use this after a restart too.';
+				// The host may be holding its own way back; this is the only
+				// signal that it should let go.
+				try { await calibrate.keep?.(); } catch (e) { /* kept either way */ }
 			}
 			send.disabled = false;
 		};

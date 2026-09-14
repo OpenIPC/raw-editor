@@ -163,6 +163,7 @@ try {
 			holdSeconds: 5,
 			apply: async (m) => { calls.push(['apply', m]); },
 			revert: async () => { calls.push(['revert']); },
+			keep: async () => { calls.push(['keep']); },
 		},
 	});
 	await ed.open(new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer()), 'fixture.dng');
@@ -317,7 +318,12 @@ try {
 	(await untilKeep()).click();
 	await new Promise((r) => setTimeout(r, 6500));
 	t('confirming stops the clock for good',
-		calls.length === 3 && calls[2][0] === 'apply', JSON.stringify(calls.map((c) => c[0])));
+		calls.filter((c) => c[0] === 'revert').length === 1,
+		JSON.stringify(calls.map((c) => c[0])));
+	// The host has to be TOLD it was confirmed, or anything it armed to undo
+	// the change -- a timer, an unload handler -- takes it back later anyway.
+	t('and the host is told it was confirmed, so it can stand down',
+		calls.some((c) => c[0] === 'keep'), JSON.stringify(calls.map((c) => c[0])));
 
 	// And closing the editor must not leave a timer that reverts a camera
 	// whose operator has gone.
@@ -325,8 +331,12 @@ try {
 	await untilKeep();
 	ed.destroy();
 	await new Promise((r) => setTimeout(r, 6500));
+	// Counting calls would break every time the contract gains one; what this
+	// means is that destroy() added no revert of its own.
 	t('closing the editor cancels the countdown rather than firing it',
-		calls.length === 4, JSON.stringify(calls.map((c) => c[0])));
+		calls.filter((c) => c[0] === 'revert').length === 1 &&
+		calls[calls.length - 1][0] === 'apply',
+		JSON.stringify(calls.map((c) => c[0])));
 	host.remove();
 } catch (e) {
 	t('calibrate works end to end', false, e.message);
