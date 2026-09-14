@@ -29,7 +29,22 @@ node tools/bench.mjs frame.dng
 `dist/` is committed and is exactly what jsDelivr serves, so a CDN URL and a
 local checkout are the same bytes. CI rebuilds and fails if they drift.
 
-To look at a frame: serve `dist/` and open `test.html`, then drop a `.dng` on it.
+To look at a frame: serve `dist/` and open `demo.html`, then drop a `.dng` on
+it. `test.html` beside it is the bare engine harness — no studio, just the
+decode and a canvas — which is the quicker thing to reach for when the question
+is about the engine rather than the interface.
+
+The studio is mounted by the host page, not by itself:
+
+```js
+import { mountEditor } from './editor.js';
+const editor = mountEditor(document.getElementById('root'), { base: './' });
+editor.open(bytes, 'frame.dng');
+```
+
+`base` is where the module's own files live, which is the CDN directory in
+production. The editor owns everything inside the root it is given: markup,
+styles and its worker.
 
 ## What the engine does, and what it does not
 
