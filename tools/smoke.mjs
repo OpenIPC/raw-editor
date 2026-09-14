@@ -132,6 +132,43 @@ const memAfter = engine.x.memory.buffer.byteLength;
 assert('300 develop+histogram cycles grow wasm memory by nothing',
 	memAfter === memBefore, `${memBefore} -> ${memAfter} bytes`);
 
+console.log('\npicking a neutral');
+// The promise of the picker is one thing: whatever you click on comes out
+// grey. That is testable without knowing what the subject was, and it is
+// exactly the invariant a wrong CFA offset or a canvas-instead-of-mosaic
+// sample would break.
+{
+	const at = { x: 128, y: 128 };
+	const got = engine.samplePatch(at.x, at.y, 6);
+	check('green is the scale, so it comes back as exactly 1', got.neutral[1], 1);
+	assert('red and blue are positive multiples of it',
+		got.neutral[0] > 0 && got.neutral[2] > 0, JSON.stringify(got.neutral));
+
+	const r = engine.develop({ demosaic: DEMOSAIC.bilinear, neutral: got.neutral });
+	let acc = [0, 0, 0], n = 0;
+	for (let y = at.y - 6; y <= at.y + 6; y++)
+		for (let x = at.x - 6; x <= at.x + 6; x++) {
+			const o = (y * r.width + x) * 4;
+			acc[0] += r.pixels[o]; acc[1] += r.pixels[o + 1]; acc[2] += r.pixels[o + 2]; n++;
+		}
+	const m = acc.map((v) => v / n);
+	assert('and the patch it was taken from renders grey',
+		Math.abs(m[0] - m[1]) < 6 && Math.abs(m[2] - m[1]) < 6,
+		`R ${m[0].toFixed(1)} G ${m[1].toFixed(1)} B ${m[2].toFixed(1)}`);
+
+	// The as-shot balance is what the camera chose, and the fixture's scene is
+	// strongly amber, so the two must not be the same answer -- if they were,
+	// the picker would be reading something it had already balanced.
+	assert('which is not simply the as-shot value read back',
+		Math.abs(got.neutral[0] - info.neutral[0]) > 0.01,
+		`picked ${got.neutral[0].toFixed(4)} vs as shot ${info.neutral[0].toFixed(4)}`);
+
+	let refused = '';
+	try { engine.samplePatch(-100, -100, 2); } catch (e) { refused = e.message; }
+	assert('a patch outside the frame is refused, not answered',
+		/outside the frame/.test(refused), refused || '(no error)');
+}
+
 console.log('\nhostile metadata stays data');
 const hostile = engine.open(readFileSync(new URL('../tests/hostile-model.dng', import.meta.url)));
 check('the model is carried through verbatim', hostile.model, '<img src=x onerror="window.__pwned=1">');

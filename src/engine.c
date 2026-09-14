@@ -376,6 +376,43 @@ EXPORT(develop) i32 develop(u8 *out, i32 cfa, i32 demosaic, i32 black, i32 white
     return ERR_OK;
 }
 
+/*
+ * The camera's own reading of one patch of the frame, per CFA plane.
+ *
+ * For setting the white balance off something known to be neutral. The three
+ * means are black-subtracted and returned as they came off the sensor: it is
+ * the caller's business to divide them into a neutral, because what counts as
+ * neutral is a judgement about the subject and not about the data.
+ *
+ * Samples the mosaic directly rather than the developed frame, which is the
+ * whole point -- the developed frame has already had a white balance applied
+ * and reading it back would measure that, not the scene.
+ */
+EXPORT(sample_patch) i32 sample_patch(i32 cx, i32 cy, i32 radius, i32 black,
+                                      i32 cfa, float *out3) {
+    const int w = F.width, h = F.height;
+    if (!F.raw || !out3) return ERR_SIZE;
+    if (radius < 1) radius = 1;
+
+    double sum[3] = {0.0, 0.0, 0.0};
+    u32 cnt[3] = {0, 0, 0};
+    for (int y = cy - radius; y <= cy + radius; y++) {
+        if (y < 0 || y >= h) continue;
+        for (int x = cx - radius; x <= cx + radius; x++) {
+            if (x < 0 || x >= w) continue;
+            int p = plane_at(cfa, x, y);
+            double v = (double)F.raw[y * w + x] - black;
+            sum[p] += v < 0.0 ? 0.0 : v;
+            cnt[p]++;
+        }
+    }
+    /* A box too small to hold all three planes says nothing; the caller gets a
+     * refusal rather than a mean over whatever happened to land in it. */
+    if (!cnt[0] || !cnt[1] || !cnt[2]) return ERR_SIZE;
+    for (int i = 0; i < 3; i++) out3[i] = (float)(sum[i] / cnt[i]);
+    return ERR_OK;
+}
+
 /* ---- histogram ------------------------------------------------------- */
 /* 3 x 256 bins over the developed RGBA, so what it shows is what is on
  * screen -- including the effect of every control above it. */
