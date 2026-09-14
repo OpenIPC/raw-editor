@@ -164,8 +164,25 @@ export function solveFromPatches(measured) {
 
 	/* ColorMatrix1 maps XYZ to the camera as it actually responded, so it is
 	 * fitted against the unbalanced measurement. */
-	const colorMatrix = leastSquares3(CHART_XYZ50, measured);
-	if (!colorMatrix) throw new Error('the patches do not determine a matrix — check the corners');
+	const fitted = leastSquares3(CHART_XYZ50, measured);
+	if (!fitted) throw new Error('the patches do not determine a matrix — check the corners');
+
+	/*
+	 * ColorMatrix is defined up to a scale, and the measurement arrives in
+	 * whatever units the sensor counts in -- raw code values, so a fit against
+	 * XYZ comes out around a thousand times too large and a DNG carrying it
+	 * would look absurd even though it is not wrong.
+	 *
+	 * The convention every real one follows is that the matrix applied to the
+	 * D50 white point gives a camera neutral whose largest component is one.
+	 * Checked against the gk7205v300's own ColorMatrix1, whose D50 response is
+	 * 0.3394 / 1.0593 / 1.0022 -- a maximum of 1.06, which is that convention
+	 * within rounding.
+	 */
+	const white = apply3(fitted, [0.9642, 1.0, 0.8249]);
+	const peak = Math.max(Math.abs(white[0]), Math.abs(white[1]), Math.abs(white[2]));
+	if (!(peak > 0)) throw new Error('the patches do not determine a matrix — check the corners');
+	const colorMatrix = fitted.map((v) => v / peak);
 
 	/* The live one starts from white-balanced camera values and lands in linear
 	 * sRGB, then has its rows normalised so a neutral survives it. */
@@ -178,8 +195,8 @@ export function solveFromPatches(measured) {
 	/* The fit, in the units a photographer argues in. Scaled so the chart's
 	 * white patch lands where the chart says it should, because a mean error
 	 * dominated by exposure says nothing about colour. */
-	const white = apply3(ccm, balanced[18]);
-	const k = white[1] > 0 ? apply3(XYZ50_TO_LINEAR_SRGB, CHART_XYZ50[18])[1] / white[1] : 1;
+	const shot = apply3(ccm, balanced[18]);
+	const k = shot[1] > 0 ? apply3(XYZ50_TO_LINEAR_SRGB, CHART_XYZ50[18])[1] / shot[1] : 1;
 	let sum = 0, worst = 0;
 	for (let i = 0; i < measured.length; i++) {
 		const got = apply3(ccm, balanced[i]).map((v) => v * k);
