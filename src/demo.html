@@ -1,10 +1,10 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>raw editor</title>
-<link rel="stylesheet" href="./editor.css">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&family=PT+Mono&display=swap">
 <style>body { margin: 0; background: #14161c; }</style>
 <div id="root"></div>
+<!-- No editor.css link: mountEditor loads its own stylesheet. -->
 <script type="module">
 import { mountEditor } from './editor.js';
 const editor = mountEditor(document.getElementById('root'), { base: './' });

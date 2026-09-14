@@ -1,0 +1,74 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>pending</title>
+<body style="margin:0">
+<div id="root"></div>
+<script type="module">
+import { mountEditor } from '../dist/editor.js';
+const results = [];
+const t = (name, ok, detail = '') => results.push({ name, ok, detail });
+
+const editor = mountEditor(document.getElementById('root'),
+	{ base: '../dist/' });
+try {
+	const bytes = new Uint8Array(await (await fetch('./hostile-model.dng')).arrayBuffer());
+	// A subarray on purpose: the editor must send the view, not its backing
+	// buffer, or the frame arrives with neighbouring bytes glued to it.
+	const padded = new Uint8Array(bytes.length + 64);
+	padded.set(bytes, 32);
+	await editor.open(padded.subarray(32, 32 + bytes.length), 'hostile-model.dng');
+
+	await new Promise((r) => setTimeout(r, 300));
+
+	t('no script ran from the file', window.__pwned === undefined,
+		'window.__pwned = ' + String(window.__pwned));
+	const chip = document.querySelector('.re-chip');
+	t('the model is shown as text', !!chip && chip.textContent.includes('<img src=x'),
+		chip ? JSON.stringify(chip.textContent) : 'no chip');
+	t('no element was created from it', !document.querySelector('#root img'));
+	t('the module loaded its own stylesheet',
+		!!document.querySelector('link[data-raw-editor]'));
+	t('the styles actually applied',
+		getComputedStyle(document.getElementById('root')).position === 'fixed');
+	t('a subarray opened correctly',
+		!!document.querySelector('.re-stage canvas:not([hidden])'));
+} catch (e) {
+	t('the editor opened the frame', false, e.message);
+}
+
+/* A module that never arrives must fail fast and say so, not leave the caller
+ * waiting for ever on a worker that will never answer. */
+try {
+	const broken = mountEditor(document.createElement('div'),
+		{ base: '../no-such-directory/', styles: false });
+	const began = performance.now();
+	let message = '';
+	try { await broken.open(new Uint8Array(8), 'x.dng'); }
+	catch (e) { message = e.message; }
+	const took = performance.now() - began;
+	t('a missing module fails rather than hangs', /http 404/.test(message), message || '(resolved!)');
+	t('and fails promptly', took < 10000, Math.round(took) + ' ms');
+	broken.destroy();
+} catch (e) {
+	t('the missing-module path is handled', false, e.message);
+}
+
+/* Closing mid-flight must settle whatever was in the air. */
+try {
+	const closing = mountEditor(document.createElement('div'), { base: '../dist/', styles: false });
+	const inFlight = closing.open(new Uint8Array(
+		await (await fetch('./fixture.dng')).arrayBuffer()), 'fixture.dng');
+	closing.destroy();
+	let message = '';
+	try { await inFlight; } catch (e) { message = e.message; }
+	t('closing the editor settles requests in flight', /closed/.test(message),
+		message || '(never settled)');
+} catch (e) {
+	t('the teardown path is handled', false, e.message);
+}
+// Reported over HTTP rather than through the title: the harness then runs on
+// a real clock. A virtual-time budget fires every timer as fast as it can,
+// which loses the race against the module's own fetches every time.
+await fetch('/__results', { method: 'POST', body: JSON.stringify(results) });
+document.title = 'done';
+</script>

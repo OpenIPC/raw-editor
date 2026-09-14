@@ -23,6 +23,7 @@ few KB:
 ```sh
 ./tools/build.sh          # needs clang with the wasm32 target, and wasm-ld
 node tools/smoke.mjs      # decodes tests/fixture.dng, checks it against truth
+node tools/ui-check.mjs   # drives the built editor in a real browser
 node tools/bench.mjs frame.dng
 ```
 

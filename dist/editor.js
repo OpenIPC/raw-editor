@@ -45,6 +45,30 @@ const ICON = {
 		'<path d="M12 4.6 21.2 19.4H2.8z"/><path d="M12 10.2v4"/><path d="M12 17.1h.01"/></svg>',
 };
 
+/*
+ * The module owns its stylesheet, not the host. One <link> is shared by every
+ * mount on the page and goes away with the last of them; a host that would
+ * rather bundle the CSS itself passes styles: false.
+ */
+let sheetEl = null, sheetRefs = 0;
+function acquireStylesheet(base) {
+	if (!sheetEl) {
+		sheetEl = document.createElement('link');
+		sheetEl.rel = 'stylesheet';
+		sheetEl.href = new URL('editor.css', new URL(base, location.href)).href;
+		sheetEl.dataset.rawEditor = '';
+		document.head.append(sheetEl);
+		sheetRefs = 0;
+	}
+	sheetRefs++;
+}
+function releaseStylesheet() {
+	if (--sheetRefs > 0) return;
+	sheetEl?.remove();
+	sheetEl = null;
+	sheetRefs = 0;
+}
+
 const el = (tag, cls, html) => {
 	const n = document.createElement(tag);
 	if (cls) n.className = cls;
@@ -128,9 +152,16 @@ function histogramSVG(h) {
 		path(h.b, '#3b6fd8') + path(h.g, '#2fb673') + path(h.r, '#d8503b') + '</svg>';
 }
 
-export function mountEditor(root, { base = './', onExit } = {}) {
+export function mountEditor(root, {
+	base = './', onExit, styles = true,
+	/* How long to wait for the module to arrive and answer. The camera's own
+	 * loader gives the CDN eight seconds; a test harness under a virtual clock
+	 * needs a number well above whatever budget the browser is running on. */
+	startupTimeoutMs = 15000,
+} = {}) {
 	root.classList.add('re-root');
 	root.innerHTML = '';
+	if (styles) acquireStylesheet(base);
 
 	const state = { info: null, probe: null, cfa: 0, demosaic: 1, black: 0, white: 1023,
 		neutral: [1, 1, 1], gain: 1, fit: true, busy: false };
@@ -173,28 +204,74 @@ export function mountEditor(root, { base = './', onExit } = {}) {
 	root.append(top, mid, foot);
 
 	/* ---- worker ---- */
-	let worker = null, seq = 0;
+	let worker = null, seq = 0, dead = null;
 	const pending = new Map();
+	// Startup is a promise nobody else holds, so abandonAll has to be able to
+	// settle it too — otherwise closing the editor while it is still starting
+	// leaves the opener waiting for the startup timeout instead of being told
+	// the editor was closed.
+	let abortStartup = null;
 
-	async function startWorker() {
+	/* Settle everything in flight. A worker that has died, or been terminated,
+	 * will never answer, and a request left in the map is a caller waiting for
+	 * ever. */
+	function abandonAll(reason) {
+		dead = dead || reason;
+		for (const p of pending.values()) p.reject(new Error(reason));
+		pending.clear();
+		abortStartup?.(new Error(reason));
+	}
+
+	function startWorker() {
 		// A Worker cannot be constructed from a cross-origin URL, so the source
 		// is fetched as text and run from a blob — and because a blob URL has no
 		// useful base, the real one is injected ahead of it.
-		const abs = new URL(base, location.href).href;
-		const src = await (await fetch(abs + 'worker.js')).text();
-		const blob = new Blob([`self.ENGINE_BASE=${JSON.stringify(abs)};\n${src}`],
-			{ type: 'text/javascript' });
-		worker = new Worker(URL.createObjectURL(blob), { type: 'module' });
-		worker.onmessage = (ev) => {
-			const m = ev.data;
-			if (m.type === 'fatal') return fail(m.message);
-			const p = pending.get(m.id);
-			if (!p) return;
-			pending.delete(m.id);
-			m.type === 'error' ? p.reject(new Error(m.message)) : p.resolve(m);
-		};
+		return new Promise((resolve, reject) => {
+			const give_up = setTimeout(
+				() => reject(new Error('the editor did not start within ' +
+					Math.round(startupTimeoutMs / 1000) + ' seconds')),
+				startupTimeoutMs);
+			const settle = (fn, arg) => { clearTimeout(give_up); abortStartup = null; fn(arg); };
+			abortStartup = (e) => settle(reject, e);
+
+			(async () => {
+				const abs = new URL(base, location.href).href;
+				const res = await fetch(abs + 'worker.js');
+				// An error page parses as neither a module nor an error, so
+				// without this the worker simply never answers.
+				if (!res.ok) throw new Error('worker.js: http ' + res.status);
+				const src = await res.text();
+				const blob = new Blob([`self.ENGINE_BASE=${JSON.stringify(abs)};\n${src}`],
+					{ type: 'text/javascript' });
+				worker = new Worker(URL.createObjectURL(blob), { type: 'module' });
+
+				worker.onmessage = (ev) => {
+					const m = ev.data;
+					if (m.type === 'ready') return settle(resolve);
+					if (m.type === 'fatal') {
+						abandonAll(m.message);
+						fail(m.message);
+						return settle(reject, new Error(m.message));
+					}
+					const p = pending.get(m.id);
+					if (!p) return;
+					pending.delete(m.id);
+					m.type === 'error' ? p.reject(new Error(m.message)) : p.resolve(m);
+				};
+				const died = (e) => {
+					const why = e?.message || 'the editor stopped unexpectedly';
+					abandonAll(why);
+					fail(why);
+					settle(reject, new Error(why));
+				};
+				worker.onerror = died;
+				worker.onmessageerror = () => died({ message: 'the editor sent something unreadable' });
+			})().catch((e) => settle(reject, e));
+		});
 	}
+
 	const call = (type, payload, transfer = []) => new Promise((resolve, reject) => {
+		if (dead) return reject(new Error(dead));
 		const id = ++seq;
 		pending.set(id, { resolve, reject });
 		worker.postMessage({ id, type, payload }, transfer);
@@ -202,8 +279,11 @@ export function mountEditor(root, { base = './', onExit } = {}) {
 
 	function fail(message) {
 		drop.hidden = false;
-		drop.innerHTML = `<div class="re-notice re-warn" style="max-width:520px">${ICON.warn}` +
-			`<div>${message}</div></div>`;
+		canvas.hidden = true;
+		const box = el('div', 're-notice re-warn', ICON.warn);
+		box.style.maxWidth = '520px';
+		box.append(Object.assign(el('div'), { textContent: message }));
+		drop.replaceChildren(box);
 	}
 
 	/* ---- rendering ---- */
@@ -357,7 +437,12 @@ export function mountEditor(root, { base = './', onExit } = {}) {
 	async function openBytes(bytes, label) {
 		try {
 			busy.hidden = false;
-			const r = await call('open', { bytes: bytes.buffer }, [bytes.buffer]);
+			// Copy rather than hand over bytes.buffer: a subarray or a pooled
+			// buffer would otherwise send the neighbouring bytes as part of the
+			// frame, and transferring would detach a buffer the caller still
+			// owns. A few MB costs a couple of milliseconds.
+			const exact = bytes.slice();
+			const r = await call('open', { bytes: exact.buffer }, [exact.buffer]);
 			state.info = r.info;
 			state.probe = r.probe;
 			Object.assign(state, {
@@ -366,8 +451,12 @@ export function mountEditor(root, { base = './', onExit } = {}) {
 			});
 			nameEl.textContent = label;
 			sensorChip.hidden = false;
-			sensorChip.innerHTML = '<span class="re-chip-k">sensor</span>' +
-				`<span class="re-mono">${r.info.model || 'unknown'}</span>`;
+			// UniqueCameraModel comes out of the file, so anyone who can hand
+			// over a DNG chooses these bytes. Built as nodes, never as markup.
+			sensorChip.replaceChildren(
+				Object.assign(el('span', 're-chip-k'), { textContent: 'sensor' }),
+				Object.assign(el('span', 're-mono'),
+					{ textContent: r.info.model || 'unknown' }));
 			dimEl.textContent = `${r.info.width} × ${r.info.height}`;
 			metaEl.textContent = `${r.info.bits}-bit · ${r.info.cfaName}` +
 				(r.info.iso ? ` · ISO ${r.info.iso}` : '') +
@@ -400,11 +489,29 @@ export function mountEditor(root, { base = './', onExit } = {}) {
 		stage.classList.remove('re-fit'); render(1);
 	});
 
-	const ready = startWorker().catch((e) => fail('The editor could not start: ' + e.message));
+	const ready = startWorker().catch((e) => {
+		abandonAll(e.message);
+		fail('The editor could not start: ' + e.message);
+		throw e;
+	});
+	// Nothing else is waiting on it, and an unhandled rejection is noise on top
+	// of a message the page is already showing.
+	ready.catch(() => {});
 
 	return {
 		root,
-		open: async (bytes, label) => { await ready; return openBytes(bytes, label); },
-		destroy() { worker?.terminate(); root.innerHTML = ''; root.classList.remove('re-root'); },
+		open: async (bytes, label) => {
+			if (dead) throw new Error(dead);
+			await ready;
+			return openBytes(bytes, label);
+		},
+		destroy() {
+			abandonAll('the editor was closed');
+			worker?.terminate();
+			worker = null;
+			if (styles) releaseStylesheet();
+			root.innerHTML = '';
+			root.classList.remove('re-root');
+		},
 	};
 }
