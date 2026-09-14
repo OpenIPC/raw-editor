@@ -35,6 +35,9 @@ onmessage = async (ev) => {
 			const info = engine.open(new Uint8Array(payload.bytes));
 			const probe = engine.probeCFA();
 			postMessage({ id, type: 'opened', info, probe });
+		} else if (type === 'sample') {
+			const got = engine.samplePatch(payload.x, payload.y, payload.radius, payload);
+			postMessage({ id, type: 'sampled', raw: got.raw, neutral: got.neutral });
 		} else if (type === 'develop') {
 			const out = engine.develop(payload);
 			// The RGBA lives in wasm memory, which cannot be transferred; copy

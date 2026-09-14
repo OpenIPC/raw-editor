@@ -67,7 +67,7 @@ export class Engine {
 	open(bytes) {
 		const x = this.x;
 		x.reset_alloc();
-		this.gammaPtr = this.fwdPtr = this.histPtr = 0;
+		this.gammaPtr = this.fwdPtr = this.histPtr = this.samplePtr = 0;
 
 		const p = x.alloc(bytes.length);
 		if (!p) throw new Error('out of memory holding the file');
@@ -137,6 +137,33 @@ export class Engine {
 		this.lastPixels = px;
 		return { pixels: new Uint8ClampedArray(x.memory.buffer, this.rgbaPtr, px * 4),
 			width: ow, height: oh };
+	}
+
+	/*
+	 * What the sensor read at one spot, per plane, black-subtracted.
+	 *
+	 * Returns the neutral that spot implies -- the three means scaled so green
+	 * is 1, which is exactly the form AsShotNeutral takes -- so a caller who
+	 * clicked something grey can hand it straight back as the white balance.
+	 */
+	samplePatch(cx, cy, radius = 6, opts = {}) {
+		const x = this.x, i = this.info;
+		const black = opts.black === undefined ? i.black : opts.black;
+		const cfa = opts.cfa === undefined ? i.cfa : opts.cfa;
+		if (!this.samplePtr) this.samplePtr = x.alloc(3 * 4);
+		const rc = x.sample_patch(Math.round(cx), Math.round(cy), Math.round(radius),
+			black, cfa, this.samplePtr);
+		// Not the generic size error: the only way this fails is a box that
+		// fell outside the frame or was too small to hold all three planes,
+		// and "implausible image dimensions" would send a reader looking at
+		// the file instead of at where they clicked.
+		if (rc !== 0) throw new Error('that spot is outside the frame');
+		const m = new Float32Array(x.memory.buffer, this.samplePtr, 3);
+		const [r, g, b] = [m[0], m[1], m[2]];
+		// A patch with no green has no scale to divide by, and one at the black
+		// point is noise: both are refused rather than answered with infinity.
+		if (!(g > 0)) throw new Error('that patch is too dark to read a colour from');
+		return { raw: [r, g, b], neutral: [r / g, 1, b / g] };
 	}
 
 	histogram() {

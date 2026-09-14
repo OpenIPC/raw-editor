@@ -62,6 +62,22 @@ because a button that cannot work is worse than no button. **Download** hands
 back the bytes exactly as they arrived — not the developed preview — and is
 offered as soon as a frame is open, whatever it was opened from.
 
+**Picking a neutral.** White balance starts at `AsShotNeutral` — the balance the
+camera chose — and the picker is how you overrule it: arm it in the White
+balance panel and click anything in the frame that ought to be grey. The sample
+is taken from the mosaic, not from the canvas, which is the whole point: the
+canvas has already been white-balanced, so reading it back would measure the
+balance in force rather than the scene. Resetting either slider goes back to as
+shot.
+
+This matters more on a camera than on a DSLR. `AsShotNeutral` is *defined* as
+what the camera's AWB settled on, so a DNG faithfully carries that AWB's
+mistakes: on a lab gk7205v300 under a 2272 K lamp the AWB over-corrected, and
+both the camera's own JPEG and this editor rendered the chart's grey row 20 to
+30 levels blue — the same error, because both are obeying the same white
+balance. Clicking one grey patch brought the row to within a couple of levels
+of neutral.
+
 ## What the engine does, and what it does not
 
 Handles uncompressed Bayer DNG at 8, 10, 12 and 14 bits, little-endian. It reads

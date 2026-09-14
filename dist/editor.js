@@ -47,6 +47,8 @@ const ICON = {
 		'<path d="M16.1 12.6H9.8"/><path d="M6.8 15.6 10 10"/>', 15),
 	save: svg('<path d="M10 3.4v8.4"/><path d="M6.6 8.6 10 12l3.4-3.4"/>' +
 		'<path d="M4 13.6v2.2h12v-2.2"/>', 15),
+	dropper: svg('<path d="M4 16h2.2l7-7"/><path d="M11.4 7.4 12.9 6l1.1 1.1 1.4-1.4' +
+		'a1.6 1.6 0 0 0-2.3-2.3l-1.4 1.4L10.6 3.7 9.2 5.1z"/>', 14),
 };
 
 /*
@@ -414,6 +416,70 @@ export function mountEditor(root, {
 	const preview = () => render(Math.max(stepForFit(), 2));
 	const commit = () => render(state.fit ? stepForFit() : 1);
 
+	/* ---- picking a neutral ---------------------------------------------
+	 *
+	 * The click is read off the mosaic, not off the canvas: the canvas holds a
+	 * frame that has already been white-balanced and demosaiced, so reading it
+	 * back would measure the balance currently applied rather than the scene.
+	 * That is why this goes to the engine with image coordinates instead of
+	 * sampling the pixels already on screen.
+	 */
+	let wbRows = null, wbNote = null, pickBtn = null, picking = false;
+
+	function armPicker(on) {
+		picking = on && !!state.info;
+		stage.classList.toggle('re-pick', picking);
+		pickBtn?.classList.toggle('re-pri', picking);
+		if (picking && wbNote)
+			wbNote.textContent = 'Click something in the picture that should be grey. ' +
+				'A card, a wall, a paper — anything neutral, and not so bright it has clipped.';
+	}
+
+	/* Where in the frame a click landed.
+	 *
+	 * One formula covers both zooms: object-fit: contain letterboxes the image
+	 * inside the element in Fit, and at 100% the element is exactly the image,
+	 * so the scale works out at 1 and the offsets at 0.
+	 */
+	function frameCoords(ev) {
+		const r = canvas.getBoundingClientRect();
+		if (!r.width || !r.height || !canvas.width || !canvas.height) return null;
+		const scale = Math.min(r.width / canvas.width, r.height / canvas.height);
+		const ox = (r.width - canvas.width * scale) / 2;
+		const oy = (r.height - canvas.height * scale) / 2;
+		const cx = (ev.clientX - r.left - ox) / scale;
+		const cy = (ev.clientY - r.top - oy) / scale;
+		if (cx < 0 || cy < 0 || cx >= canvas.width || cy >= canvas.height) return null;
+		// The canvas may be a stepped preview; the engine wants full-frame
+		// coordinates either way.
+		const step = Math.max(1, Math.round(state.info.width / canvas.width));
+		return { x: cx * step, y: cy * step };
+	}
+
+	async function pickAt(ev) {
+		const at = frameCoords(ev);
+		if (!at) return;
+		armPicker(false);
+		try {
+			// Six pixels covers at least one full CFA quad at any step, and
+			// averages away the sensor noise that a single site would carry.
+			const got = await call('sample', {
+				x: at.x, y: at.y, radius: 6, black: state.black, cfa: state.cfa,
+			});
+			state.neutral = got.neutral.slice();
+			if (wbRows) { wbRows[0].value = state.neutral[0]; wbRows[2].value = state.neutral[2]; }
+			if (wbNote)
+				wbNote.textContent = 'Set from the picture: red ' +
+					state.neutral[0].toFixed(3) + ', blue ' + state.neutral[2].toFixed(3) +
+					'. Reset either slider to go back to what the camera chose.';
+			await commit();
+		} catch (e) {
+			if (wbNote) wbNote.textContent = e.message;
+		}
+	}
+
+	stage.addEventListener('click', (ev) => { if (picking) pickAt(ev); });
+
 	/* ---- inspector ---- */
 	const histBox = el('div', 're-hist');
 	const histPanel = el('div', 're-panel');
@@ -475,12 +541,24 @@ export function mountEditor(root, {
 			fmt: (v) => (+v).toFixed(3),
 			onInput: (v) => { state.neutral[idx] = v; preview(); },
 			onCommit: (v) => { state.neutral[idx] = v; commit(); },
-		}).node;
-		wb.append(mk('Red', 0), mk('Blue', 2));
-		wb.append(Object.assign(el('p', 're-note'), {
-			textContent: 'As shot is the gain the camera’s own AWB had settled on.',
+		});
+		wbRows = [mk('Red', 0), null, mk('Blue', 2)];
+		wb.append(wbRows[0].node, wbRows[2].node);
+
+		const pick = el('button', 're-btn re-sm', ICON.dropper);
+		pick.dataset.act = 'pick-neutral';
+		pick.append(Object.assign(el('span'), { textContent: 'Pick a neutral' }));
+		pick.style.cssText = 'margin-top:8px';
+		pick.addEventListener('click', () => armPicker(!picking));
+		wb.append(pick);
+		pickBtn = pick;
+
+		wbNote = Object.assign(el('p', 're-note'), {
+			textContent: 'As shot is the gain the camera’s own AWB had settled on. ' +
+				'Pick a neutral to set it from something in the frame that should be grey.',
 			style: 'margin:7px 0 0',
-		}));
+		});
+		wb.append(wbNote);
 		insp.append(wb);
 
 		// TONE

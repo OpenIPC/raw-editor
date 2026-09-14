@@ -87,6 +87,39 @@ try {
 	t('the capture path works end to end', false, e.message);
 }
 
+/* The neutral picker, clicked the way a person clicks it: arm it from the
+ * panel, click the picture, and the white balance must move to what was under
+ * the pointer. */
+try {
+	const pick = document.querySelector('#root [data-act="pick-neutral"]');
+	t('the white balance panel offers a picker', !!pick);
+	const stage = document.querySelector('#root .re-stage');
+	const before = Array.from(document.querySelectorAll('#root .re-rnum')).map((n) => n.textContent);
+
+	pick.click();
+	t('arming it puts the stage in picking mode', stage.classList.contains('re-pick'));
+
+	const box = document.querySelector('#root .re-stage canvas').getBoundingClientRect();
+	stage.dispatchEvent(new MouseEvent('click', {
+		bubbles: true,
+		clientX: Math.round(box.left + box.width / 2),
+		clientY: Math.round(box.top + box.height / 2),
+	}));
+	for (let i = 0; i < 40 && stage.classList.contains('re-pick'); i++)
+		await new Promise((r) => setTimeout(r, 50));
+	t('clicking disarms it again', !stage.classList.contains('re-pick'));
+
+	await new Promise((r) => setTimeout(r, 600));
+	const after = Array.from(document.querySelectorAll('#root .re-rnum')).map((n) => n.textContent);
+	t('and the white balance moved to what was clicked',
+		JSON.stringify(before) !== JSON.stringify(after),
+		before.join(',') + ' -> ' + after.join(','));
+	t('the panel says what it was set from',
+		/Set from the picture/.test(document.querySelector('#root .re-insp').textContent));
+} catch (e) {
+	t('the neutral picker works', false, e.message);
+}
+
 /* A module that never arrives must fail fast and say so, not leave the caller
  * waiting for ever on a worker that will never answer. */
 try {

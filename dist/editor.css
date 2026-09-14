@@ -48,6 +48,10 @@
 .re-stage { flex: 1 1 auto; position: relative; display: flex; align-items: center;
 	justify-content: center; background: #0d0f14; min-width: 0; overflow: auto; }
 .re-stage canvas { display: block; image-rendering: auto; }
+/* Armed to pick a neutral. The crosshair goes on the stage rather than the
+ * canvas so the cursor does not change back in the letterbox margins, where a
+ * click is still meaningful -- it is simply out of frame and ignored. */
+.re-stage.re-pick, .re-stage.re-pick canvas { cursor: crosshair; }
 /* Fit scales in both directions: a 256px crop in a 1100px stage should fill
  * it, not sit in the middle at native size. */
 .re-stage.re-fit { padding: 14px; }
