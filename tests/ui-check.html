@@ -116,6 +116,25 @@ try {
 		before.join(',') + ' -> ' + after.join(','));
 	t('the panel says what it was set from',
 		/Set from the picture/.test(document.querySelector('#root .re-insp').textContent));
+
+	/* The click above landed on the exact centre of the canvas, whose frame
+	 * coordinate is the centre of the image whatever the zoom, the letterbox
+	 * or the preview step happen to be. So the engine can be asked the same
+	 * question independently, and the two answers must agree -- which is what
+	 * catches a mapping that is off by a scale factor or an offset, where
+	 * "the sliders moved" would not. */
+	const { instantiate } = await import('../dist/engine.js');
+	const probe = await instantiate(await (await fetch('../dist/engine.wasm')).arrayBuffer());
+	const pinfo = probe.open(new Uint8Array(await (await fetch('./hostile-model.dng')).arrayBuffer()));
+	const want = probe.samplePatch(Math.round(pinfo.width / 2), Math.round(pinfo.height / 2), 6);
+	const shown = Array.from(document.querySelectorAll('#root .re-rnum'))
+		.map((n) => parseFloat(n.textContent));
+	// Red and Blue are the third and fourth readouts: Black, White, Red, Blue,
+	// Exposure.
+	const gotRed = shown[2], gotBlue = shown[3];
+	t('the click mapped to the centre of the frame, not near it',
+		Math.abs(gotRed - want.neutral[0]) < 0.02 && Math.abs(gotBlue - want.neutral[2]) < 0.02,
+		`ui ${gotRed} / ${gotBlue}  vs engine ${want.neutral[0].toFixed(3)} / ${want.neutral[2].toFixed(3)}`);
 } catch (e) {
 	t('the neutral picker works', false, e.message);
 }
