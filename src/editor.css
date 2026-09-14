@@ -52,6 +52,20 @@
  * canvas so the cursor does not change back in the letterbox margins, where a
  * click is still meaningful -- it is simply out of frame and ignored. */
 .re-stage.re-pick, .re-stage.re-pick canvas { cursor: crosshair; }
+
+/* The chart overlay. Pointer events are off on the layer and back on for the
+ * grips alone, so dragging a corner works while the rest of the stage still
+ * scrolls and the picker still picks. */
+.re-chart { position: absolute; inset: 0; pointer-events: none; }
+.re-chart-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.re-chart-quad { fill: rgba(92,112,232,.10); stroke: #5c70e8; stroke-width: 1.5;
+	stroke-dasharray: 5 4; }
+.re-chart-cell { fill: none; stroke: rgba(255,255,255,.85); stroke-width: 1.2; }
+.re-chart-grip { position: absolute; width: 18px; height: 18px; margin: -9px 0 0 -9px;
+	border: 2px solid #fff; border-radius: 50%; background: #5c70e8;
+	box-shadow: 0 1px 4px rgba(0,0,0,.5); cursor: grab; pointer-events: auto;
+	touch-action: none; }
+.re-chart-grip:active { cursor: grabbing; }
 /* Fit scales in both directions: a 256px crop in a 1100px stage should fill
  * it, not sit in the middle at native size. */
 .re-stage.re-fit { padding: 14px; }

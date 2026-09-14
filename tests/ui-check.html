@@ -149,6 +149,88 @@ try {
 	t('the neutral picker works', false, e.message);
 }
 
+/* Calibrate: the corners, the solve, and the way back. The way back is the
+ * part that matters -- a matrix written to a camera persists, so the default
+ * has to be that it comes off again. */
+try {
+	const host = document.createElement('div');
+	document.body.append(host);
+	const calls = [];
+	const ed = mountEditor(host, {
+		base: '../dist/',
+		styles: false,
+		calibrate: {
+			holdSeconds: 5,
+			apply: async (m) => { calls.push(['apply', m]); },
+			revert: async () => { calls.push(['revert']); },
+		},
+	});
+	await ed.open(new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer()), 'fixture.dng');
+
+	const modes = [...host.querySelectorAll('.re-seg button')];
+	const calBtn = modes.find((b) => b.textContent === 'Calibrate');
+	t('Calibrate is a mode now, not a stub', !!calBtn && !calBtn.disabled);
+
+	calBtn.click();
+	await new Promise((r) => setTimeout(r, 300));
+	t('it puts a chart on the picture', !host.querySelector('.re-chart').hidden);
+	t('with four corners to drag', host.querySelectorAll('.re-chart-grip').length === 4);
+	t('and a dot per patch', host.querySelectorAll('.re-chart-cell').length === 24,
+		String(host.querySelectorAll('.re-chart-cell').length));
+
+	host.querySelector('[data-act="measure"]').click();
+	for (let i = 0; i < 100 && !host.querySelector('[data-act="apply-to-camera"]'); i++)
+		await new Promise((r) => setTimeout(r, 100));
+	const send = host.querySelector('[data-act="apply-to-camera"]');
+	t('measuring solves and offers to write it', !!send);
+
+	send.click();
+	for (let i = 0; i < 40 && !host.querySelector('[data-act="hold"]'); i++)
+		await new Promise((r) => setTimeout(r, 100));
+	t('applying asks the host exactly once',
+		calls.length === 1 && calls[0][0] === 'apply', JSON.stringify(calls.map((c) => c[0])));
+	t('and what it sends is two matrices and a white balance',
+		!!calls[0][1] && calls[0][1].ccm.length === 9 &&
+		calls[0][1].colorMatrix.length === 9 && calls[0][1].neutral.length === 3);
+	t('the countdown says it will be put back',
+		/putting it back in \d+s/i.test(host.querySelector('[data-act="hold"]').textContent),
+		host.querySelector('[data-act="hold"]')?.textContent.slice(0, 80));
+
+	// Left alone, it must revert. That is the whole safety property.
+	await new Promise((r) => setTimeout(r, 6500));
+	t('and left alone, it really does put it back',
+		calls.length === 2 && calls[1][0] === 'revert', JSON.stringify(calls.map((c) => c[0])));
+
+	// Confirming must stop the clock rather than merely hide it.
+	// Waiting on the button rather than on the call count: the count rises when
+	// apply() resolves, and the buttons are appended after that.
+	const untilKeep = async () => {
+		for (let i = 0; i < 60; i++) {
+			const k = host.querySelector('[data-act="keep"]');
+			if (k) return k;
+			await new Promise((r) => setTimeout(r, 100));
+		}
+		return null;
+	};
+	send.click();
+	(await untilKeep()).click();
+	await new Promise((r) => setTimeout(r, 6500));
+	t('confirming stops the clock for good',
+		calls.length === 3 && calls[2][0] === 'apply', JSON.stringify(calls.map((c) => c[0])));
+
+	// And closing the editor must not leave a timer that reverts a camera
+	// whose operator has gone.
+	send.click();
+	await untilKeep();
+	ed.destroy();
+	await new Promise((r) => setTimeout(r, 6500));
+	t('closing the editor cancels the countdown rather than firing it',
+		calls.length === 4, JSON.stringify(calls.map((c) => c[0])));
+	host.remove();
+} catch (e) {
+	t('calibrate works end to end', false, e.message);
+}
+
 /* A module that never arrives must fail fast and say so, not leave the caller
  * waiting for ever on a worker that will never answer. */
 try {

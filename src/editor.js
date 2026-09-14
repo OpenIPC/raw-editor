@@ -12,6 +12,8 @@
  * temperature/tint pair it has no model for yet.
  */
 
+import { solveFromPatches, patchCentres, CHART_COLS, CHART_ROWS } from './calibrate.js';
+
 const CFA_NAMES = ['RGGB', 'GRBG', 'GBRG', 'BGGR'];
 const DEMOSAIC = [
 	['None', 0, 'the mosaic as recorded'],
@@ -165,6 +167,11 @@ export function mountEditor(root, {
 	 * when it is given one, so a host with nothing to capture from -- a plain
 	 * file viewer -- gets no button that cannot work. */
 	capture,
+	/* How a solved matrix reaches the camera, and how it is taken back:
+	 * { apply({colorMatrix, ccm, neutral}), revert(), holdSeconds }. Without
+	 * one, Calibrate still measures and solves -- the numbers are useful on
+	 * their own -- and simply offers nothing to write them with. */
+	calibrate,
 	/* How long to wait for the module to arrive and answer. The camera's own
 	 * loader gives the CDN eight seconds; a test harness under a virtual clock
 	 * needs a number well above whatever budget the browser is running on. */
@@ -192,8 +199,8 @@ export function mountEditor(root, {
 	const modeSeg = segmented([
 		{ label: 'Develop', value: 'develop' },
 		{ label: 'Diagnose', value: 'diagnose', disabled: true, title: 'Not in this version' },
-		{ label: 'Calibrate', value: 'calibrate', disabled: true, title: 'Not in this version' },
-	], 0, () => {}, { wide: false });
+		{ label: 'Calibrate', value: 'calibrate' },
+	], 0, (v) => setMode(v), { wide: false });
 	// Not created at all without a provider, rather than created and hidden: a
 	// disabled-looking control that can never work is worse than none, and a
 	// host reading the DOM should find only what is really on offer.
@@ -400,8 +407,11 @@ export function mountEditor(root, {
 			canvas.hidden = false; drop.hidden = true; hud.hidden = false;
 			canvas.width = r.width; canvas.height = r.height;
 			canvas.getContext('2d').putImageData(new ImageData(r.pixels, r.width, r.height), 0, 0);
-			histBox.innerHTML = histogramSVG(r.hist);
+			if (mode !== 'calibrate') histBox.innerHTML = histogramSVG(r.hist);
 			zoomEl.textContent = state.fit ? 'Fit' : '100%';
+			// The canvas may have changed size, and the overlay is positioned
+			// against it.
+			drawChart();
 		} catch (e) {
 			fail(e.message);
 		} finally {
@@ -441,19 +451,42 @@ export function mountEditor(root, {
 	 * inside the element in Fit, and at 100% the element is exactly the image,
 	 * so the scale works out at 1 and the offsets at 0.
 	 */
-	function frameCoords(ev) {
+	/* The mapping between the screen and the frame, in one place, because the
+	 * picker reads it one way and the chart overlay draws through it the
+	 * other. */
+	function viewTransform() {
 		const r = canvas.getBoundingClientRect();
 		if (!r.width || !r.height || !canvas.width || !canvas.height) return null;
 		const scale = Math.min(r.width / canvas.width, r.height / canvas.height);
-		const ox = (r.width - canvas.width * scale) / 2;
-		const oy = (r.height - canvas.height * scale) / 2;
-		const cx = (ev.clientX - r.left - ox) / scale;
-		const cy = (ev.clientY - r.top - oy) / scale;
+		const step = Math.max(1, Math.round((state.info?.width || canvas.width) / canvas.width));
+		return {
+			rect: r, scale, step,
+			ox: (r.width - canvas.width * scale) / 2,
+			oy: (r.height - canvas.height * scale) / 2,
+		};
+	}
+
+	function frameCoords(ev) {
+		const t = viewTransform();
+		if (!t) return null;
+		const cx = (ev.clientX - t.rect.left - t.ox) / t.scale;
+		const cy = (ev.clientY - t.rect.top - t.oy) / t.scale;
 		if (cx < 0 || cy < 0 || cx >= canvas.width || cy >= canvas.height) return null;
 		// The canvas may be a stepped preview; the engine wants full-frame
 		// coordinates either way.
-		const step = Math.max(1, Math.round(state.info.width / canvas.width));
-		return { x: cx * step, y: cy * step };
+		return { x: cx * t.step, y: cy * t.step };
+	}
+
+	/* Frame coordinates back to where they sit inside the stage, so the overlay
+	 * lands on the picture rather than beside it. */
+	function stageCoords(x, y) {
+		const t = viewTransform();
+		if (!t) return null;
+		const s = stage.getBoundingClientRect();
+		return {
+			x: t.rect.left - s.left + t.ox + (x / t.step) * t.scale,
+			y: t.rect.top - s.top + t.oy + (y / t.step) * t.scale,
+		};
 	}
 
 	async function pickAt(ev) {
@@ -479,6 +512,286 @@ export function mountEditor(root, {
 	}
 
 	stage.addEventListener('click', (ev) => { if (picking) pickAt(ev); });
+
+	/* ---- calibrate -------------------------------------------------------
+	 *
+	 * Four corners dragged onto a colour chart, twenty-four patches read off
+	 * the mosaic through them, and two matrices solved from the result. The
+	 * solving lives in calibrate.js, which knows nothing about the DOM; this
+	 * part is the corners, the numbers on screen, and the way back.
+	 */
+	let mode = 'develop';
+	let corners = null;          /* in frame coordinates */
+	let solved = null;
+	const chart = el('div', 're-chart');
+	chart.hidden = true;
+	stage.append(chart);
+
+	function defaultCorners() {
+		const w = state.info?.width || 0, h = state.info?.height || 0;
+		// A quad over the middle third, which is where someone holding a chart
+		// up to a camera puts it.
+		return [[w * 0.3, h * 0.35], [w * 0.7, h * 0.35],
+			[w * 0.7, h * 0.72], [w * 0.3, h * 0.72]];
+	}
+
+	function drawChart() {
+		chart.replaceChildren();
+		if (mode !== 'calibrate' || !corners || !state.info) return;
+		const pts = corners.map(([x, y]) => stageCoords(x, y));
+		if (pts.some((p) => !p)) return;
+
+		const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+		svg.setAttribute('class', 're-chart-svg');
+		const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+		poly.setAttribute('points', pts.map((p) => `${p.x},${p.y}`).join(' '));
+		poly.setAttribute('class', 're-chart-quad');
+		svg.append(poly);
+		// The cells, so it is obvious before measuring whether the grid has
+		// actually landed on the patches.
+		let cells;
+		try { cells = patchCentres(corners); } catch { cells = []; }
+		for (const c of cells) {
+			const at = stageCoords(c.x, c.y);
+			if (!at) continue;
+			const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+			const t = viewTransform();
+			dot.setAttribute('cx', at.x);
+			dot.setAttribute('cy', at.y);
+			dot.setAttribute('r', Math.max(2, (c.radius / (t?.step || 1)) * (t?.scale || 1)));
+			dot.setAttribute('class', 're-chart-cell');
+			svg.append(dot);
+		}
+		chart.append(svg);
+
+		pts.forEach((p, i) => {
+			const h = el('div', 're-chart-grip');
+			h.style.left = p.x + 'px';
+			h.style.top = p.y + 'px';
+			h.title = ['top left', 'top right', 'bottom right', 'bottom left'][i];
+			h.addEventListener('pointerdown', (ev) => {
+				ev.preventDefault();
+				h.setPointerCapture(ev.pointerId);
+				const move = (e) => {
+					const at = frameCoords(e);
+					if (!at) return;
+					corners[i] = [at.x, at.y];
+					drawChart();
+				};
+				const up = () => {
+					h.removeEventListener('pointermove', move);
+					h.removeEventListener('pointerup', up);
+				};
+				h.addEventListener('pointermove', move);
+				h.addEventListener('pointerup', up);
+			});
+			chart.append(h);
+		});
+	}
+
+	async function measureChart() {
+		if (!corners) return;
+		const cells = patchCentres(corners);
+		const patches = [];
+		for (const c of cells) {
+			const got = await call('sample', {
+				x: c.x, y: c.y, radius: Math.max(4, Math.round(c.radius)),
+				black: state.black, cfa: state.cfa,
+			});
+			patches.push(got.raw);
+		}
+		return solveFromPatches(patches);
+	}
+
+	/* The panel, and the way back.
+	 *
+	 * Writing a colour matrix to a camera is not like changing a setting in a
+	 * file: it persists, and a bad one makes the picture unwatchable, so the
+	 * camera comes back from a reboot still wrong. This is the display-
+	 * resolution bargain -- apply it, start a clock, and put it back unless
+	 * someone says they can still see. The host does the applying and the
+	 * reverting; the clock and the question live here, where the picture is.
+	 */
+	let holdTimer = null, holdTick = null;
+
+	function stopHold() {
+		if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+		if (holdTick) { clearInterval(holdTick); holdTick = null; }
+	}
+
+	function buildCalibrate() {
+		insp.replaceChildren();
+		const panel = el('div', 're-panel');
+		panel.append(Object.assign(el('div', 're-shead'), {
+			innerHTML: '<h3 class="re-cap">Colour chart</h3><span class="re-rule"></span>',
+		}));
+		panel.append(Object.assign(el('p', 're-note'), {
+			textContent: 'Drag the four corners onto the corners of the chart — the dark ' +
+				'skin patch at the top left, the black patch at the bottom right. The dots ' +
+				'show where each patch will be read from.',
+		}));
+		const row = el('div');
+		row.style.cssText = 'display:flex;gap:8px;margin-top:9px';
+		const measure = el('button', 're-btn re-pri', '');
+		measure.dataset.act = 'measure';
+		measure.textContent = 'Measure the chart';
+		const reset = el('button', 're-btn', '');
+		reset.textContent = 'Reset corners';
+		reset.addEventListener('click', () => { corners = defaultCorners(); drawChart(); });
+		row.append(measure, reset);
+		panel.append(row);
+		insp.append(panel);
+
+		const out = el('div', 're-panel');
+		out.hidden = true;
+		insp.append(out);
+
+		measure.addEventListener('click', async () => {
+			measure.disabled = true;
+			measure.textContent = 'Measuring…';
+			try {
+				solved = await measureChart();
+				renderSolved(out);
+			} catch (e) {
+				out.hidden = false;
+				out.replaceChildren(Object.assign(el('div', 're-notice re-warn', ICON.warn), {}));
+				out.firstChild.append(Object.assign(el('div'), { textContent: e.message }));
+			} finally {
+				measure.disabled = false;
+				measure.textContent = 'Measure the chart';
+			}
+		});
+	}
+
+	function matrixTable(m) {
+		const t = el('div', 're-mono');
+		t.style.cssText = 'font-size:11px;line-height:1.6;margin-top:5px;color:#b6b9c2';
+		for (let r = 0; r < 3; r++)
+			t.append(Object.assign(el('div'), {
+				textContent: [0, 1, 2].map((c) => m[r * 3 + c].toFixed(4).padStart(8)).join(' '),
+			}));
+		return t;
+	}
+
+	function renderSolved(out) {
+		out.hidden = false;
+		out.replaceChildren();
+		out.append(Object.assign(el('div', 're-shead'), {
+			innerHTML: '<h3 class="re-cap">Result</h3><span class="re-rule"></span>',
+		}));
+		const fit = el('p', 're-note');
+		fit.style.margin = '0 0 6px';
+		fit.textContent = `Mean ΔE ${solved.fit.meanDeltaE.toFixed(1)}, worst ` +
+			`${solved.fit.maxDeltaE.toFixed(1)}. Under 3 is a good fit for a 3×3; ` +
+			'a spiky light — most LEDs — will not do better, whatever the chart.';
+		out.append(fit);
+
+		out.append(Object.assign(el('h3', 're-cap'), { textContent: 'Live matrix, camera to display' }));
+		out.append(matrixTable(solved.ccm));
+		out.append(Object.assign(el('h3', 're-cap'), { textContent: 'ColorMatrix1, XYZ to camera' }));
+		out.append(matrixTable(solved.colorMatrix));
+
+		const acts = el('div');
+		acts.style.cssText = 'display:flex;gap:8px;margin-top:10px;flex-wrap:wrap';
+		const useHere = el('button', 're-btn', '');
+		useHere.textContent = 'Use its white balance here';
+		useHere.addEventListener('click', () => {
+			state.neutral = solved.neutral.slice();
+			setMode('develop');
+			commit();
+		});
+		acts.append(useHere);
+
+		if (calibrate && calibrate.apply) {
+			const send = el('button', 're-btn re-pri', '');
+			send.dataset.act = 'apply-to-camera';
+			send.textContent = 'Apply to the camera';
+			send.addEventListener('click', () => applyToCamera(out, send));
+			acts.append(send);
+		}
+		out.append(acts);
+	}
+
+	async function applyToCamera(out, send) {
+		const hold = Math.max(5, calibrate.holdSeconds || 30);
+		send.disabled = true;
+		try {
+			await calibrate.apply({
+				colorMatrix: solved.colorMatrix.slice(),
+				ccm: solved.ccm.slice(),
+				neutral: solved.neutral.slice(),
+			});
+		} catch (e) {
+			send.disabled = false;
+			const box = el('div', 're-notice re-warn', ICON.warn);
+			box.append(Object.assign(el('div'), { textContent: e.message }));
+			out.append(box);
+			return;
+		}
+
+		/* From here the camera is carrying the new matrix and something must
+		 * take it back. The countdown is the default; confirming is the
+		 * exception, which is the right way round for a change that can make
+		 * the picture unwatchable. */
+		const bar = el('div', 're-notice re-warn', ICON.warn);
+		bar.dataset.act = 'hold';
+		const text = el('div');
+		bar.append(text);
+		out.append(bar);
+		let left = hold;
+		const paint = () => {
+			text.textContent = `Applied to the camera. Putting it back in ${left}s ` +
+				'unless you confirm the picture still looks right.';
+		};
+		paint();
+
+		const keep = el('button', 're-btn re-pri re-sm', '');
+		keep.dataset.act = 'keep';
+		keep.textContent = 'Keep it';
+		const back = el('button', 're-btn re-sm', '');
+		back.dataset.act = 'revert';
+		back.textContent = 'Put it back';
+		const acts = el('div');
+		acts.style.cssText = 'display:flex;gap:8px;margin-top:8px';
+		acts.append(keep, back);
+		bar.append(acts);
+
+		const finish = async (revert) => {
+			stopHold();
+			acts.remove();
+			if (revert) {
+				text.textContent = 'Putting it back…';
+				try {
+					await calibrate.revert();
+					text.textContent = 'Put back. The camera is on what it had before.';
+				} catch (e) {
+					text.textContent = 'Could not put it back: ' + e.message;
+				}
+			} else {
+				bar.classList.remove('re-warn');
+				text.textContent = 'Kept. The camera will use this after a restart too.';
+			}
+			send.disabled = false;
+		};
+		keep.addEventListener('click', () => finish(false));
+		back.addEventListener('click', () => finish(true));
+		holdTick = setInterval(() => { left--; if (left > 0) paint(); }, 1000);
+		holdTimer = setTimeout(() => finish(true), hold * 1000);
+	}
+
+	function setMode(m) {
+		mode = m;
+		if (m === 'calibrate') {
+			if (!corners) corners = defaultCorners();
+			chart.hidden = false;
+			buildCalibrate();
+		} else {
+			chart.hidden = true;
+			stopHold();
+			if (state.info) buildInspector();
+		}
+		drawChart();
+	}
 
 	/* ---- inspector ---- */
 	const histBox = el('div', 're-hist');
@@ -627,6 +940,8 @@ export function mountEditor(root, {
 			});
 			state.bytes = exactCopy;
 			state.name = label;
+			corners = null;
+			solved = null;
 			saveBtn.disabled = false;
 			nameEl.textContent = label;
 			sensorChip.hidden = false;
@@ -685,6 +1000,9 @@ export function mountEditor(root, {
 			return openBytes(bytes, label);
 		},
 		destroy() {
+			// A countdown that outlived its editor would revert a camera whose
+			// operator had closed the page and moved on.
+			stopHold();
 			abandonAll('the editor was closed');
 			worker?.terminate();
 			worker = null;
