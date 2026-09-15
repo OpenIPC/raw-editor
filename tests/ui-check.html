@@ -467,19 +467,57 @@ try {
 	const url = '/__chart.dng?corners=' + encodeURIComponent(JSON.stringify(TRUTH));
 	await ed.open(new Uint8Array(await (await fetch(url)).arrayBuffer()), 'chart.dng');
 
+	// The default corners, taken before Calibrate is opened, so the automatic
+	// look below has something to have moved them FROM.
 	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Calibrate').click();
-	await new Promise((r) => setTimeout(r, 300));
-
-	const find = [...host.querySelectorAll('.re-btn')].find((b) => b.textContent === 'Find it for me');
-	t('Calibrate offers to find the chart', !!find);
-
+	const find = host.querySelector('[data-act="find-chart"]');
+	t('Calibrate offers to look for the chart', !!find);
+	// Synchronously after the switch: the look is already under way, which is
+	// what says it was not waiting to be asked.
+	t('and starts looking without being asked', find.disabled && find.textContent === 'Looking…',
+		`button reads "${find.textContent}", ${find.disabled ? 'disabled' : 'enabled'}`);
 	const before = [...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left);
-	find.click();
+
 	for (let i = 0; i < 100 && find.disabled; i++) await new Promise((r) => setTimeout(r, 100));
 	const after = [...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left);
-	t('pressing it moves the corners off their default', before.join() !== after.join(),
+	t('and moves the corners off their default on its own', before.join() !== after.join(),
 		`${before.join(' ')} -> ${after.join(' ')}`);
-	t('and it is usable again afterwards', !find.disabled && find.textContent === 'Find it for me');
+	t('and it is usable again afterwards', !find.disabled && find.textContent === 'Look again');
+
+	// Pressing it again must still work -- it is the way back from a near miss
+	// the operator has since dragged about.
+	{
+		const grip = host.querySelector('.re-chart-grip[data-corner="0"]');
+		// Inside the canvas: a point in the letterbox margin is out of frame,
+		// where frameCoords rightly refuses it and nothing moves.
+		const cvr = host.querySelector('.re-stage canvas').getBoundingClientRect();
+		const moved = { clientX: cvr.left + cvr.width * 0.3, clientY: cvr.top + cvr.height * 0.3 };
+		const r0 = grip.getBoundingClientRect();
+		grip.dispatchEvent(new PointerEvent('pointerdown',
+			{ bubbles: true, pointerId: 41, clientX: r0.left + 9, clientY: r0.top + 9 }));
+		window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 41, ...moved }));
+		window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 41, ...moved }));
+		const dragged = grip.style.left;
+		find.click();
+		for (let i = 0; i < 100 && find.disabled; i++) await new Promise((r) => setTimeout(r, 100));
+		t('pressing it again puts a dragged corner back on the chart',
+			grip.style.left !== dragged, `${dragged} -> ${grip.style.left}`);
+	}
+
+	// Leaving and coming back must NOT search again: by then the corners may
+	// be where a person put them.
+	{
+		const placed = [...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left);
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+		await new Promise((r) => setTimeout(r, 200));
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Calibrate').click();
+		const again = host.querySelector('[data-act="find-chart"]');
+		t('coming back to Calibrate does not search over corners already placed',
+			!!again && !again.disabled, again ? `button reads "${again.textContent}"` : '(no button)');
+		await new Promise((r) => setTimeout(r, 300));
+		t('and leaves them where they were',
+			[...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left).join() === placed.join());
+	}
 
 	/*
 	 * Where they landed.
@@ -528,15 +566,19 @@ try {
 	// And on a frame with no chart in it, it has to say so rather than leave
 	// a lattice fitted to the furniture sitting there looking placed.
 	await ed.open(new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer()), 'fixture.dng');
-	await new Promise((r) => setTimeout(r, 400));
-	const find2 = [...host.querySelectorAll('.re-btn')].find((b) => b.textContent === 'Find it for me');
+	const find2 = host.querySelector('[data-act="find-chart"]');
 	const plain = [...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left);
-	find2.click();
 	for (let i = 0; i < 100 && find2.disabled; i++) await new Promise((r) => setTimeout(r, 100));
-	t('a frame with no chart is told so', /no chart found/i.test(host.textContent),
-		host.querySelector('.re-notice')?.textContent.slice(0, 60) || '(said nothing)');
-	t('and its corners are left where they were',
+	await new Promise((r) => setTimeout(r, 200));
+	t('a frame with no chart is told so, without being asked',
+		/no chart found/i.test(host.textContent),
+		host.querySelector('.re-notice')?.textContent.slice(0, 80) || '(said nothing)');
+	// The fallback IS the manual path, so the message has to send them to it.
+	t('and is sent to place the corners by hand', /by hand/i.test(host.textContent),
+		host.querySelector('.re-notice')?.textContent.slice(0, 80) || '(said nothing)');
+	t('and its corners are left at the default, ready to drag',
 		[...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left).join() === plain.join());
+	t('with the button still there to try again', !!find2 && !find2.disabled);
 	host.remove();
 } catch (e) {
 	t('finding the chart works end to end', false, e.message);

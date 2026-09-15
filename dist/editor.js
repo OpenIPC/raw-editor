@@ -834,6 +834,10 @@ export function mountEditor(root, {
 	 */
 	let mode = 'develop';
 	let corners = null;          /* in frame coordinates */
+	/* Whether this frame has been looked at yet. Per frame, so flipping back
+	 * to Calibrate does not search again over corners someone has since
+	 * dragged, and a new frame gets its own look. */
+	let chartTried = false;
 	let solved = null;
 	const chart = el('div', 're-chart');
 	chart.hidden = true;
@@ -977,10 +981,10 @@ export function mountEditor(root, {
 			innerHTML: '<h3 class="re-cap">Colour chart</h3><span class="re-rule"></span>',
 		}));
 		panel.append(Object.assign(el('p', 're-note'), {
-			textContent: 'Put the four corners on the corners of the chart — the dark ' +
-				'skin patch at the top left, the black patch at the bottom right. Drag ' +
-				'them there, or let the editor look. The dots show where each patch will ' +
-				'be read from.',
+			textContent: 'The chart is looked for as soon as this opens. Drag any corner ' +
+				'that sits off it — the dark skin patch belongs at the top left, the black ' +
+				'patch at the bottom right — and the dots show where each patch will be ' +
+				'read from.',
 		}));
 		const out = el('div', 're-panel');
 		out.hidden = true;
@@ -991,7 +995,10 @@ export function mountEditor(root, {
 		measure.dataset.act = 'measure';
 		measure.textContent = 'Measure the chart';
 		const find = el('button', 're-btn', '');
-		find.textContent = 'Find it for me';
+		// A handle that does not move: the label is 'Looking…' for as long as
+		// it is looking, which is from the moment Calibrate opens.
+		find.dataset.act = 'find-chart';
+		find.textContent = 'Look again';
 		const reset = el('button', 're-btn', '');
 		reset.textContent = 'Reset corners';
 		reset.addEventListener('click', () => { corners = defaultCorners(); drawChart(); });
@@ -1006,22 +1013,29 @@ export function mountEditor(root, {
 		 * It only ever offers an answer: whatever it finds lands on the same
 		 * four grips, which stay draggable, so a near miss is a starting point
 		 * rather than something to undo. When it finds nothing it says so and
-		 * changes nothing -- the corners already on screen are better than a
-		 * guess fitted to the furniture.
+		 * changes nothing -- the default corners already on screen are better
+		 * than a guess fitted to the furniture, and dragging them is the way
+		 * through.
+		 *
+		 * Run on its own when Calibrate is first opened on a frame, and by the
+		 * button after that -- which is why the button says "Look again"
+		 * rather than offering to look in the first place.
 		 */
-		find.addEventListener('click', async () => {
+		const say = (cls, text) => {
+			out.hidden = false;
+			out.replaceChildren(Object.assign(el('div', 're-notice ' + cls, ICON.warn), {}));
+			out.firstChild.append(Object.assign(el('div'), { textContent: text }));
+		};
+		async function runFind() {
+			if (find.disabled) return;
 			find.disabled = true;
 			find.textContent = 'Looking…';
-			const say = (cls, text) => {
-				out.hidden = false;
-				out.replaceChildren(Object.assign(el('div', 're-notice ' + cls, ICON.warn), {}));
-				out.firstChild.append(Object.assign(el('div'), { textContent: text }));
-			};
 			try {
 				const got = await call('detect', { cfa: state.cfa });
 				if (!got.chart) {
-					say('re-warn', 'No chart found in this frame. Drag the corners on by ' +
-						'hand, or take another shot with the chart flatter on and better lit.');
+					say('re-warn', 'No chart found in this frame — drag the four corners ' +
+						'onto it by hand. If there is one and it was missed, capture again ' +
+						'with the chart flatter on or better lit, then Look again.');
 				} else {
 					corners = got.chart.corners;
 					solved = null;
@@ -1039,9 +1053,17 @@ export function mountEditor(root, {
 				say('re-warn', e.message);
 			} finally {
 				find.disabled = false;
-				find.textContent = 'Find it for me';
+				find.textContent = 'Look again';
 			}
-		});
+		}
+		find.addEventListener('click', () => runFind());
+
+		// The first look at a frame, taken without being asked. Only once per
+		// frame: after that the corners may be somewhere a person put them.
+		if (state.info && !chartTried) {
+			chartTried = true;
+			runFind();
+		}
 
 		measure.addEventListener('click', async () => {
 			measure.disabled = true;
@@ -1365,6 +1387,7 @@ export function mountEditor(root, {
 			// The chart and the scan both belonged to the frame that has just
 			// been replaced.
 			corners = null;
+			chartTried = false;
 			solved = null;
 			diag = null;
 			saveBtn.disabled = false;
