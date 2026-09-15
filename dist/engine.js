@@ -19,7 +19,7 @@ const ERRORS = {
 };
 
 export const CFA_NAMES = ['RGGB', 'GRBG', 'GBRG', 'BGGR'];
-export const DEMOSAIC = { none: 0, bilinear: 1, gradient: 2 };
+export const DEMOSAIC = { none: 0, bilinear: 1, gradient: 2, rcd: 3 };
 
 /* sRGB's own transfer function, not a 2.2 power — the toe matters in the
  * shadows, which is exactly where a raw frame is judged. */

@@ -29,13 +29,23 @@ void *memset(void *d, int c, unsigned long n) {
 }
 
 /* ---- allocator ------------------------------------------------------- */
+static float *g_green;
+static i32 g_green_cfa;
+
 /* A bump allocator and no free(): every buffer here lives as long as the
  * frame does, and a frame is replaced wholesale. reset_alloc() is what
  * "close the file" means. */
 extern u8 __heap_base;
 static u32 brk = 0;
 
-EXPORT(reset_alloc) void reset_alloc(void) { brk = 0; }
+EXPORT(reset_alloc) void reset_alloc(void) {
+    brk = 0;
+    /* Everything the allocator handed out belonged to the frame being
+     * replaced, the cached green plane included. Keeping the pointer would
+     * hand the next frame the previous one's greens. */
+    g_green = 0;
+    g_green_cfa = -1;
+}
 
 EXPORT(alloc) void *alloc(u32 n) {
     if (brk == 0) brk = (u32)&__heap_base;
@@ -53,7 +63,7 @@ EXPORT(alloc) void *alloc(u32 n) {
 /* ---- DNG / TIFF ------------------------------------------------------ */
 
 enum { CFA_RGGB = 0, CFA_GRBG = 1, CFA_GBRG = 2, CFA_BGGR = 3 };
-enum { DEMOSAIC_NONE = 0, DEMOSAIC_BILINEAR = 1, DEMOSAIC_GRADIENT = 2 };
+enum { DEMOSAIC_NONE = 0, DEMOSAIC_BILINEAR = 1, DEMOSAIC_GRADIENT = 2, DEMOSAIC_RCD = 3 };
 
 enum {
     ERR_OK = 0, ERR_MAGIC = -1, ERR_TRUNCATED = -2, ERR_NO_STRIP = -3,
@@ -375,6 +385,126 @@ static void malvar_at(int cfa, int x, int y, int w, int h, float *out) {
     }
 }
 
+/* ---- RCD -------------------------------------------------------------
+ *
+ * Ratio-corrected demosaicing, after the method Luis Sanz Rodriguez
+ * published: decide at every red and blue site whether the detail there runs
+ * across or down, interpolate green along whichever it is, and correct that
+ * interpolation by the RATIO between the site and its own colour's low pass
+ * rather than by adding a difference. Then carry red and blue as colour
+ * DIFFERENCES against the finished green, which is where most of the colour
+ * on edges comes from in the first place.
+ *
+ * Written from the method, not ported: RawTherapee's implementation is GPLv3
+ * and this tree is not, so its code could not be used here even though it is
+ * the reference everyone means by "RCD".
+ *
+ * Unlike bilinear and the gradient filter, this cannot be done one output
+ * pixel at a time -- the chroma step needs green everywhere first -- so the
+ * green plane is built once per frame and kept.
+ */
+static inline int fold_same_plane(int v, int n);
+static inline float clampf(float v, float lo, float hi);
+
+static inline float rawf(int x, int y, int w, int h) {
+    return (float)F.raw[fold_same_plane(y, h) * w + fold_same_plane(x, w)];
+}
+
+static inline float gp(int x, int y, int w, int h) {
+    return g_green[fold_same_plane(y, h) * w + fold_same_plane(x, w)];
+}
+
+static void rcd_build_green(i32 cfa) {
+    const int w = F.width, h = F.height;
+    if (g_green && g_green_cfa == cfa) return;
+    if (!g_green) {
+        g_green = (float *)alloc((u32)w * (u32)h * 4u);
+        if (!g_green) return;
+    }
+    g_green_cfa = cfa;
+
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            if (plane_at(cfa, x, y) == 1) {
+                g_green[y * w + x] = (float)F.raw[y * w + x];
+                continue;
+            }
+            const float c = rawf(x, y, w, h);
+            const float n1 = rawf(x, y - 1, w, h), s1 = rawf(x, y + 1, w, h);
+            const float w1 = rawf(x - 1, y, w, h), e1 = rawf(x + 1, y, w, h);
+            const float n2 = rawf(x, y - 2, w, h), s2 = rawf(x, y + 2, w, h);
+            const float w2 = rawf(x - 2, y, w, h), e2 = rawf(x + 2, y, w, h);
+
+            /* Which way the detail runs. The first term is the slope across the
+             * pair of greens, the second the curvature of this site's own
+             * colour: an edge shows in one and a fine line in the other. */
+            const float dh = (w1 > e1 ? w1 - e1 : e1 - w1)
+                + ((2.f * c - w2 - e2) > 0.f ? (2.f * c - w2 - e2) : -(2.f * c - w2 - e2));
+            const float dv = (n1 > s1 ? n1 - s1 : s1 - n1)
+                + ((2.f * c - n2 - s2) > 0.f ? (2.f * c - n2 - s2) : -(2.f * c - n2 - s2));
+            const float wh = 1.f / (1.f + dh * dh);
+            const float wv = 1.f / (1.f + dv * dv);
+
+            /*
+             * The ratio correction. The mean of the two greens is scaled by how
+             * this site compares with the mean of its own colour two away,
+             * instead of having that difference added to it. Where the picture
+             * is bright the two agree; where it is dark the ratio keeps the
+             * result inside the values around it, which is what stops the
+             * overshoot an additive correction gives on a hard edge.
+             */
+            const float eps = 1.f;
+            float gh = 0.5f * (w1 + e1) * ((c + eps) / (0.5f * (w2 + e2) + eps));
+            float gv = 0.5f * (n1 + s1) * ((c + eps) / (0.5f * (n2 + s2) + eps));
+
+            /* Kept inside the pair it was interpolated from, so a ratio taken
+             * across a big step cannot run away. */
+            const float hlo = w1 < e1 ? w1 : e1, hhi = w1 < e1 ? e1 : w1;
+            const float vlo = n1 < s1 ? n1 : s1, vhi = n1 < s1 ? s1 : n1;
+            const float hpad = 0.5f * (hhi - hlo) + 64.f;
+            const float vpad = 0.5f * (vhi - vlo) + 64.f;
+            gh = clampf(gh, hlo - hpad, hhi + hpad);
+            gv = clampf(gv, vlo - vpad, vhi + vpad);
+
+            g_green[y * w + x] = (wh * gh + wv * gv) / (wh + wv);
+        }
+    }
+}
+
+/* Red and blue, as differences against the green that is already there. */
+static void rcd_at(i32 cfa, int x, int y, int w, int h, float *out) {
+    const int p = plane_at(cfa, x, y);
+    const float g = g_green[y * w + x];
+    out[1] = g;
+
+    if (p == 1) {
+        /* A green site: one colour lies along the row, the other down the
+         * column, each one pixel away. */
+        const int rowPlane = plane_at(cfa, x + 1, y);
+        const float along = 0.5f * ((rawf(x - 1, y, w, h) - gp(x - 1, y, w, h))
+            + (rawf(x + 1, y, w, h) - gp(x + 1, y, w, h)));
+        const float down = 0.5f * ((rawf(x, y - 1, w, h) - gp(x, y - 1, w, h))
+            + (rawf(x, y + 1, w, h) - gp(x, y + 1, w, h)));
+        out[rowPlane] = g + along;
+        out[rowPlane == 0 ? 2 : 0] = g + down;
+    } else {
+        out[p] = (float)F.raw[y * w + x];
+        /* The opposite colour sits on the four diagonals. Weighted the same way
+         * as the green was, so a diagonal edge is followed rather than averaged
+         * across. */
+        const float d[4] = {
+            rawf(x - 1, y - 1, w, h) - gp(x - 1, y - 1, w, h),
+            rawf(x + 1, y - 1, w, h) - gp(x + 1, y - 1, w, h),
+            rawf(x - 1, y + 1, w, h) - gp(x - 1, y + 1, w, h),
+            rawf(x + 1, y + 1, w, h) - gp(x + 1, y + 1, w, h),
+        };
+        const float a = d[0] - d[3], b = d[1] - d[2];
+        const float wa = 1.f / (1.f + a * a), wb = 1.f / (1.f + b * b);
+        const float ndg = (wa * (d[0] + d[3]) * 0.5f + wb * (d[1] + d[2]) * 0.5f) / (wa + wb);
+        out[p == 0 ? 2 : 0] = g + ndg;
+    }
+}
+
 static inline float clampf(float v, float lo, float hi) {
     return v < lo ? lo : v > hi ? hi : v;
 }
@@ -408,6 +538,13 @@ EXPORT(develop) i32 develop(u8 *out, i32 cfa, i32 demosaic, i32 black, i32 white
     if (step < 2) step = 1;
     const int ow = w / step, oh = h / step;
     if (!F.raw || !out || !gamma) return ERR_SIZE;
+    /* RCD carries red and blue as differences against green, so it needs green
+     * everywhere before it can place a single output pixel. Built once for the
+     * frame and kept, rather than per pixel like the filters above. */
+    if (demosaic == DEMOSAIC_RCD) {
+        rcd_build_green(cfa);
+        if (!g_green) return ERR_SIZE;
+    }
     const float span = (float)(white - black);
     if (span <= 0.f) return ERR_SIZE;
     const float inv = 1.f / span;
@@ -440,6 +577,11 @@ EXPORT(develop) i32 develop(u8 *out, i32 cfa, i32 demosaic, i32 black, i32 white
                 int p = plane_at(cfa, x, y);
                 c3[0] = c3[1] = c3[2] = 0.f;
                 c3[p] = v;
+            } else if (demosaic == DEMOSAIC_RCD) {
+                float m[3];
+                rcd_at(cfa, x, y, w, h, m);
+                for (int p = 0; p < 3; p++)
+                    c3[p] = clampf((m[p] - black) * inv, 0.f, 1.f);
             } else if (demosaic == DEMOSAIC_GRADIENT) {
                 float m[3];
                 malvar_at(cfa, x, y, w, h, m);

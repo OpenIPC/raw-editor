@@ -350,9 +350,24 @@ try {
 	await ed.open(new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer()), 'fixture.dng');
 
 	const opts = [...host.querySelectorAll('.re-panel .re-seg button')].map((b) => b.textContent);
-	t('the demosaic choice includes the gradient-corrected one',
-		opts.includes('None') && opts.includes('Bilinear') && opts.includes('Gradient'),
-		JSON.stringify(opts));
+	t('the demosaic choice includes every method the engine has',
+		opts.includes('None') && opts.includes('Bilinear') && opts.includes('Gradient') &&
+		opts.includes('RCD'), JSON.stringify(opts));
+
+	// RCD develops through a cached full-frame green plane rather than one
+	// filter per pixel, so it is the one that can fail to draw anything.
+	[...host.querySelectorAll('.re-panel .re-seg button')].find((b) => b.textContent === 'RCD').click();
+	for (let i = 0; i < 80 && !host.querySelector('.re-stage canvas:not([hidden])'); i++)
+		await new Promise((r) => setTimeout(r, 100));
+	await new Promise((r) => setTimeout(r, 600));
+	t('and RCD actually develops a picture', (() => {
+		const c = host.querySelector('.re-stage canvas');
+		if (!c || c.hidden) return false;
+		const px = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+		let lit = 0;
+		for (let i = 0; i < px.length; i += 4) if (px[i] || px[i + 1] || px[i + 2]) lit++;
+		return lit > px.length / 8;      // not a black frame
+	})());
 
 	const diagBtn = [...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose');
 	t('Diagnose is a mode now, not a stub', !!diagBtn && !diagBtn.disabled);
