@@ -429,6 +429,39 @@ console.log('\ncalibration recovers a matrix it was not given');
 		`top row spans ${topRun.toFixed(1)}, bottom ${bottomRun.toFixed(1)}`);
 }
 
+console.log('\n16-bit raw opens, which a whole class of camera emits');
+{
+	/*
+	 * The older HiSilicon parts write BitsPerSample 16, uncompressed -- one
+	 * little-endian sample per two bytes, no packing. The engine handled 8,
+	 * 10, 12 and 14 and refused these outright with "unsupported bit depth",
+	 * so every camera in that class was unopenable. Found by pointing the
+	 * editor at a hi3518ev200.
+	 */
+	const { makeDng } = await import('./make-dng.mjs');
+	const W = 64, H = 64;
+	const px = new Uint16Array(W * H);
+	// A ramp, so a byte-order mistake shows up as noise rather than passing.
+	for (let i = 0; i < px.length; i++) px[i] = 8000 + (i % 11) * 300;
+	px[33 * W + 20] = 60000;
+	const bytes = makeDng({ width: W, height: H, pixels: px, bits: 16, black: 0, white: 65535 });
+	const info = engine.open(bytes);
+	check('the depth is read as 16', info.bits, 16);
+	check('and the dimensions survive', [info.width, info.height], [W, H]);
+
+	// Byte order is the thing most easily got wrong here, and a swapped pair
+	// still produces a plausible-looking frame. The planted value is chosen so
+	// that reading it big-endian gives something wildly different.
+	const dev = engine.diagnose({ sigmas: 6 });
+	assert('the planted hot pixel is found at the right place',
+		dev.defects.some((p) => p.x === 20 && p.y === 33),
+		JSON.stringify(dev.defects.slice(0, 3)));
+	assert('and nothing else is', dev.defectCount === 1, String(dev.defectCount));
+	assert('values come back in range, not byte-swapped',
+		dev.blackFloor.every((v) => v >= 7000 && v <= 12000),
+		dev.blackFloor.map((v) => v.toFixed(0)).join(' / '));
+}
+
 console.log('\nthe defect scan reports its own trustworthiness');
 {
 	// The fixture is a 256x256 crop, so these are shape checks rather than

@@ -207,7 +207,8 @@ EXPORT(dng_open) i32 dng_open(const u8 *buf, u32 len) {
 
     if (compression != 1) return ERR_COMPRESSED;
     (void)photometric;
-    if (bits_seen != 8 && bits_seen != 10 && bits_seen != 12 && bits_seen != 14)
+    if (bits_seen != 8 && bits_seen != 10 && bits_seen != 12 &&
+        bits_seen != 14 && bits_seen != 16)
         return ERR_BITS;
     F.bits = bits_seen;
     if (F.width <= 0 || F.height <= 0 || F.width > 16384 || F.height > 16384)
@@ -257,6 +258,14 @@ EXPORT(dng_unpack) i32 dng_unpack(void) {
 
     if (F.bits == 8) {
         for (u32 i = 0; i < px; i++) o[i] = s[i];
+    } else if (F.bits == 16) {
+        /* Nothing to unpack: one little-endian sample per pair of bytes. The
+         * older HiSilicon parts write raw this way rather than packing it, so
+         * a whole class of camera arrives here and arrived, until now, at
+         * "unsupported bit depth". Read byte-wise rather than through a u16
+         * pointer: the strip offset carries no alignment guarantee, and TIFF
+         * has never promised one. */
+        for (u32 i = 0; i < px; i++) o[i] = (u16)(s[i * 2] | (s[i * 2 + 1] << 8));
     } else if (F.bits == 10) {
         u32 groups = px >> 2;
         for (u32 g = 0; g < groups; g++) {

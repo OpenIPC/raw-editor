@@ -148,6 +148,10 @@
 	background: #1c1f27; border: 1px solid #2c313d; border-radius: 12px; }
 .re-notice.re-warn { border-color: rgba(255,218,106,.6); }
 .re-notice.re-warn svg { color: #ffda6a; }
+/* A reading the evidence supports, as against one it does not. Green rather
+ * than amber, so the two are told apart before either is read. */
+.re-notice.re-ok { border-color: rgba(109,191,152,.6); }
+.re-notice.re-ok svg { color: #6dbf98; }
 .re-notice svg { flex: 0 0 auto; color: #b6b9c2; }
 .re-notice div { flex: 1 1 auto; font-size: 12px; line-height: 1.45; }
 

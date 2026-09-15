@@ -828,6 +828,33 @@ export function mountEditor(root, {
 	}
 
 	/*
+	 * Clark-Evans, for a set assembled on this side.
+	 *
+	 * The engine computes this for the defects it finds; a set built from the
+	 * tally across several captures is a different set and deserves the same
+	 * question asked of it. Same definition: mean nearest-neighbour distance
+	 * over what a random scattering of the same density would give.
+	 */
+	function spreadOf(pts, w, h) {
+		if (!pts || pts.length < 3) return null;
+		let sum = 0;
+		for (const p of pts) {
+			let best = Infinity;
+			for (const q of pts) {
+				if (q === p) continue;
+				const d = (p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y);
+				if (d < best) best = d;
+			}
+			sum += Math.sqrt(best);
+		}
+		const area = w * h;
+		const obs = sum / pts.length;
+		const exp = 0.5 * Math.sqrt(area / pts.length);
+		const se = 0.26136 / Math.sqrt(pts.length * pts.length / area);
+		return { index: obs / exp, z: se > 0 ? (obs - exp) / se : 0, over: pts.length };
+	}
+
+	/*
 	 * The deviation distribution, on a logarithmic axis.
 	 *
 	 * This is EMVA 1288's answer to "which pixels are defective", and it
@@ -949,11 +976,14 @@ export function mountEditor(root, {
 		}));
 		out.append(Object.assign(el('p', 're-note'), {
 			style: 'margin:0 0 7px',
-			textContent: diag.defectCount === 0
-				? 'None. No pixel disagrees with all four of its neighbours by more than the noise explains.'
-				: `${diag.defectCount} pixel${diag.defectCount === 1 ? '' : 's'} disagree with every ` +
-					'one of their same-colour neighbours by more than the noise explains' +
-					(diag.truncated ? `, of which the first ${diag.defects.length} are marked.` : '.'),
+			textContent: diag.fromTally
+				? `${diag.defectCount} site${diag.defectCount === 1 ? '' : 's'} turned up in at ` +
+					`least ${diag.fromTally.need} of ${diag.fromTally.of} captures.`
+				: diag.defectCount === 0
+					? 'None. No pixel disagrees with all four of its neighbours by more than the noise explains.'
+					: `${diag.defectCount} pixel${diag.defectCount === 1 ? '' : 's'} disagree with every ` +
+						'one of their same-colour neighbours by more than the noise explains' +
+						(diag.truncated ? `, of which the first ${diag.defects.length} are marked.` : '.'),
 		}));
 
 		/*
@@ -967,8 +997,11 @@ export function mountEditor(root, {
 		 * reported next to the number, because it is the part that says
 		 * whether the number can be believed.
 		 */
-		if (diag.spread) {
-			const R = diag.spread.index;
+		const spread = diag.fromTally
+			? spreadOf(diag.defects, state.info.width, state.info.height)
+			: diag.spread;
+		if (spread) {
+			const R = spread.index;
 			const scenery = R < 0.8, random = R >= 0.8 && R <= 1.25;
 			out.append(statLine('spread', R.toFixed(2),
 				random ? 'scattered, as sensor defects are'
@@ -1004,54 +1037,181 @@ export function mountEditor(root, {
 			style: 'margin-top:14px',
 			innerHTML: '<h3 class="re-cap">Compare</h3><span class="re-rule"></span>',
 		}));
-		if (heldScan && heldScan.name !== state.name) {
-			const now = new Set(diag.defects.map((p) => p.x + ',' + p.y));
-			const both = heldScan.keys.filter((k) => now.has(k));
+		/*
+		 * How many captures each site turned up in.
+		 *
+		 * A strict intersection is the obvious rule and it is too harsh. Hot
+		 * pixels and random-telegraph pixels are largely one population -- a
+		 * 2023 study of a backside-illuminated sensor found every hot pixel it
+		 * measured also showed RTS -- and an RTS site switches between discrete
+		 * levels, so it need not clear the threshold in every frame. Requiring
+		 * it to appear in all of them drops exactly those.
+		 *
+		 * So the rule is N of M, which is what the SFU group use for cameras
+		 * that cannot produce raw: they ask for a candidate in at least three
+		 * of six images. The tally is shown in full, because where the numbers
+		 * fall is itself the answer -- a population that appears once each and
+		 * never again is the scene, and one that keeps coming back is not.
+		 */
+		const held = scanSet.filter((v) => v.name !== state.name);
+		const all = held.concat([{ name: state.name || 'this frame',
+			keys: diag.defects.map((p) => p.x + ',' + p.y) }]);
+		const M = all.length;
+		if (M < 2) {
 			out.append(Object.assign(el('p', 're-note'), {
 				style: 'margin:0 0 8px',
-				textContent: `${both.length} of the ${heldScan.keys.length} found in ` +
-					`${heldScan.name} are here too. Those are the ones that did not move ` +
-					'with the picture.',
+				textContent: 'One capture cannot tell a bad pixel from a noisy one or from ' +
+					'a speck of detail. Keep this scan and take about five in all, moving ' +
+					'the camera between them if you can.',
 			}));
-			const keep = el('button', 're-btn re-pri', '');
-			keep.dataset.act = 'keep-common';
-			keep.textContent = 'Mark only those ' + both.length;
-			keep.disabled = both.length === 0;
-			keep.addEventListener('click', () => {
-				const set = new Set(both);
-				diag = { ...diag, defects: diag.defects.filter((p) => set.has(p.x + ',' + p.y)),
-					defectCount: both.length, truncated: false, spread: diag.spread };
-				heldScan = null;
+		} else {
+			const tally = new Map();
+			for (const v of all)
+				for (const k of new Set(v.keys)) tally.set(k, (tally.get(k) || 0) + 1);
+			const atLeast = (n) => [...tally].filter(([, c]) => c >= n).map(([k]) => k);
+			const suggested = Math.max(2, Math.ceil(M * 0.8));
+			if (needN > M) needN = M;
+			if (needN < 2) needN = 2;
+			if (!needTouched) needN = suggested;
+
+			out.append(Object.assign(el('p', 're-note'), {
+				style: 'margin:0 0 7px',
+				textContent: `Across ${M} captures: ` + all.map((v) => v.name).join(', ') + '.',
+			}));
+			// The tally, exactly: how many sites turned up in how many captures.
+			const tbl = el('div');
+			tbl.style.cssText = 'margin:0 0 9px';
+			for (let n = M; n >= 1; n--) {
+				const exactly = [...tally].filter(([, c]) => c === n).length;
+				tbl.append(statLine(n === M ? 'in all ' + M : 'in ' + n + ' of ' + M,
+					String(exactly), n === 1 ? 'seen once and never again' : ''));
+			}
+			out.append(tbl);
+
+			const seg = el('div', 're-seg');
+			seg.style.cssText = 'margin-bottom:8px;flex-wrap:wrap';
+			for (let n = 2; n <= M; n++) {
+				const b = el('button', n === needN ? 'on' : '', n + ' of ' + M);
+				b.dataset.act = 'need-' + n;
+				b.addEventListener('click', () => { needN = n; needTouched = true; renderDiagnose(out); });
+				seg.append(b);
+			}
+			out.append(Object.assign(el('div', 're-rname'), { textContent: 'believe a site seen in' }));
+			out.append(seg);
+
+			const keys = atLeast(needN);
+
+			/*
+			 * What the evidence so far actually supports.
+			 *
+			 * There are two ways this measurement goes wrong and they need
+			 * opposite remedies, so the operator should not have to work out
+			 * which one they are in. Both are visible in the numbers already
+			 * to hand.
+			 *
+			 * Noise puts a different set of sites over the threshold every
+			 * time, so it shows up as a large population seen in exactly one
+			 * capture. More captures fix that; it is what they are for.
+			 *
+			 * Detail in the picture does the opposite. It is in the same place
+			 * in every capture of the same view, so it survives any number of
+			 * them -- and no amount of repeating will shift it. What gives it
+			 * away is its arrangement: scene detail clumps where the picture
+			 * had detail, while defects are scattered at random. Only moving
+			 * the camera removes it.
+			 *
+			 * Measured on two cameras: an old jxf22 with 36 real defects reads
+			 * 60 of 116 sites seen once -- noise -- and its survivors come back
+			 * randomly scattered. An IMX335 pointed at a furnished room reads
+			 * almost nothing seen once, and survivors clustered at 0.52: all
+			 * chair, no sensor.
+			 */
+			const pts = keys.map((k) => {
+				const [x, y] = k.split(',').map(Number);
+				return { x, y };
+			});
+			// Below about twenty points the nearest-neighbour index is noise
+			// itself, and edge effects push it high, so it is not reported.
+			const sp = pts.length >= 20
+				? spreadOf(pts, state.info.width, state.info.height) : null;
+			/*
+			 * Judged on the SURVIVORS, not on how much was discarded.
+			 *
+			 * A tail of sites seen once and never again is normal and says
+			 * nothing: it is noise finding a different way over the threshold
+			 * each time, and discarding it is what the tally is for. Counting
+			 * it as evidence of trouble condemns every measurement -- on the
+			 * old camera whose answer is known good it is 60 sites of 116, and
+			 * a rule keyed to that refused a correct reading.
+			 */
+			let verdict = null;
+			if (M < 3)
+				verdict = ['re-warn', 'Two captures cannot separate a bad pixel from a lucky ' +
+					'one. Take about five, moving the camera between them if you can.'];
+			else if (sp && sp.index < 0.8)
+				verdict = ['re-warn', 'These keep coming back, but they are clumped rather than ' +
+					'scattered, which is what detail in the picture looks like and not what a ' +
+					'sensor looks like. Repeating the same view will not shift them — move the ' +
+					'camera, or point it at something plain, and scan again.'];
+			else if (sp)
+				verdict = ['re-ok', 'These keep coming back and are scattered at random across ' +
+					'the frame, which is what sensor defects look like.'];
+			else if (pts.length)
+				verdict = ['re-ok', `${pts.length} site${pts.length === 1 ? '' : 's'} came ` +
+					`through every capture. Too few to judge how they are arranged, but ` +
+					`surviving a change of view is the strongest evidence there is.`];
+			else
+				verdict = ['re-warn', 'Nothing appeared in enough captures to be believed. ' +
+					'On a healthy sensor that is the right answer; if you expected defects, ' +
+					'ask for fewer captures above, or take more.'];
+			if (verdict) {
+				const box = el('div', 're-notice ' + verdict[0], ICON.warn);
+				box.style.cssText = 'margin:2px 0 9px';
+				box.append(Object.assign(el('div'), { textContent: verdict[1] }));
+				out.append(box);
+			}
+
+			const mark = el('button', 're-btn re-pri', '');
+			mark.dataset.act = 'mark-common';
+			mark.textContent = 'Mark those ' + keys.length;
+			mark.disabled = keys.length === 0;
+			mark.addEventListener('click', () => {
+				/*
+				 * The marks come from the tally, not from this frame's own
+				 * list. A site that cleared the threshold in three captures out
+				 * of four is a defect whether or not it cleared it in the one
+				 * on screen -- and if it had to be in the current frame's list
+				 * too, the rule would be an intersection again.
+				 */
+				diag = { ...diag, defects: pts, defectCount: pts.length, truncated: false,
+					fromTally: { need: needN, of: M } };
 				renderDiagnose(out);
 				drawMarks();
 			});
-			const drop = el('button', 're-btn', '');
-			drop.textContent = 'Forget it';
-			drop.addEventListener('click', () => { heldScan = null; renderDiagnose(out); });
-			const row = el('div');
-			row.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap';
-			row.append(keep, drop);
-			out.append(row);
-		} else {
-			out.append(Object.assign(el('p', 're-note'), {
-				style: 'margin:0 0 8px',
-				textContent: heldScan
-					? 'Held. Capture a different view, scan it, and the two will be compared.'
-					: 'A sensor defect stays put when the view changes; detail in the scene ' +
-						'does not. Hold this scan, point the camera somewhere else, and ' +
-						'scan again.',
-			}));
-			const hold = el('button', 're-btn', '');
-			hold.dataset.act = 'hold-scan';
-			hold.textContent = heldScan ? 'Holding this scan' : 'Hold for comparison';
-			hold.disabled = !!heldScan;
-			hold.addEventListener('click', () => {
-				heldScan = { name: state.name || 'the last frame',
-					keys: diag.defects.map((p) => p.x + ',' + p.y) };
-				renderDiagnose(out);
-			});
-			out.append(hold);
+			out.append(mark);
 		}
+
+		const row = el('div');
+		row.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin-top:8px';
+		const keep = el('button', 're-btn', '');
+		keep.dataset.act = 'hold-scan';
+		const already = scanSet.some((v) => v.name === state.name);
+		keep.textContent = already ? 'Kept' : 'Keep this scan';
+		keep.disabled = already;
+		keep.addEventListener('click', () => {
+			scanSet = scanSet.filter((v) => v.name !== state.name);
+			scanSet.push({ name: state.name || 'a frame',
+				keys: diag.defects.map((p) => p.x + ',' + p.y) });
+			renderDiagnose(out);
+		});
+		row.append(keep);
+		if (scanSet.length) {
+			const clear = el('button', 're-btn', '');
+			clear.textContent = 'Forget ' + scanSet.length;
+			clear.addEventListener('click', () => { scanSet = []; renderDiagnose(out); });
+			row.append(clear);
+		}
+		out.append(row);
 
 		out.append(Object.assign(el('div', 're-shead'), {
 			innerHTML: '<h3 class="re-cap">Black level</h3><span class="re-rule"></span>',
@@ -1098,10 +1258,14 @@ export function mountEditor(root, {
 	/* Which part of the frame the defect scan is allowed to believe, as a
 	 * percentile of frame brightness. 100 is all of it. */
 	let bgPercent = 100;
-	/* A previous scan, kept so a second one taken of a different view can be
-	 * compared against it. Per frame it would be useless -- the whole point is
-	 * that it outlives the frame it came from. */
-	let heldScan = null;
+	/* Scans kept for comparison, each one a capture's defect set. They outlive
+	 * the frames they came from, which is the whole point: a sensor defect is
+	 * a property of the sensor and should survive every view of it. */
+	let scanSet = [];
+	/* How many captures a site must appear in before it is believed, and
+	 * whether that was the operator's choice or this module's suggestion. */
+	let needN = 2;
+	let needTouched = false;
 
 	let corners = null;          /* in frame coordinates */
 	/* Whether this frame has been looked at yet. Per frame, so flipping back
