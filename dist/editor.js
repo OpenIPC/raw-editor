@@ -18,6 +18,8 @@ const CFA_NAMES = ['RGGB', 'GRBG', 'GBRG', 'BGGR'];
 const DEMOSAIC = [
 	['None', 0, 'the mosaic as recorded'],
 	['Bilinear', 1, 'average the neighbours'],
+	['Gradient', 2, 'Malvar-He-Cutler: bilinear, corrected by the curvature of ' +
+		'the plane that was actually measured. Removes most of the colour on edges.'],
 ];
 
 /*
@@ -203,7 +205,7 @@ export function mountEditor(root, {
 	sensorChip.hidden = true;
 	const modeSeg = segmented([
 		{ label: 'Develop', value: 'develop' },
-		{ label: 'Diagnose', value: 'diagnose', disabled: true, title: 'Not in this version' },
+		{ label: 'Diagnose', value: 'diagnose' },
 		{ label: 'Calibrate', value: 'calibrate' },
 	], 0, (v) => setMode(v), { wide: false });
 	// Not created at all without a provider, rather than created and hidden: a
@@ -412,7 +414,7 @@ export function mountEditor(root, {
 			canvas.hidden = false; drop.hidden = true; hud.hidden = false;
 			canvas.width = r.width; canvas.height = r.height;
 			canvas.getContext('2d').putImageData(new ImageData(r.pixels, r.width, r.height), 0, 0);
-			if (mode !== 'calibrate') histBox.innerHTML = histogramSVG(r.hist);
+			if (mode === 'develop') histBox.innerHTML = histogramSVG(r.hist);
 			zoomEl.textContent = state.fit ? 'Fit' : '100%';
 			// The canvas may have changed size, and the overlay is positioned
 			// against it.
@@ -517,6 +519,180 @@ export function mountEditor(root, {
 	}
 
 	stage.addEventListener('click', (ev) => { if (picking) pickAt(ev); });
+
+	/*
+	 * Both overlays are positioned against the canvas, so anything that moves
+	 * the canvas has to move them: a window resize, the inspector changing
+	 * width, and the Fit/100% zoom, which resizes the element without the
+	 * window ever changing. Watching the element itself catches all of those,
+	 * where a window listener catches only the first.
+	 */
+	const onResize = () => { drawChart(); drawMarks(); };
+	let ro = null;
+	if (typeof ResizeObserver === 'function') {
+		ro = new ResizeObserver(onResize);
+		ro.observe(canvas);
+	}
+	window.addEventListener('resize', onResize);
+
+	/* ---- diagnose --------------------------------------------------------
+	 *
+	 * What is wrong with the sensor rather than with the picture. The numbers
+	 * come from the mosaic -- a demosaiced frame has smeared every one of them
+	 * into its neighbours -- and the defects are marked on the picture, because
+	 * "eleven defects" and "eleven defects, all in that corner" are different
+	 * findings and only one of them is visible as a number.
+	 */
+	let diag = null;
+
+	/* A scan is a reading of one frame under one set of inputs. The CFA tells
+	 * it which neighbours are the same colour and the white level tells it what
+	 * counts as clipped, so changing either leaves the old defect coordinates
+	 * describing a frame nobody is looking at any more. */
+	function invalidateScan() {
+		if (!diag) return;
+		diag = null;
+		marks.replaceChildren();
+		if (mode === 'diagnose') buildDiagnose();
+	}
+	const marks = el('div', 're-marks');
+	marks.hidden = true;
+	stage.append(marks);
+
+	function drawMarks() {
+		marks.replaceChildren();
+		if (mode !== 'diagnose' || !diag || !state.info) return;
+		const NS = 'http://www.w3.org/2000/svg';
+		const svg = document.createElementNS(NS, 'svg');
+		svg.setAttribute('class', 're-chart-svg');
+		// A cap on what is drawn, not on what is counted: a sensor with ten
+		// thousand bad pixels would otherwise spend a second building circles
+		// nobody can tell apart.
+		for (const d of diag.defects.slice(0, 600)) {
+			const at = stageCoords(d.x, d.y);
+			if (!at) continue;
+			const c = document.createElementNS(NS, 'circle');
+			c.setAttribute('cx', at.x);
+			c.setAttribute('cy', at.y);
+			c.setAttribute('r', 4);
+			c.setAttribute('class', 're-mark');
+			svg.append(c);
+		}
+		marks.append(svg);
+	}
+
+	function pct(v) { return (v * 100).toFixed(v >= 0.01 ? 1 : 3) + '%'; }
+
+	function buildDiagnose() {
+		insp.replaceChildren();
+		const panel = el('div', 're-panel');
+		panel.append(Object.assign(el('div', 're-shead'), {
+			innerHTML: '<h3 class="re-cap">Sensor</h3><span class="re-rule"></span>',
+		}));
+		const run = el('button', 're-btn re-pri', '');
+		run.dataset.act = 'scan';
+		run.textContent = 'Scan the frame';
+		panel.append(run);
+		panel.append(Object.assign(el('p', 're-note'), {
+			textContent: 'Read off the mosaic, before any interpolation. A frame of ' +
+				'something flat and out of focus gives the cleanest answer.',
+			style: 'margin:8px 0 0',
+		}));
+		insp.append(panel);
+
+		const out = el('div', 're-panel');
+		out.hidden = true;
+		insp.append(out);
+
+		run.addEventListener('click', async () => {
+			run.disabled = true;
+			run.textContent = 'Scanning…';
+			try {
+				// call() resolves with the worker's whole message; the reading
+				// is in `result`. Taking the envelope for the result produced
+				// "Cannot read properties of undefined (reading 'map')" from
+				// deep inside the renderer, which said nothing about why.
+				const reply = await call('diagnose',
+					{ cfa: state.cfa, white: state.white, sigmas: 8 });
+				diag = reply && reply.result;
+				if (!diag || !diag.blackFloor)
+					throw new Error('the frame was scanned but the reading came back empty');
+				renderDiagnose(out);
+				drawMarks();
+			} catch (e) {
+				out.hidden = false;
+				const box = el('div', 're-notice re-warn', ICON.warn);
+				box.append(Object.assign(el('div'), { textContent: e.message }));
+				out.replaceChildren(box);
+			} finally {
+				run.disabled = false;
+				run.textContent = 'Scan the frame';
+			}
+		});
+	}
+
+	function statLine(name, value, note) {
+		const row = el('div');
+		row.style.cssText = 'display:flex;align-items:baseline;gap:8px;margin:3px 0';
+		row.append(Object.assign(el('span', 're-rname'), { textContent: name }));
+		row.append(Object.assign(el('span', 're-mono'), {
+			textContent: value, style: 'font-size:12px;color:#e6e8ee',
+		}));
+		if (note) row.append(Object.assign(el('span', 're-note'), { textContent: note }));
+		return row;
+	}
+
+	function renderDiagnose(out) {
+		out.hidden = false;
+		out.replaceChildren();
+		const i = state.info;
+		const rgb = (a, f) => a.map(f).join('  ');
+
+		out.append(Object.assign(el('div', 're-shead'), {
+			innerHTML: '<h3 class="re-cap">Defects</h3><span class="re-rule"></span>',
+		}));
+		out.append(Object.assign(el('p', 're-note'), {
+			style: 'margin:0 0 7px',
+			textContent: diag.defectCount === 0
+				? 'None. No pixel disagrees with all four of its neighbours by more than the noise explains.'
+				: `${diag.defectCount} pixel${diag.defectCount === 1 ? '' : 's'} disagree with every ` +
+					'one of their same-colour neighbours by more than the noise explains' +
+					(diag.truncated ? `, of which the first ${diag.defects.length} are marked.` : '.'),
+		}));
+
+		out.append(Object.assign(el('div', 're-shead'), {
+			innerHTML: '<h3 class="re-cap">Black level</h3><span class="re-rule"></span>',
+		}));
+		out.append(statLine('file', String(i.black), 'what the DNG says'));
+		out.append(statLine('frame', rgb(diag.blackFloor, (v) => v.toFixed(0).padStart(5)),
+			'the darkest the frame really gets, per plane'));
+		const floor = Math.min(...diag.blackFloor);
+		out.append(Object.assign(el('p', 're-note'), {
+			style: 'margin:5px 0 0',
+			textContent: floor + 2 < i.black
+				? 'The file claims a higher pedestal than the frame reaches, which clips the ' +
+					'shadows to black. Worth checking against a lens-cap frame.'
+				: 'Consistent with the file, as far as this frame can say — a scene with ' +
+					'nothing truly dark in it cannot say much.',
+		}));
+
+		out.append(Object.assign(el('div', 're-shead'), {
+			innerHTML: '<h3 class="re-cap">Clipping</h3><span class="re-rule"></span>',
+		}));
+		out.append(statLine('R G B', rgb(diag.clipped, (v) => pct(v).padStart(7)),
+			'at or above ' + i.white));
+
+		out.append(Object.assign(el('div', 're-shead'), {
+			innerHTML: '<h3 class="re-cap">Noise</h3><span class="re-rule"></span>',
+		}));
+		out.append(statLine('R G B', rgb(diag.noise, (v) => v.toFixed(1).padStart(6)),
+			'counts, one sigma'));
+		out.append(Object.assign(el('p', 're-note'), {
+			style: 'margin:5px 0 0',
+			textContent: 'A median of local differences, so an edge in the frame does not ' +
+				'read as noise' + (i.iso ? `. This frame is ISO ${i.iso}.` : '.'),
+		}));
+	}
 
 	/* ---- calibrate -------------------------------------------------------
 	 *
@@ -846,16 +1022,19 @@ export function mountEditor(root, {
 
 	function setMode(m) {
 		mode = m;
+		chart.hidden = m !== 'calibrate';
+		marks.hidden = m !== 'diagnose';
+		if (m !== 'calibrate') stopHold();
 		if (m === 'calibrate') {
 			if (!corners) { corners = defaultCorners(); solved = null; }
-			chart.hidden = false;
 			buildCalibrate();
-		} else {
-			chart.hidden = true;
-			stopHold();
-			if (state.info) buildInspector();
+		} else if (m === 'diagnose') {
+			buildDiagnose();
+		} else if (state.info) {
+			buildInspector();
 		}
 		drawChart();
+		drawMarks();
 	}
 
 	/* ---- inspector ---- */
@@ -882,7 +1061,7 @@ export function mountEditor(root, {
 				'<span class="re-note re-mono">from file</span>',
 		}));
 		const cfaSeg = segmented(CFA_NAMES.map((label, value) => ({ label, value })),
-			state.cfa, (v) => { state.cfa = v; commit(); });
+			state.cfa, (v) => { state.cfa = v; invalidateScan(); commit(); });
 		cfaSeg.style.marginBottom = '9px';
 		raw.append(cfaSeg);
 		raw.append(new Row('Black', {
@@ -893,7 +1072,7 @@ export function mountEditor(root, {
 		raw.append(new Row('White', {
 			min: Math.round(i.white * 0.25), max: (1 << i.bits) - 1, value: i.white,
 			onInput: (v) => { state.white = v; preview(); },
-			onCommit: (v) => { state.white = v; commit(); },
+			onCommit: (v) => { state.white = v; invalidateScan(); commit(); },
 		}).node);
 		insp.append(raw);
 
@@ -905,6 +1084,7 @@ export function mountEditor(root, {
 		dm.append(segmented(DEMOSAIC.map(([label, value, title]) => ({ label, value, title })),
 			DEMOSAIC.findIndex(([, v]) => v === state.demosaic),
 			(v) => { state.demosaic = v; commit(); }));
+		// Demosaic does not enter a scan, so it alone does not invalidate one.
 		insp.append(dm);
 
 		// WHITE BALANCE — the gains the engine really applies, not a temperature
@@ -1005,9 +1185,11 @@ export function mountEditor(root, {
 			});
 			state.bytes = exactCopy;
 			state.name = label;
-			// The chart belonged to the frame that has just been replaced.
+			// The chart and the scan both belonged to the frame that has just
+			// been replaced.
 			corners = null;
 			solved = null;
+			diag = null;
 			saveBtn.disabled = false;
 			nameEl.textContent = label;
 			sensorChip.hidden = false;
@@ -1070,6 +1252,8 @@ export function mountEditor(root, {
 			return openBytes(bytes, label);
 		},
 		destroy() {
+			ro?.disconnect();
+			window.removeEventListener('resize', onResize);
 			// A countdown that outlived its editor would revert a camera whose
 			// operator had closed the page and moved on.
 			stopHold();

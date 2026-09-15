@@ -53,7 +53,7 @@ EXPORT(alloc) void *alloc(u32 n) {
 /* ---- DNG / TIFF ------------------------------------------------------ */
 
 enum { CFA_RGGB = 0, CFA_GRBG = 1, CFA_GBRG = 2, CFA_BGGR = 3 };
-enum { DEMOSAIC_NONE = 0, DEMOSAIC_BILINEAR = 1 };
+enum { DEMOSAIC_NONE = 0, DEMOSAIC_BILINEAR = 1, DEMOSAIC_GRADIENT = 2 };
 
 enum {
     ERR_OK = 0, ERR_MAGIC = -1, ERR_TRUNCATED = -2, ERR_NO_STRIP = -3,
@@ -228,6 +228,15 @@ EXPORT(dng_unpack) i32 dng_unpack(void) {
     const u8 *s = F.buf + F.strip_off;
     u16 *o = F.raw;
 
+    /* The packed cases below step in whole groups -- four pixels to five bytes
+     * at 10 bits, two to three at 12, four to seven at 14 -- so a frame whose
+     * pixel count is not a multiple of the group has a tail they do not reach.
+     * A Bayer frame has even dimensions and never does, but the buffer is read
+     * in full by everything downstream, so the tail is unpacked rather than
+     * left to whatever the allocator last had there. Zeroing it would only make
+     * the wrong answer a repeatable one: the histogram would still count it and
+     * the defect scan would still find it. */
+
     if (F.bits == 8) {
         for (u32 i = 0; i < px; i++) o[i] = s[i];
     } else if (F.bits == 10) {
@@ -246,6 +255,10 @@ EXPORT(dng_unpack) i32 dng_unpack(void) {
             d[0] = (u16)((b[0] << 4) | (b[1] >> 4));
             d[1] = (u16)(((b[1] & 0x0f) << 8) | b[2]);
         }
+        if (px & 1) {
+            const u8 *b = s + pairs * 3;
+            o[px - 1] = (u16)((b[0] << 4) | (b[1] >> 4));
+        }
     } else { /* 14 */
         u32 groups = px >> 2;
         for (u32 g = 0; g < groups; g++) {
@@ -254,6 +267,22 @@ EXPORT(dng_unpack) i32 dng_unpack(void) {
             d[1] = (u16)(((b[1] & 0x03) << 12) | (b[2] << 4) | (b[3] >> 4));
             d[2] = (u16)(((b[3] & 0x0f) << 10) | (b[4] << 2) | (b[5] >> 6));
             d[3] = (u16)(((b[5] & 0x3f) << 8) | b[6]);
+        }
+        const u32 rest = px & 3;
+        if (rest) {
+            const u8 *b = s + groups * 7; u16 *d = o + groups * 4;
+            if (rest > 0) d[0] = (u16)((b[0] << 6) | (b[1] >> 2));
+            if (rest > 1) d[1] = (u16)(((b[1] & 0x03) << 12) | (b[2] << 4) | (b[3] >> 4));
+            if (rest > 2) d[2] = (u16)(((b[3] & 0x0f) << 10) | (b[4] << 2) | (b[5] >> 6));
+        }
+    }
+    if (F.bits == 10) {
+        const u32 rest = px & 3;
+        if (rest) {
+            const u8 *b = s + (px >> 2) * 5; u16 *d = o + (px >> 2) * 4;
+            if (rest > 0) d[0] = (u16)((b[0] << 2) | (b[1] >> 6));
+            if (rest > 1) d[1] = (u16)(((b[1] & 0x3f) << 4) | (b[2] >> 4));
+            if (rest > 2) d[2] = (u16)(((b[2] & 0x0f) << 6) | (b[3] >> 2));
         }
     }
     return ERR_OK;
@@ -269,6 +298,81 @@ static inline int plane_at(int cfa, int x, int y) {
     if (px == 0 && py == 0) return 0;
     if (px == 1 && py == 1) return 2;
     return 1;
+}
+
+/*
+ * Gradient-corrected linear interpolation: Malvar, He and Cutler, 2004.
+ *
+ * Bilinear averages each plane over the neighbours that carry it and knows
+ * nothing about the other two, so an edge that all three planes cross is
+ * reconstructed three different ways and the disagreement shows up as colour
+ * along it -- the zippering and the red-green fringes on a roof line.
+ *
+ * This adds a correction term taken from the plane that WAS measured at the
+ * pixel: where that plane has a second derivative, the missing ones are
+ * assumed to have most of it too. It is still one linear 5x5 filter per case,
+ * so it costs a handful of multiplies over bilinear rather than the passes a
+ * directional method needs, and it removes most of the colour on edges.
+ *
+ * The coefficients are the paper's, over 8.
+ */
+static inline int fold_same_plane(int v, int n) {
+    /* Step back inside the frame TWO at a time, so whatever lands here carries
+     * the same colour as the pixel it stands in for. Clamping would fold a red
+     * neighbour in where a blue one was wanted; reflecting keeps the plane on a
+     * large frame and loses it on a small one -- on a two-pixel axis,
+     * 2*w-2-x sends an odd coordinate to an even one, and the correction that
+     * pulls it back in range breaks the parity again. Folding by two cannot. */
+    while (v < 0) v += 2;
+    while (v >= n) v -= 2;
+    if (v < 0) v = 0;
+    return v;
+}
+
+static inline float mirrored(int x, int y, int w, int h) {
+    x = fold_same_plane(x, w);
+    y = fold_same_plane(y, h);
+    return (float)F.raw[y * w + x];
+}
+
+static void malvar_at(int cfa, int x, int y, int w, int h, float *out) {
+    const float c = mirrored(x, y, w, h);
+    const float n1 = mirrored(x, y - 1, w, h), s1 = mirrored(x, y + 1, w, h);
+    const float w1 = mirrored(x - 1, y, w, h), e1 = mirrored(x + 1, y, w, h);
+    const float n2 = mirrored(x, y - 2, w, h), s2 = mirrored(x, y + 2, w, h);
+    const float w2 = mirrored(x - 2, y, w, h), e2 = mirrored(x + 2, y, w, h);
+    const float nw = mirrored(x - 1, y - 1, w, h), ne = mirrored(x + 1, y - 1, w, h);
+    const float sw = mirrored(x - 1, y + 1, w, h), se = mirrored(x + 1, y + 1, w, h);
+
+    const float cross = n1 + s1 + w1 + e1;          /* the four adjacent */
+    const float diag = nw + ne + sw + se;           /* the four corners */
+    const float far = n2 + s2 + w2 + e2;            /* two away, same plane */
+    const float vert = n2 + s2, horz = w2 + e2;
+
+    const int p = plane_at(cfa, x, y);
+    if (p == 1) {
+        /* Green measured. The other two are each on one axis: one plane along
+         * the row, the other down the column. plane_at of a neighbour says
+         * which way round this green is. */
+        const int rowPlane = plane_at(cfa, x + 1, y);      /* 0 or 2 */
+        /* The paper's kernel takes -1 along the axis it interpolates ALONG
+         * and +1/2 across it. Folding both into one "subtract everything two
+         * away, then add back half" turns that +1/2 into -1/2, which is worse
+         * than bilinear -- measured at 10.4 against 5.2 mean error before the
+         * sign was put right. */
+        const float alongRow = 5.f * c + 4.f * (w1 + e1) - horz + 0.5f * vert - diag;
+        const float alongCol = 5.f * c + 4.f * (n1 + s1) - vert + 0.5f * horz - diag;
+        out[1] = c;
+        out[rowPlane] = alongRow * 0.125f;
+        out[rowPlane == 0 ? 2 : 0] = alongCol * 0.125f;
+    } else {
+        /* Red or blue measured: green comes off the cross with a correction
+         * from this plane's curvature, and the opposite plane off the
+         * diagonals. */
+        out[p] = c;
+        out[1] = (4.f * c + 2.f * cross - far) * 0.125f;
+        out[p == 0 ? 2 : 0] = (6.f * c + 2.f * diag - 1.5f * far) * 0.125f;
+    }
 }
 
 static inline float clampf(float v, float lo, float hi) {
@@ -336,6 +440,11 @@ EXPORT(develop) i32 develop(u8 *out, i32 cfa, i32 demosaic, i32 black, i32 white
                 int p = plane_at(cfa, x, y);
                 c3[0] = c3[1] = c3[2] = 0.f;
                 c3[p] = v;
+            } else if (demosaic == DEMOSAIC_GRADIENT) {
+                float m[3];
+                malvar_at(cfa, x, y, w, h, m);
+                for (int p = 0; p < 3; p++)
+                    c3[p] = clampf((m[p] - black) * inv, 0.f, 1.f);
             } else {
                 /* Bilinear: average the neighbours that carry each plane.
                  * Edges clamp to the mirrored neighbour rather than going
@@ -476,4 +585,165 @@ EXPORT(cfa_score) float cfa_score(i32 cfa) {
     float a = (float)(gsum[0] / gcnt[0]), b = (float)(gsum[1] / gcnt[1]);
     if (a <= 0.f || b <= 0.f) return 0.f;
     return a < b ? a / b : b / a;
+}
+
+/* ---- diagnose --------------------------------------------------------
+ *
+ * What is wrong with the sensor rather than with the picture: pixels that do
+ * not work, a black level the file may be lying about, highlights already
+ * gone, and how much of what is left is noise.
+ *
+ * Everything here is measured on the MOSAIC. A demosaiced frame has had every
+ * one of these smeared across its neighbours -- a dead pixel becomes a soft
+ * dark spot, clipping spreads into channels that never clipped -- so a
+ * diagnosis taken from the developed image would be a diagnosis of the
+ * interpolation.
+ *
+ * No square root anywhere: this translation unit has no libc, which is why the
+ * gamma curve is built in JS. The noise comes back as a VARIANCE and the
+ * caller takes the root, and the defect test compares squares so it never
+ * needs one.
+ */
+
+/* Where the same plane sits two pixels away, which is the nearest pixel that
+ * measures the same colour. Returns 4 only when all four exist. */
+static inline int same_plane_neighbours(int x, int y, int w, int h, u16 *out) {
+    int n = 0;
+    if (x >= 2) out[n++] = F.raw[y * w + (x - 2)];
+    if (x < w - 2) out[n++] = F.raw[y * w + (x + 2)];
+    if (y >= 2) out[n++] = F.raw[(y - 2) * w + x];
+    if (y < h - 2) out[n++] = F.raw[(y + 2) * w + x];
+    return n;
+}
+
+/* One plane at a time: three passes over the frame rather than three sets of
+ * histograms resident at once, because 14 bits of bins is 64 KB and the wasm
+ * starts with a megabyte. g_hist counts values, g_dhist counts how far each
+ * pixel sits from its neighbours. */
+static u32 g_hist[1 << 14];
+static u32 g_dhist[1 << 14];
+
+/*
+ * stats, in order:
+ *   0..2   fraction of each plane at or above the white level
+ *   3..5   noise VARIANCE of each plane, in raw counts squared
+ *   6..8   the darkest value each plane reaches
+ *   9..11  each plane's 0.1st percentile: the black level the frame itself
+ *          implies, a floor that one stuck pixel cannot drag down
+ *   12     how many defects were found, which may exceed how many were stored
+ *
+ * defects receives x,y pairs, up to max_defects of them.
+ */
+EXPORT(diagnose) i32 diagnose(i32 cfa, i32 white, float sigmas,
+                              float *stats, i32 *defects, i32 max_defects) {
+    const int w = F.width, h = F.height;
+    if (!F.raw || !stats) return ERR_SIZE;
+    for (int i = 0; i < 13; i++) stats[i] = 0.f;
+    if (w < 5 || h < 5) return ERR_SIZE;
+    if (sigmas <= 0.f) sigmas = 8.f;
+
+    u32 clipped[3] = {0, 0, 0}, total[3] = {0, 0, 0};
+    u32 lowest[3] = {0xffffu, 0xffffu, 0xffffu};
+
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            const int p = plane_at(cfa, x, y);
+            const u32 v = F.raw[y * w + x];
+            total[p]++;
+            if ((i32)v >= white) clipped[p]++;
+            if (v < lowest[p]) lowest[p] = v;
+        }
+    }
+    for (int p = 0; p < 3; p++) {
+        stats[p] = total[p] ? (float)((double)clipped[p] / total[p]) : 0.f;
+        stats[6 + p] = (float)(lowest[p] == 0xffffu ? 0u : lowest[p]);
+    }
+
+    for (int p = 0; p < 3; p++) {
+        const int bins = 1 << 14;
+        for (int i = 0; i < bins; i++) { g_hist[i] = 0; g_dhist[i] = 0; }
+        u32 dcnt = 0;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                if (plane_at(cfa, x, y) != p) continue;
+                u32 v = F.raw[y * w + x];
+                g_hist[v >= (u32)bins ? bins - 1 : v]++;
+                if (x < 2 || x >= w - 2 || y < 2 || y >= h - 2) continue;
+                u16 nb[4];
+                if (same_plane_neighbours(x, y, w, h, nb) != 4) continue;
+                /* Four neighbours summed rather than averaged, so the distance
+                 * stays an integer and can index a bin: |4v - sum| is four
+                 * times the difference from their mean. */
+                i32 d4 = 4 * (i32)v - (i32)nb[0] - (i32)nb[1] - (i32)nb[2] - (i32)nb[3];
+                u32 a = (u32)((d4 < 0 ? -d4 : d4) + 2) / 4;
+                g_dhist[a >= (u32)bins ? bins - 1 : a]++;
+                dcnt++;
+            }
+
+        const u32 want = total[p] / 1000;
+        u32 seen = 0;
+        for (int i = 0; i < bins; i++) {
+            seen += g_hist[i];
+            if (seen > want) { stats[9 + p] = (float)i; break; }
+        }
+
+        /*
+         * The MEDIAN distance, not the mean square of it.
+         *
+         * A frame is mostly flat and occasionally an edge, and squaring gives
+         * the edges all the say: on a synthetic frame with one hard boundary
+         * across it, a mean-square estimate read 98 counts where 12 had been
+         * added. The median does not notice a minority of large values at all,
+         * which is the whole point -- a noise figure is about the flat parts.
+         *
+         * For a Gaussian the median absolute deviation is 0.6745 sigma, so
+         * sigma is the median times 1.4826; and the distance from four
+         * neighbours' mean carries 1.25 times the variance of one pixel.
+         */
+        u32 half = dcnt / 2, run = 0;
+        double med = 0;
+        for (int i = 0; i < bins; i++) {
+            run += g_dhist[i];
+            if (run > half) { med = i; break; }
+        }
+        const double sigma = med * 1.4826 / 1.118033988749895;   /* sqrt(1.25) */
+        stats[3 + p] = (float)(dcnt ? sigma * sigma : 0.0);
+    }
+
+    /*
+     * A defect is a pixel that disagrees with EVERY one of its same-colour
+     * neighbours, in the same direction, by more than the noise explains.
+     *
+     * "Every one" is what keeps edges out of the list. A pixel on the bright
+     * side of an edge towers over the neighbours behind it and sits level with
+     * the ones beside it, so it fails the test; a real hot pixel has nothing
+     * standing beside it.
+     */
+    i32 found = 0;
+    for (int y = 2; y < h - 2; y++) {
+        for (int x = 2; x < w - 2; x++) {
+            u16 nb[4];
+            if (same_plane_neighbours(x, y, w, h, nb) != 4) continue;
+            const int p = plane_at(cfa, x, y);
+            /* A floor of one count, so a synthetic frame with no noise at all
+             * does not make every pixel a defect. */
+            const double var = stats[3 + p] > 1.0 ? stats[3 + p] : 1.0;
+            const double margin2 = (double)sigmas * sigmas * var;
+            const double v = F.raw[y * w + x];
+            int above = 1, below = 1;
+            for (int i = 0; i < 4; i++) {
+                const double d = v - nb[i];
+                if (!(d > 0 && d * d > margin2)) above = 0;
+                if (!(d < 0 && d * d > margin2)) below = 0;
+            }
+            if (!above && !below) continue;
+            if (defects && found < max_defects) {
+                defects[found * 2] = x;
+                defects[found * 2 + 1] = y;
+            }
+            found++;
+        }
+    }
+    stats[12] = (float)found;
+    return found;
 }

@@ -78,6 +78,27 @@ both the camera's own JPEG and this editor rendered the chart's grey row 20 to
 balance. Clicking one grey patch brought the row to within a couple of levels
 of neutral.
 
+**Diagnose** reports what is wrong with the sensor rather than with the picture:
+pixels that disagree with every one of their same-colour neighbours by more
+than the noise explains, the black level the frame itself implies against the
+one the file claims, what has already clipped, and how noisy the rest is. All
+of it off the mosaic — a demosaiced frame has smeared every one of those into
+its neighbours, so the same measurements taken after interpolation would be
+measurements of the interpolation.
+
+The noise figure is a median of local differences rather than a mean square,
+because a frame is mostly flat and occasionally an edge and squaring gives the
+edges all the say: on a synthetic frame with one hard boundary, a mean-square
+estimate read 98 counts where 12 had been added.
+
+**There is no RCD or AMaZE.** The plan named them; a faithful AMaZE is around a
+thousand lines of intricate float maths and there is no reference output here to
+check a port against, and something approximate wearing that name would be worse
+than not having it. What is here instead is Malvar-He-Cutler gradient-corrected
+interpolation, which is published in full, is one linear filter per case, and
+measures 2.97 mean error per channel against bilinear's 5.24 on a synthetic
+scene the test builds from a known RGB image.
+
 ## What the engine does, and what it does not
 
 Handles uncompressed Bayer DNG at 8, 10, 12 and 14 bits, little-endian. It reads

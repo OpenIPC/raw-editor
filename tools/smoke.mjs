@@ -169,6 +169,151 @@ console.log('\npicking a neutral');
 		/outside the frame/.test(refused), refused || '(no error)');
 }
 
+console.log('\nan odd pixel count still unpacks all the way to the end');
+// The packed unpackers step in whole groups, so a count that is not a multiple
+// of the group has a tail they do not reach. A Bayer frame always has even
+// dimensions and never exercises it -- which is why it is worth a test, since
+// everything downstream reads the whole buffer regardless.
+{
+	const { makeDng } = await import('./make-dng.mjs');
+	const W = 5, H = 5;                       // 25 pixels: twelve pairs and one
+	const px = new Uint16Array(W * H);
+	for (let i = 0; i < px.length; i++) px[i] = 100 + i * 37;
+	const e4 = await instantiate(readFileSync(new URL('../dist/engine.wasm', import.meta.url)));
+	e4.open(makeDng({ width: W, height: H, pixels: px, black: 0, white: 4095 }));
+	const raw = new Uint16Array(e4.x.memory.buffer, e4.x.dng_raw_ptr(), W * H);
+	let wrong = 0;
+	for (let i = 0; i < px.length; i++) if (raw[i] !== px[i]) wrong++;
+	check('every pixel of an odd-length frame survives, the last one included', wrong, 0);
+	check('and the last one is the value that was written', raw[W * H - 1], px[W * H - 1]);
+}
+
+console.log('\ngradient-corrected demosaicing beats bilinear on a frame we know the answer to');
+// The only way to score a demosaic is against the picture it was made from:
+// build an RGB scene, throw two thirds of it away in a Bayer pattern, and see
+// which method puts back more of what was taken.
+{
+	const { makeDng } = await import('./make-dng.mjs');
+	const W = 128, H = 128;
+	const truth = new Float64Array(W * H * 3);
+	for (let y = 0; y < H; y++)
+		for (let x = 0; x < W; x++) {
+			// Detail of the kind demosaicing is judged on: a hard diagonal,
+			// fine vertical lines, and a smooth ramp for it not to ruin.
+			const diag = x + y > 120 ? 1 : 0;
+			const lines = (x % 4 < 2) ? 1 : 0;
+			const o = (y * W + x) * 3;
+			truth[o] = 400 + diag * 2600 + lines * 300 + x * 4;
+			truth[o + 1] = 600 + diag * 2000 + lines * 200 + y * 4;
+			truth[o + 2] = 300 + diag * 1200 + lines * 500 + (x + y) * 2;
+		}
+	// RGGB: red at even/even, blue at odd/odd, green on the other two.
+	const px = new Uint16Array(W * H);
+	for (let y = 0; y < H; y++)
+		for (let x = 0; x < W; x++) {
+			const p = (y % 2 === 0) ? (x % 2 === 0 ? 0 : 1) : (x % 2 === 0 ? 1 : 2);
+			px[y * W + x] = Math.min(4095, Math.round(truth[(y * W + x) * 3 + p]));
+		}
+
+	const e3 = await instantiate(readFileSync(new URL('../dist/engine.wasm', import.meta.url)));
+	e3.open(makeDng({ width: W, height: H, pixels: px, black: 0, white: 4095 }));
+
+	// The same transfer the engine applies, so the comparison is like for like.
+	const enc = (v) => {
+		const s = Math.max(0, Math.min(1, v / 4095));
+		return 255 * (s <= 0.0031308 ? s * 12.92 : 1.055 * Math.pow(s, 1 / 2.4) - 0.055);
+	};
+	const score = (mode) => {
+		const r = e3.develop({ demosaic: mode, neutral: [1, 1, 1], useForward: false, gain: 1, step: 1 });
+		let sum = 0, n = 0;
+		for (let y = 3; y < H - 3; y++)
+			for (let x = 3; x < W - 3; x++)
+				for (let p = 0; p < 3; p++) {
+					sum += Math.abs(r.pixels[(y * W + x) * 4 + p] - enc(truth[(y * W + x) * 3 + p]));
+					n++;
+				}
+		return sum / n;
+	};
+	const bilinear = score(DEMOSAIC.bilinear);
+	const gradient = score(DEMOSAIC.gradient);
+	assert('gradient-corrected reconstructs the scene more closely than bilinear',
+		gradient < bilinear * 0.9,
+		`mean error per channel: bilinear ${bilinear.toFixed(2)}, gradient ${gradient.toFixed(2)}`);
+	assert('and both are in the right ballpark rather than nonsense',
+		bilinear < 40 && gradient > 0,
+		`bilinear ${bilinear.toFixed(2)}, gradient ${gradient.toFixed(2)}`);
+}
+
+console.log('\ndiagnose finds what was planted, and nothing else');
+// Built rather than measured: nobody knows where the hot pixels in a real
+// frame are, so a test about finding them has to put them there first.
+{
+	const { makeDng } = await import('./make-dng.mjs');
+	const W = 96, H = 96, BASE = 1000, SIGMA = 12;
+
+	// A fixed sequence, so a failure is the code's and reproduces.
+	let seed = 12345;
+	const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+	const gauss = () => {
+		const u = Math.max(1e-9, rnd()), v = rnd();
+		return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+	};
+
+	const px = new Uint16Array(W * H);
+	for (let i = 0; i < px.length; i++)
+		px[i] = Math.max(0, Math.min(4095, Math.round(BASE + gauss() * SIGMA)));
+
+	const HOT = [[20, 30], [51, 44], [70, 12]];
+	for (const [x, y] of HOT) px[y * W + x] = 4000;
+	const DEAD = [[33, 61]];
+	for (const [x, y] of DEAD) px[y * W + x] = 20;
+
+	// A hard vertical edge: the classic false positive, since every pixel on
+	// its bright side towers over the two neighbours behind it.
+	for (let y = 0; y < H; y++)
+		for (let x = 60; x < W; x++)
+			if (!(x === 70 && y === 12)) px[y * W + x] = Math.max(0, Math.min(4095,
+				Math.round(2400 + gauss() * SIGMA)));
+
+	// And a corner already blown, so the clipped fraction has a known answer.
+	let clipR = 0;
+	for (let y = 0; y < 8; y++)
+		for (let x = 0; x < 8; x++) {
+			px[y * W + x] = 4095;
+			if (x % 2 === 0 && y % 2 === 0) clipR++;   // RGGB: red at even,even
+		}
+
+	const engine2 = await instantiate(readFileSync(new URL('../dist/engine.wasm', import.meta.url)));
+	engine2.open(makeDng({ width: W, height: H, pixels: px, black: 0, white: 4095 }));
+	const d = engine2.diagnose({ sigmas: 8 });
+
+	check('the clipped red fraction is the corner that was blown',
+		+(d.clipped[0] * (W * H / 4)).toFixed(0), clipR);
+	assert('the noise it measures is the noise that was added',
+		Math.abs(d.noise[1] - SIGMA) < SIGMA * 0.25,
+		`measured ${d.noise[1].toFixed(2)} against a planted ${SIGMA}`);
+	assert('the black floor is the base level, not the darkest single pixel',
+		Math.abs(d.blackFloor[1] - BASE) < SIGMA * 4 && d.darkest[2] < d.blackFloor[2],
+		`floor ${d.blackFloor[1]}, darkest blue ${d.darkest[2]}`);
+
+	const found = new Set(d.defects.map((p) => p.x + ',' + p.y));
+	for (const [x, y] of HOT.concat(DEAD))
+		assert(`the defect planted at ${x},${y} was found`, found.has(x + ',' + y));
+	assert('and the edge was not mistaken for four hundred of them',
+		d.defectCount < 12, `${d.defectCount} defects reported`);
+
+	// A frame with nothing wrong must come back with nothing to report, which
+	// is the half that a too-eager detector fails.
+	const clean = new Uint16Array(W * H);
+	seed = 999;
+	for (let i = 0; i < clean.length; i++)
+		clean[i] = Math.max(0, Math.min(4095, Math.round(BASE + gauss() * SIGMA)));
+	engine2.open(makeDng({ width: W, height: H, pixels: clean, black: 0, white: 4095 }));
+	const q = engine2.diagnose({ sigmas: 8 });
+	check('a clean frame reports no defects', q.defectCount, 0);
+	check('and nothing clipped', q.clipped.map((v) => +v.toFixed(6)), [0, 0, 0]);
+}
+
 console.log('\ncalibration recovers a matrix it was not given');
 // The only honest test of a solver is ground truth: plant a known camera
 // response, generate the patches a chart would produce through it, and check
