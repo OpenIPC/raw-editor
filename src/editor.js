@@ -545,10 +545,13 @@ export function mountEditor(root, {
 	 */
 	let diag = null;
 
-	/* A scan is a reading of one frame under one set of inputs. The CFA tells
-	 * it which neighbours are the same colour and the white level tells it what
-	 * counts as clipped, so changing either leaves the old defect coordinates
-	 * describing a frame nobody is looking at any more. */
+	/* A scan is a reading of one frame under one CFA: that is what tells it
+	 * which neighbours are the same colour, so changing it leaves the old
+	 * defect coordinates describing a frame nobody is looking at any more.
+	 *
+	 * The White control is deliberately NOT one of these. It sets where the
+	 * render clips, which is a choice about the picture; the scan asks where
+	 * the SENSOR saturates, which is in the file and does not move. */
 	function invalidateScan() {
 		if (!diag) return;
 		diag = null;
@@ -603,6 +606,11 @@ export function mountEditor(root, {
 		const out = el('div', 're-panel');
 		out.hidden = true;
 		insp.append(out);
+		// A scan that is still valid is still worth showing. Leaving Diagnose
+		// and coming back rebuilt an empty panel over a reading that had not
+		// gone anywhere -- and the marks stayed on the picture, so there were
+		// rings with nothing to explain them.
+		if (diag) renderDiagnose(out);
 
 		run.addEventListener('click', async () => {
 			run.disabled = true;
@@ -612,8 +620,14 @@ export function mountEditor(root, {
 				// is in `result`. Taking the envelope for the result produced
 				// "Cannot read properties of undefined (reading 'map')" from
 				// deep inside the renderer, which said nothing about why.
+				// The FILE's white level, not the slider's. state.white is a
+				// rendering choice -- pull it down to brighten the picture and
+				// every bright pixel would count as clipped, which would take
+				// the real hot pixels out of the report along with the
+				// highlights. Saturation is a property of the sensor and does
+				// not move when someone drags a control.
 				const reply = await call('diagnose',
-					{ cfa: state.cfa, white: state.white, sigmas: 8 });
+					{ cfa: state.cfa, white: state.info.white, sigmas: 8 });
 				diag = reply && reply.result;
 				if (!diag || !diag.blackFloor)
 					throw new Error('the frame was scanned but the reading came back empty');
@@ -1072,7 +1086,7 @@ export function mountEditor(root, {
 		raw.append(new Row('White', {
 			min: Math.round(i.white * 0.25), max: (1 << i.bits) - 1, value: i.white,
 			onInput: (v) => { state.white = v; preview(); },
-			onCommit: (v) => { state.white = v; invalidateScan(); commit(); },
+			onCommit: (v) => { state.white = v; commit(); },
 		}).node);
 		insp.append(raw);
 

@@ -375,6 +375,28 @@ try {
 		host.querySelectorAll('.re-mark').length > 0 ||
 		/None\./.test(host.querySelector('.re-insp').textContent));
 
+	// Moving the render's white point must NOT throw the scan away, because it
+	// is not one of the scan's inputs: saturation is the sensor's and is in the
+	// file. The finding this covers was that lowering White made real hot
+	// pixels disappear from the report.
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+	await new Promise((r) => setTimeout(r, 200));
+	{
+		// The label is uppercased by CSS, not in the DOM, so match what is
+		// actually there.
+		const white = [...host.querySelectorAll('.re-row')]
+			.find((r) => r.querySelector('.re-rname')?.textContent === 'White');
+		t('the White control is where the test expects it', !!white);
+		const input = white.querySelector('input');
+		input.value = String(Math.max(+input.min, +input.value - 200));
+		input.dispatchEvent(new Event('change', { bubbles: true }));
+		await new Promise((r) => setTimeout(r, 500));
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose').click();
+		await new Promise((r) => setTimeout(r, 300));
+		t('moving the render white point keeps the scan, which is not about it',
+			/Black level/.test(host.querySelector('.re-insp').textContent));
+	}
+
 	// A scan describes one frame under one set of inputs. Change the Bayer
 	// pattern and the old defect coordinates describe nothing.
 	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();

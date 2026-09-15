@@ -724,6 +724,23 @@ EXPORT(diagnose) i32 diagnose(i32 cfa, i32 white, float sigmas,
         for (int x = 2; x < w - 2; x++) {
             u16 nb[4];
             if (same_plane_neighbours(x, y, w, h, nb) != 4) continue;
+            /*
+             * A clipped pixel says nothing about itself. It stopped counting
+             * at the white level, so if it saturated and its neighbours came
+             * up just short it stands above all four by construction -- and
+             * the brightest edge in the frame is where that happens most.
+             * Measured on a real frame: the rim of a blown highlight accounted
+             * for most of 2463 reported defects, in a dense line that was
+             * plainly an edge rather than a scatter of bad pixels.
+             *
+             * The neighbours are excluded for the same reason from the other
+             * side: a pixel surrounded by saturation is being compared with
+             * values that are censored rather than measured.
+             */
+            const i32 lim = white;
+            if ((i32)F.raw[y * w + x] >= lim) continue;
+            if ((i32)nb[0] >= lim || (i32)nb[1] >= lim ||
+                (i32)nb[2] >= lim || (i32)nb[3] >= lim) continue;
             const int p = plane_at(cfa, x, y);
             /* A floor of one count, so a synthetic frame with no noise at all
              * does not make every pixel a defect. */
