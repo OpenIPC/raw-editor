@@ -268,6 +268,13 @@ console.log('\ndiagnose finds what was planted, and nothing else');
 	const DEAD = [[33, 61]];
 	for (const [x, y] of DEAD) px[y * W + x] = 20;
 
+	// A thin bright ridge, two pixels wide: the harder false positive. Its
+	// crest really is higher than all four neighbours two pixels away, so no
+	// rule about the candidate alone can tell it from a hot pixel.
+	for (let y = 10; y < H - 10; y++)
+		for (let x = 40; x < 42; x++)
+			px[y * W + x] = Math.max(0, Math.min(4095, Math.round(3000 + gauss() * SIGMA)));
+
 	// A hard vertical edge: the classic false positive, since every pixel on
 	// its bright side towers over the two neighbours behind it.
 	for (let y = 0; y < H; y++)
@@ -306,8 +313,10 @@ console.log('\ndiagnose finds what was planted, and nothing else');
 	const found = new Set(d.defects.map((p) => p.x + ',' + p.y));
 	for (const [x, y] of HOT.concat(DEAD))
 		assert(`the defect planted at ${x},${y} was found`, found.has(x + ',' + y));
-	assert('and the edge was not mistaken for four hundred of them',
+	assert('and neither the edge nor the ridge was mistaken for hundreds of them',
 		d.defectCount < 12, `${d.defectCount} defects reported`);
+	const onRidge = d.defects.filter((p) => p.x >= 38 && p.x <= 43).length;
+	check('nothing on the ridge was called a defect', onRidge, 0);
 
 	// A frame with nothing wrong must come back with nothing to report, which
 	// is the half that a too-eager detector fails.
