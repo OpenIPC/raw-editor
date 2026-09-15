@@ -747,6 +747,34 @@ EXPORT(diagnose) i32 diagnose(i32 cfa, i32 white, float sigmas,
             const double var = stats[3 + p] > 1.0 ? stats[3 + p] : 1.0;
             const double margin2 = (double)sigmas * sigmas * var;
             const double v = F.raw[y * w + x];
+            /*
+             * The neighbours must also agree with EACH OTHER.
+             *
+             * "Higher than all four" does not mean isolated: it is equally
+             * true of the crest of a thin bright line, where the neighbours
+             * two pixels away sit on either side of the ridge. On a real
+             * frame that lit up the whole white piping of a chair, thousands
+             * of pixels of it, and no rule about the candidate alone can tell
+             * that from a hot pixel -- the difference is in the neighbourhood.
+             * Around a bad pixel the four are all reading the same flat
+             * surface and land within the noise of one another; across a
+             * ridge or a corner they do not.
+             */
+            u16 lo = nb[0], hi = nb[0];
+            for (int i = 1; i < 4; i++) {
+                if (nb[i] < lo) lo = nb[i];
+                if (nb[i] > hi) hi = nb[i];
+            }
+            const double spread = (double)hi - lo;
+            /* Five sigma, not three. The RANGE of four Gaussian samples averages
+             * about 2.06 sigma and varies by nearly 0.9 of one, so a three-sigma
+             * limit throws away a useful fraction of perfectly flat
+             * neighbourhoods -- it lost one of four planted defects. Five keeps
+             * them and still excludes a ridge by two orders of magnitude: the
+             * piping this was written for spans thousands of counts where five
+             * sigma is twenty-six. */
+            if (spread * spread > 25.0 * var) continue;
+
             int above = 1, below = 1;
             for (int i = 0; i < 4; i++) {
                 const double d = v - nb[i];
