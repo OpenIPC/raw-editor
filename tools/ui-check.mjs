@@ -33,6 +33,23 @@ const server = createServer(async (req, res) => {
 		reportResults(body);
 		return;
 	}
+	/*
+	 * A chart frame, drawn to order.
+	 *
+	 * The fixture has no colour chart in it and is far too small to hold one,
+	 * and committing a 5 MB photograph to test one button is not worth it. So
+	 * the page asks for a chart at corners of its own choosing and checks what
+	 * comes back against them -- which is a stronger test than a fixture
+	 * anyway, since the right answer is known exactly rather than clicked.
+	 */
+	if (req.url.startsWith('/__chart.dng')) {
+		const q = new URL(req.url, 'http://x').searchParams;
+		const corners = JSON.parse(q.get('corners'));
+		const { makeChartFrame } = await import('./make-chart.mjs');
+		res.writeHead(200, { 'content-type': 'application/octet-stream' });
+		res.end(makeChartFrame({ corners }).bytes);
+		return;
+	}
 	const p = join(ROOT, normalize(decodeURIComponent(req.url.split('?')[0])));
 	try {
 		const body = await readFile(p);

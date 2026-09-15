@@ -31,6 +31,10 @@ void *memset(void *d, int c, unsigned long n) {
 /* ---- allocator ------------------------------------------------------- */
 static float *g_green;
 static i32 g_green_cfa;
+static float *g_ds;
+static i32 *g_lab;
+static i32 *g_stack;
+static i32 g_ds_cap;
 
 /* A bump allocator and no free(): every buffer here lives as long as the
  * frame does, and a frame is replaced wholesale. reset_alloc() is what
@@ -44,6 +48,10 @@ EXPORT(reset_alloc) void reset_alloc(void) {
      * replaced, the cached green plane included. Keeping the pointer would
      * hand the next frame the previous one's greens. */
     g_green = 0;
+    g_ds = 0;
+    g_lab = 0;
+    g_stack = 0;
+    g_ds_cap = 0;
     g_green_cfa = -1;
 }
 
@@ -727,6 +735,511 @@ EXPORT(cfa_score) float cfa_score(i32 cfa) {
     float a = (float)(gsum[0] / gcnt[0]), b = (float)(gsum[1] / gcnt[1]);
     if (a <= 0.f || b <= 0.f) return 0.f;
     return a < b ? a / b : b / a;
+}
+
+/* ---- find the chart --------------------------------------------------
+ *
+ * Where the colour chart is, without being told.
+ *
+ * The chart is the only thing in a normal frame that is two dozen flat
+ * patches of similar size sitting on a regular lattice. Nothing here looks at
+ * colour -- a chart photographed under a red lamp is still a chart -- only at
+ * shape and arrangement, which is what survives the lighting.
+ *
+ *   1. shrink the mosaic to a small luma image, working from the greens;
+ *   2. mark every pixel whose 3x3 neighbourhood is flat;
+ *   3. label the connected flat regions, which are the patches, because the
+ *      dark gaps between them are not flat;
+ *   4. take each region with a plausible shape as a candidate, and for pairs
+ *      of near neighbours propose the lattice they imply;
+ *   5. score a lattice by how many of the 24 cells actually contain a
+ *      candidate, and keep the best.
+ *
+ * Step 5 is what makes it robust: a wall or a door panel produces one big flat
+ * region, never two dozen on a grid, so it cannot score. The answer is the
+ * four corners, and the caller is free to nudge them -- detection assists the
+ * corners, it does not replace them.
+ */
+#define CHART_COLS 6
+#define CHART_ROWS 4
+#define CHART_DS_TARGET 360      /* the small image is about this wide */
+#define CHART_MAX_BLOBS 512
+#define CHART_NEIGHBOURS 8
+
+typedef struct { float cx, cy, area, w, h; } Blob;
+
+static i32 chart_downscale(i32 cfa, int *dw, int *dh, int *scale) {
+    const int w = F.width, h = F.height;
+    int sc = w / CHART_DS_TARGET;
+    if (sc < 1) sc = 1;
+    sc &= ~1;                    /* whole CFA quads, so every block sees green */
+    if (sc < 2) sc = 2;
+    const int ow = w / sc, oh = h / sc;
+    if (ow < 24 || oh < 16) return ERR_SIZE;
+    const u32 need = (u32)ow * (u32)oh;
+    if (!g_ds || g_ds_cap < (i32)need) {
+        g_ds = (float *)alloc(need * 4u);
+        g_lab = (i32 *)alloc(need * 4u);
+        g_stack = (i32 *)alloc(need * 4u);
+        if (!g_ds || !g_lab || !g_stack) { g_ds = 0; return ERR_SIZE; }
+        g_ds_cap = (i32)need;
+    }
+    for (int y = 0; y < oh; y++)
+        for (int x = 0; x < ow; x++) {
+            double sum = 0; int n = 0;
+            for (int by = 0; by < sc; by++)
+                for (int bx = 0; bx < sc; bx++) {
+                    const int px = x * sc + bx, py = y * sc + by;
+                    if (px >= w || py >= h) continue;
+                    if (plane_at(cfa, px, py) != 1) continue;   /* greens carry the luma */
+                    sum += F.raw[py * w + px];
+                    n++;
+                }
+            g_ds[y * ow + x] = n ? (float)(sum / n) : 0.f;
+        }
+    *dw = ow; *dh = oh; *scale = sc;
+    return ERR_OK;
+}
+
+/* Corners of the quad the lattice implies, half a cell out from the centres of
+ * the four corner patches. */
+static void chart_corners_from(const float *o, const float *s1, const float *s2,
+                               int cols, int rows, float *out8) {
+    const float half1[2] = { s1[0] * 0.5f, s1[1] * 0.5f };
+    const float half2[2] = { s2[0] * 0.5f, s2[1] * 0.5f };
+    const int cc = cols - 1, rr = rows - 1;
+    /* top-left, top-right, bottom-right, bottom-left, in chart order */
+    out8[0] = o[0] - half1[0] - half2[0];
+    out8[1] = o[1] - half1[1] - half2[1];
+    out8[2] = o[0] + s1[0] * cc + half1[0] - half2[0];
+    out8[3] = o[1] + s1[1] * cc + half1[1] - half2[1];
+    out8[4] = o[0] + s1[0] * cc + half1[0] + s2[0] * rr + half2[0];
+    out8[5] = o[1] + s1[1] * cc + half1[1] + s2[1] * rr + half2[1];
+    out8[6] = o[0] - half1[0] + s2[0] * rr + half2[0];
+    out8[7] = o[1] - half1[1] + s2[1] * rr + half2[1];
+}
+
+/*
+ * out8 receives the four corners in full-frame pixels, chart order: the patch
+ * that reads top-left first, then clockwise. Returns how many of the 24 cells
+ * were actually found, so a caller can refuse a weak answer; 0 means no
+ * lattice worth reporting.
+ */
+EXPORT(detect_chart) i32 detect_chart(i32 cfa, float *out8) {
+    int dw, dh, sc;
+    if (!F.raw || !out8) return ERR_SIZE;
+    if (chart_downscale(cfa, &dw, &dh, &sc) != ERR_OK) return 0;
+    const int n = dw * dh;
+
+    /* How flat is flat? Taken from the picture rather than picked: the median
+     * of the local ranges, so a noisy frame and a clean one both get a
+     * threshold that means the same thing. */
+    float thr;
+    {
+        static u32 hist[1024];
+        for (int i = 0; i < 1024; i++) hist[i] = 0;
+        float maxr = 1.f;
+        for (int y = 1; y < dh - 1; y++)
+            for (int x = 1; x < dw - 1; x++) {
+                float lo = g_ds[y * dw + x], hi = lo;
+                for (int oy = -1; oy <= 1; oy++)
+                    for (int ox = -1; ox <= 1; ox++) {
+                        const float v = g_ds[(y + oy) * dw + (x + ox)];
+                        if (v < lo) lo = v;
+                        if (v > hi) hi = v;
+                    }
+                const float r = hi - lo;
+                if (r > maxr) maxr = r;
+            }
+        for (int y = 1; y < dh - 1; y++)
+            for (int x = 1; x < dw - 1; x++) {
+                float lo = g_ds[y * dw + x], hi = lo;
+                for (int oy = -1; oy <= 1; oy++)
+                    for (int ox = -1; ox <= 1; ox++) {
+                        const float v = g_ds[(y + oy) * dw + (x + ox)];
+                        if (v < lo) lo = v;
+                        if (v > hi) hi = v;
+                    }
+                int b = (int)((hi - lo) / maxr * 1023.f);
+                if (b > 1023) b = 1023;
+                hist[b]++;
+            }
+        u32 total = 0;
+        for (int i = 0; i < 1024; i++) total += hist[i];
+        /*
+         * A MULTIPLE of the noise, not a percentile of everything.
+         *
+         * Most of a frame is flat, so the median local range is essentially
+         * the noise -- and setting the threshold there means half of every
+         * flat area fails it, which shatters the patches into speckle instead
+         * of filling them. Measured: 230 regions on a frame with 24 patches,
+         * the largest of them 47 pixels where a patch is about 1200.
+         *
+         * Three times the noise fills a flat patch completely and still stops
+         * dead at the gaps between them, which are hundreds of counts.
+         */
+        u32 seen = 0; int med = 0;
+        for (int i = 0; i < 1024; i++) { seen += hist[i]; if (seen * 2 >= total) { med = i; break; } }
+        thr = (float)med / 1023.f * maxr * 3.f;
+        if (thr < 1.f) thr = 1.f;
+    }
+
+    for (int i = 0; i < n; i++) g_lab[i] = -1;
+    Blob blobs[CHART_MAX_BLOBS];
+    int nb = 0;
+
+    for (int y = 1; y < dh - 1 && nb < CHART_MAX_BLOBS; y++) {
+        for (int x = 1; x < dw - 1 && nb < CHART_MAX_BLOBS; x++) {
+            const int start = y * dw + x;
+            if (g_lab[start] != -1) continue;
+            float lo = g_ds[start], hi = lo;
+            for (int oy = -1; oy <= 1; oy++)
+                for (int ox = -1; ox <= 1; ox++) {
+                    const float v = g_ds[(y + oy) * dw + (x + ox)];
+                    if (v < lo) lo = v;
+                    if (v > hi) hi = v;
+                }
+            if (hi - lo > thr) { g_lab[start] = -2; continue; }
+
+            int sp = 0, count = 0;
+            double sx = 0, sy = 0;
+            int minx = x, maxx = x, miny = y, maxy = y;
+            g_stack[sp++] = start;
+            g_lab[start] = nb;
+            while (sp > 0) {
+                const int p = g_stack[--sp];
+                const int px = p % dw, py = p / dw;
+                count++; sx += px; sy += py;
+                if (px < minx) minx = px;
+                if (px > maxx) maxx = px;
+                if (py < miny) miny = py;
+                if (py > maxy) maxy = py;
+                const int nbr[4] = { p - 1, p + 1, p - dw, p + dw };
+                const int okx[4] = { px > 1, px < dw - 2, 1, 1 };
+                for (int k = 0; k < 4; k++) {
+                    if (!okx[k]) continue;
+                    const int q = nbr[k];
+                    if (q < dw || q >= n - dw) continue;
+                    if (g_lab[q] != -1) continue;
+                    const int qx = q % dw, qy = q / dw;
+                    if (qx < 1 || qx >= dw - 1 || qy < 1 || qy >= dh - 1) { g_lab[q] = -2; continue; }
+                    float qlo = g_ds[q], qhi = qlo;
+                    for (int oy = -1; oy <= 1; oy++)
+                        for (int ox = -1; ox <= 1; ox++) {
+                            const float v = g_ds[(qy + oy) * dw + (qx + ox)];
+                            if (v < qlo) qlo = v;
+                            if (v > qhi) qhi = v;
+                        }
+                    if (qhi - qlo > thr) { g_lab[q] = -2; continue; }
+                    g_lab[q] = nb;
+                    if (sp < n) g_stack[sp++] = q;
+                }
+            }
+            const float bw = (float)(maxx - minx + 1), bh = (float)(maxy - miny + 1);
+            /* A patch is a solid, roughly square lump. A wall is far too big
+             * and a noise speck far too small; a door frame is long and thin. */
+            if (count < 6 || count > n / 12) continue;
+            if (bw < 2.f || bh < 2.f) continue;
+            const float aspect = bw > bh ? bw / bh : bh / bw;
+            if (aspect > 2.2f) continue;
+            if ((float)count < 0.55f * bw * bh) continue;
+            blobs[nb].cx = (float)(sx / count);
+            blobs[nb].cy = (float)(sy / count);
+            blobs[nb].area = (float)count;
+            blobs[nb].w = bw; blobs[nb].h = bh;
+            nb++;
+        }
+    }
+    if (nb < 12) return 0;
+
+    /* The lattice. Each candidate proposes, with two of its near neighbours,
+     * the two steps of a grid; every other candidate then votes by landing on
+     * a cell of it or not. */
+    int best = 0;
+    float bo[2] = {0, 0}, bs1[2] = {0, 0}, bs2[2] = {0, 0};
+    int bcols = CHART_COLS, brows = CHART_ROWS;
+
+    for (int i = 0; i < nb; i++) {
+        int near[CHART_NEIGHBOURS];
+        float nd[CHART_NEIGHBOURS];
+        int nn = 0;
+        for (int j = 0; j < nb; j++) {
+            if (j == i) continue;
+            const float dx = blobs[j].cx - blobs[i].cx, dy = blobs[j].cy - blobs[i].cy;
+            const float d = dx * dx + dy * dy;
+            if (nn < CHART_NEIGHBOURS) { near[nn] = j; nd[nn] = d; nn++; }
+            else {
+                int worst = 0;
+                for (int k = 1; k < nn; k++) if (nd[k] > nd[worst]) worst = k;
+                if (d < nd[worst]) { near[worst] = j; nd[worst] = d; }
+            }
+        }
+        for (int a = 0; a < nn; a++) {
+            for (int b = 0; b < nn; b++) {
+                if (a == b) continue;
+                float s1[2] = { blobs[near[a]].cx - blobs[i].cx, blobs[near[a]].cy - blobs[i].cy };
+                float s2[2] = { blobs[near[b]].cx - blobs[i].cx, blobs[near[b]].cy - blobs[i].cy };
+                const float l1 = s1[0] * s1[0] + s1[1] * s1[1];
+                const float l2 = s2[0] * s2[0] + s2[1] * s2[1];
+                if (l1 < 4.f || l2 < 4.f) continue;
+                /* Roughly the same pitch both ways, and roughly square to each
+                 * other: the chart's cells are, whatever angle it is seen at. */
+                const float ratio = l1 > l2 ? l1 / l2 : l2 / l1;
+                if (ratio > 2.0f) continue;
+                const float dot = s1[0] * s2[0] + s1[1] * s2[1];
+                if (dot * dot > 0.25f * l1 * l2) continue;
+
+                /* Invert the two steps so a candidate can be asked which cell
+                 * it would be. */
+                const float det = s1[0] * s2[1] - s1[1] * s2[0];
+                if (det > -1e-3f && det < 1e-3f) continue;
+                const float inv[4] = { s2[1] / det, -s2[0] / det, -s1[1] / det, s1[0] / det };
+
+                for (int orient = 0; orient < 2; orient++) {
+                    const int cols = orient ? CHART_ROWS : CHART_COLS;
+                    const int rows = orient ? CHART_COLS : CHART_ROWS;
+                    /* Where the corner cell would be, if this candidate is the
+                     * cell at (ox,oy) of the grid. Every placement is tried. */
+                    for (int oy = 0; oy < rows; oy++) {
+                        for (int ox = 0; ox < cols; ox++) {
+                            unsigned char seen[CHART_COLS * CHART_ROWS];
+                            for (int k = 0; k < cols * rows; k++) seen[k] = 0;
+                            int hits = 0;
+                            for (int j = 0; j < nb; j++) {
+                                const float dx = blobs[j].cx - blobs[i].cx;
+                                const float dy = blobs[j].cy - blobs[i].cy;
+                                const float u = inv[0] * dx + inv[1] * dy;
+                                const float v = inv[2] * dx + inv[3] * dy;
+                                const float ru = u < 0 ? -(float)(int)(0.5f - u) : (float)(int)(u + 0.5f);
+                                const float rv = v < 0 ? -(float)(int)(0.5f - v) : (float)(int)(v + 0.5f);
+                                const float eu = u - ru, ev = v - rv;
+                                if (eu * eu + ev * ev > 0.09f) continue;   /* within 0.3 of a cell */
+                                /* And the same size as the patch that proposed
+                                 * the lattice. A chart's cells are all one
+                                 * size; a scattering of background regions is
+                                 * not, so this is what stops a grid being
+                                 * found in things that merely happen to line
+                                 * up. */
+                                const float ar = blobs[j].area > blobs[i].area
+                                    ? blobs[j].area / blobs[i].area
+                                    : blobs[i].area / blobs[j].area;
+                                if (ar > 2.0f) continue;
+                                const int cu = (int)ru + ox, cv = (int)rv + oy;
+                                if (cu < 0 || cu >= cols || cv < 0 || cv >= rows) continue;
+                                if (seen[cv * cols + cu]) continue;
+                                seen[cv * cols + cu] = 1;
+                                hits++;
+                            }
+                            if (hits > best) {
+                                best = hits;
+                                bo[0] = blobs[i].cx - s1[0] * ox - s2[0] * oy;
+                                bo[1] = blobs[i].cy - s1[1] * ox - s2[1] * oy;
+                                bs1[0] = s1[0]; bs1[1] = s1[1];
+                                bs2[0] = s2[0]; bs2[1] = s2[1];
+                                bcols = cols; brows = rows;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* Three quarters of the chart, or it is not a chart. Low enough that a
+     * patch lost to a reflection or a shadow does not sink the answer, high
+     * enough that a coincidence cannot reach it. */
+    if (best < 18) return 0;
+
+    /* The long axis is the chart's six columns. The search is free to call
+     * either step "across", so whichever one spans six cells becomes s1 --
+     * otherwise the corners come back describing the chart stood on end. */
+    if (bcols != CHART_COLS) {
+        float t[2];
+        t[0] = bs1[0]; t[1] = bs1[1];
+        bs1[0] = bs2[0]; bs1[1] = bs2[1];
+        bs2[0] = t[0]; bs2[1] = t[1];
+        bcols = CHART_COLS; brows = CHART_ROWS;
+    }
+
+    /*
+     * The basis has to be right-handed before anything is asked of it.
+     *
+     * Nothing so far has fixed which way round the two steps run: the lattice
+     * search takes them from whichever neighbours it happened to try, and the
+     * swap just above exchanges them, which reverses the handedness outright.
+     * A left-handed basis describes the chart MIRRORED, and a camera cannot
+     * see a flat chart mirrored -- so the placements built from it are all
+     * wrong, and the ramp test below then chooses between two of them and
+     * reports the less wrong one with every appearance of success. On the lab
+     * frame it did exactly that: the quad landed on the chart to the pixel,
+     * wound the wrong way round, with the patches numbered from the far
+     * corner.
+     *
+     * Negating the row step fixes the handedness; moving the origin to the
+     * far row keeps the lattice over the same blobs. What is left is the two
+     * proper placements -- a chart the right way up and the same chart turned
+     * 180 degrees -- which is exactly what the ramp test is able to decide.
+     */
+    if (bs1[0] * bs2[1] - bs1[1] * bs2[0] < 0.f) {
+        bo[0] += bs2[0] * (float)(brows - 1);
+        bo[1] += bs2[1] * (float)(brows - 1);
+        bs2[0] = -bs2[0]; bs2[1] = -bs2[1];
+    }
+
+    /*
+     * Which end is the top left.
+     *
+     * A lattice is symmetric: nothing about the grid says which corner holds
+     * the dark skin patch and which the black one, and getting it wrong hands
+     * the solver twenty-four patches in the wrong order -- which it cannot
+     * detect, because every one of them is a plausible colour.
+     *
+     * The chart says so itself, without anybody looking at colour: its bottom
+     * row is the neutral ramp, and a ramp runs one way. Both placements are
+     * scored by how steadily that row falls from white to black, and the
+     * better one wins. Turned 180 degrees, a falling ramp reads as a rising
+     * one, so the two are never close.
+     */
+    {
+        float bestFall = -1e30f;
+        float fo[2], f1[2], f2[2];
+        fo[0] = bo[0]; fo[1] = bo[1];
+        f1[0] = bs1[0]; f1[1] = bs1[1];
+        f2[0] = bs2[0]; f2[1] = bs2[1];
+        for (int flip = 0; flip < 2; flip++) {
+            float o[2], s1[2], s2[2];
+            if (!flip) {
+                o[0] = bo[0]; o[1] = bo[1];
+                s1[0] = bs1[0]; s1[1] = bs1[1];
+                s2[0] = bs2[0]; s2[1] = bs2[1];
+            } else {
+                /* The same grid entered from the opposite corner. */
+                o[0] = bo[0] + bs1[0] * (CHART_COLS - 1) + bs2[0] * (CHART_ROWS - 1);
+                o[1] = bo[1] + bs1[1] * (CHART_COLS - 1) + bs2[1] * (CHART_ROWS - 1);
+                s1[0] = -bs1[0]; s1[1] = -bs1[1];
+                s2[0] = -bs2[0]; s2[1] = -bs2[1];
+            }
+            /*
+             * MONOTONIC, not merely falling. A ramp goes down at every step;
+             * the top row of a chart, read backwards, can easily go down
+             * overall while wandering on the way -- on the lab frame it did,
+             * and the chart came back upside down with its patches handed to
+             * the solver in the wrong order, which nothing downstream could
+             * have noticed because every one of them is a plausible colour.
+             *
+             * So the steps that go the right way are counted, and the size of
+             * the fall only breaks ties.
+             */
+            float fall = 0.f;
+            float prev = 0.f;
+            int steps = 0, ok = 1;
+            for (int c = 0; c < CHART_COLS; c++) {
+                const float px = o[0] + s1[0] * c + s2[0] * (CHART_ROWS - 1);
+                const float py = o[1] + s1[1] * c + s2[1] * (CHART_ROWS - 1);
+                const int ix = (int)(px + 0.5f), iy = (int)(py + 0.5f);
+                if (ix < 1 || iy < 1 || ix >= dw - 1 || iy >= dh - 1) { ok = 0; break; }
+                /* The mean of a small block: one pixel of a downscaled frame is
+                 * still one noisy sample. */
+                float v = 0.f;
+                for (int oy = -1; oy <= 1; oy++)
+                    for (int ox = -1; ox <= 1; ox++) v += g_ds[(iy + oy) * dw + (ix + ox)];
+                v /= 9.f;
+                if (c) { fall += prev - v; if (v < prev) steps++; }
+                prev = v;
+            }
+            if (!ok) continue;
+            /* Each step the right way is worth more than any amount of fall. */
+            fall += (float)steps * 1e6f;
+            if (fall > bestFall) {
+                bestFall = fall;
+                fo[0] = o[0]; fo[1] = o[1];
+                f1[0] = s1[0]; f1[1] = s1[1];
+                f2[0] = s2[0]; f2[1] = s2[1];
+            }
+        }
+        bo[0] = fo[0]; bo[1] = fo[1];
+        bs1[0] = f1[0]; bs1[1] = f1[1];
+        bs2[0] = f2[0]; bs2[1] = f2[1];
+    }
+
+    /*
+     * The lattice is affine -- two steps and an origin -- and a chart seen at
+     * an angle is not: its far cells are closer together than its near ones.
+     * Reading the corners straight off the lattice put them 27 px out on a
+     * frame where a square chart was 1.8.
+     *
+     * Every matched patch knows its cell now, so the mapping from chart space
+     * to the picture can be solved properly, from all of them at once, and the
+     * corners read off that.
+     */
+    float c8[8];
+    {
+        float A[8][9];
+        int rows_used = 0;
+        float src[CHART_COLS * CHART_ROWS][2], dst[CHART_COLS * CHART_ROWS][2];
+        int m = 0;
+        const float det = bs1[0] * bs2[1] - bs1[1] * bs2[0];
+        const float inv[4] = { bs2[1] / det, -bs2[0] / det, -bs1[1] / det, bs1[0] / det };
+        for (int j = 0; j < nb && m < CHART_COLS * CHART_ROWS; j++) {
+            const float dx = blobs[j].cx - bo[0], dy = blobs[j].cy - bo[1];
+            const float u = inv[0] * dx + inv[1] * dy, v = inv[2] * dx + inv[3] * dy;
+            const int cu = (int)(u + (u < 0 ? -0.5f : 0.5f));
+            const int cv = (int)(v + (v < 0 ? -0.5f : 0.5f));
+            if (cu < 0 || cu >= bcols || cv < 0 || cv >= brows) continue;
+            const float eu = u - cu, ev = v - cv;
+            if (eu * eu + ev * ev > 0.09f) continue;
+            /* Chart space: the centre of cell (cu,cv) in a unit square. */
+            src[m][0] = ((float)cu + 0.5f) / (float)bcols;
+            src[m][1] = ((float)cv + 0.5f) / (float)brows;
+            dst[m][0] = blobs[j].cx;
+            dst[m][1] = blobs[j].cy;
+            m++;
+        }
+        /* Eight unknowns, so eight equations from the normal form: every pair
+         * contributes two rows and they are accumulated rather than stored. */
+        float N[8][9];
+        for (int r = 0; r < 8; r++) for (int c = 0; c < 9; c++) N[r][c] = 0.f;
+        for (int k = 0; k < m; k++) {
+            const float u = src[k][0], v = src[k][1], X = dst[k][0], Y = dst[k][1];
+            const float r1[9] = { u, v, 1, 0, 0, 0, -u * X, -v * X, X };
+            const float r2[9] = { 0, 0, 0, u, v, 1, -u * Y, -v * Y, Y };
+            for (int a = 0; a < 8; a++)
+                for (int b = 0; b < 9; b++)
+                    N[a][b] += r1[a] * r1[b] + r2[a] * r2[b];
+        }
+        (void)A; (void)rows_used;
+        /* Gauss-Jordan with partial pivoting on the 8x9 normal system. */
+        int ok = m >= 6;
+        for (int col = 0; col < 8 && ok; col++) {
+            int piv = col;
+            for (int r = col + 1; r < 8; r++)
+                if ((N[r][col] < 0 ? -N[r][col] : N[r][col]) >
+                    (N[piv][col] < 0 ? -N[piv][col] : N[piv][col])) piv = r;
+            const float pv = N[piv][col];
+            if (pv > -1e-9f && pv < 1e-9f) { ok = 0; break; }
+            for (int c = 0; c < 9; c++) { const float t = N[col][c]; N[col][c] = N[piv][c]; N[piv][c] = t; }
+            for (int r = 0; r < 8; r++) {
+                if (r == col) continue;
+                const float f = N[r][col] / N[col][col];
+                for (int c = col; c < 9; c++) N[r][c] -= f * N[col][c];
+            }
+        }
+        if (ok) {
+            float H[9];
+            for (int r = 0; r < 8; r++) H[r] = N[r][8] / N[r][r];
+            H[8] = 1.f;
+            const float uu[4] = {0.f, 1.f, 1.f, 0.f}, vv[4] = {0.f, 0.f, 1.f, 1.f};
+            for (int k = 0; k < 4; k++) {
+                const float wq = H[6] * uu[k] + H[7] * vv[k] + H[8];
+                c8[k * 2] = (H[0] * uu[k] + H[1] * vv[k] + H[2]) / wq;
+                c8[k * 2 + 1] = (H[3] * uu[k] + H[4] * vv[k] + H[5]) / wq;
+            }
+        } else {
+            chart_corners_from(bo, bs1, bs2, bcols, brows, c8);
+        }
+    }
+    for (int k = 0; k < 8; k++) out8[k] = c8[k] * (float)sc + (float)sc * 0.5f;
+    return best;
 }
 
 /* ---- diagnose --------------------------------------------------------

@@ -429,6 +429,71 @@ console.log('\ncalibration recovers a matrix it was not given');
 		`top row spans ${topRun.toFixed(1)}, bottom ${bottomRun.toFixed(1)}`);
 }
 
+console.log('\nthe chart is found where it was drawn');
+{
+	// A real photograph cannot test this: the chart's corners there are
+	// wherever they are, to within however well anyone can click. So the
+	// frames below are drawn through a homography and compared against the
+	// corners that drew them.
+	const { makeChartFrame } = await import('./make-chart.mjs');
+	// Twice the area of a chart cell, and every case below beats it by a
+	// wide margin -- the tolerance is here so noise cannot make the suite
+	// flap, not because the answers are near it.
+	const TOL = 3;
+	const area = (c) => {
+		let a = 0;
+		for (let i = 0; i < 4; i++) { const p = c[i], q = c[(i + 1) % 4]; a += p[0] * q[1] - q[0] * p[1]; }
+		return a;
+	};
+	const cases = [
+		['square', [[120, 90], [520, 90], [520, 380], [120, 380]]],
+		['tilted', [[120, 90], [520, 110], [500, 380], [140, 360]]],
+		['in perspective', [[150, 60], [540, 120], [470, 420], [100, 330]]],
+		['small in frame', [[300, 200], [460, 205], [458, 320], [298, 315]]],
+		// Turned end for end: the lattice is identical, and only the grey
+		// ramp says which way up it is.
+		['upside down', [[520, 380], [120, 380], [120, 90], [520, 90]]],
+		// On its side, so the six columns run down the frame rather than
+		// across it. This is the case that makes the search swap its two
+		// steps, and a swap reverses the handedness of the basis -- see the
+		// winding check below, which is what this case exists to exercise.
+		['on its side', [[400, 60], [400, 420], [200, 420], [200, 60]]],
+	];
+	for (const [name, truth] of cases) {
+		engine.open(makeChartFrame({ corners: truth }).bytes);
+		const got = engine.detectChart();
+		if (!got) { assert(`a chart ${name} is found`, false); continue; }
+		let worst = 0;
+		for (let i = 0; i < 4; i++)
+			worst = Math.max(worst, Math.hypot(got.corners[i][0] - truth[i][0],
+				got.corners[i][1] - truth[i][1]));
+		check(`a chart ${name} gives all 24 cells`, got.cells, 24);
+		assert(`and its corners land where it was drawn`, worst < TOL,
+			`worst corner off by ${worst.toFixed(1)} px`);
+		/*
+		 * The corners must wind the same way the chart does.
+		 *
+		 * This is not a detail of presentation. The lattice search takes its
+		 * two steps from whichever neighbours it tried, so the basis can come
+		 * out left-handed, and the corners then describe the chart MIRRORED --
+		 * which a camera cannot see of something flat. Nothing downstream can
+		 * catch it: the quad still lands on the chart to the pixel, and the
+		 * solver is handed twenty-four plausible colours numbered from the
+		 * wrong corner. Only the winding says so.
+		 */
+		assert(`and wind the same way round as the chart`,
+			Math.sign(area(got.corners)) === Math.sign(area(truth)),
+			`chart ${area(truth) > 0 ? '+' : '-'}, detected ${area(got.corners) > 0 ? '+' : '-'}`);
+	}
+
+	// Saying "no chart" is half the job: a detector that answers every frame
+	// would hand the solver a lattice fitted to the furniture.
+	for (const f of ['fixture.dng', 'hostile-model.dng']) {
+		engine.open(readFileSync(new URL(`../tests/${f}`, import.meta.url)));
+		assert(`${f} has no chart in it, and none is reported`, engine.detectChart() === null);
+	}
+}
+
 console.log('\nhostile metadata stays data');
 const hostile = engine.open(readFileSync(new URL('../tests/hostile-model.dng', import.meta.url)));
 check('the model is carried through verbatim', hostile.model, '<img src=x onerror="window.__pwned=1">');
