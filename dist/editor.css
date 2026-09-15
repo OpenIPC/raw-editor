@@ -157,3 +157,7 @@
 .re-busy { position: absolute; right: 14px; top: 14px; padding: 5px 9px; border-radius: 7px;
 	font-size: 11px; background: rgba(13,15,20,.72); border: 1px solid rgba(255,255,255,.09);
 	color: #b9bec9; }
+
+/* The deviation histogram. currentColor so the bars and rules follow the
+ * panel's text colour rather than needing their own palette. */
+.re-devplot { display: block; width: 100%; height: auto; color: #b9bec9; }

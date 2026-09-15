@@ -467,6 +467,115 @@ try {
 	t('calibrate works end to end', false, e.message);
 }
 
+/* The defect scan says how much to trust itself.
+ *
+ * A bare count was the original output and it was badly misleading: on a
+ * furnished room the scan reported 291 pixels of which four survived a change
+ * of scene, and Sony ships sensors as good with up to 800 white pixels in the
+ * dark. The count alone cannot carry that, so the panel now shows the
+ * distribution and the arrangement beside it. */
+try {
+	const host = document.createElement('div');
+	document.body.append(host);
+	const ed = mountEditor(host, { base: '../dist/', styles: false, autoCapture: false });
+	const scan = async () => {
+		host.querySelector('[data-act="scan"]').click();
+		for (let i = 0; i < 120 && !host.querySelector('.re-devplot'); i++)
+			await new Promise((r) => setTimeout(r, 100));
+		await new Promise((r) => setTimeout(r, 200));
+	};
+
+	// Clumped defects: the arrangement of scene detail, not of silicon.
+	await ed.open(new Uint8Array(await (await fetch('/__defects.dng?mode=clustered&n=120')).arrayBuffer()),
+		'clustered.dng');
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose').click();
+	await new Promise((r) => setTimeout(r, 250));
+	await scan();
+
+	t('the scan draws the deviation histogram', !!host.querySelector('.re-devplot'));
+	t('with bars in it, not an empty frame',
+		host.querySelectorAll('.re-devplot rect').length > 5,
+		String(host.querySelectorAll('.re-devplot rect').length));
+	t('and the Gaussian that noise alone would give',
+		!!host.querySelector('.re-devplot polyline'));
+	t('a clumped set is called out as following the picture',
+		/not scattered the way sensor defects are/i.test(host.textContent),
+		host.querySelector('.re-notice')?.textContent.slice(0, 70) || '(said nothing)');
+
+	// Scattered defects: what silicon looks like. The warning must go away,
+	// or it is decoration rather than a verdict.
+	await ed.open(new Uint8Array(await (await fetch('/__defects.dng?mode=scattered&n=120')).arrayBuffer()),
+		'scattered.dng');
+	await new Promise((r) => setTimeout(r, 250));
+	await scan();
+	t('a scattered set is not', !/not scattered the way sensor defects are/i.test(host.textContent));
+
+	// The brightness gate has to be offered, and has to change the answer.
+	{
+		const before = host.querySelector('[data-act="scan"]');
+		t('the scan offers to look only where the picture is dark',
+			[...host.querySelectorAll('.re-seg button')].some((b) => b.textContent === 'Darkest'));
+		// "None." carries no digit, and on this fixture the darkest quarter
+		// legitimately finds none: the field is uniformly flat, so the only
+		// thing raising a site's local background is its own spike, and the
+		// defects gate themselves out. A real frame's background is scene
+		// content, against which one pixel in forty-nine is nothing.
+		const countOf = () => {
+			// No \b before None: textContent runs the "Defects" heading straight
+			// into it, so there is no word boundary to match on.
+			if (/None\. No pixel disagrees/.test(host.textContent)) return 0;
+			const m = host.textContent.match(/(\d+) pixels? disagree/);
+			return m ? Number(m[1]) : undefined;
+		};
+		const wide = countOf();
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Darkest').click();
+		await new Promise((r) => setTimeout(r, 250));
+		t('choosing it throws away the reading taken somewhere else',
+			!host.querySelector('.re-devplot'), 'the old histogram is still on screen');
+		await scan();
+		t('and the new reading says where it looked',
+			/only where the picture is dark/i.test(host.textContent));
+		const narrow = countOf();
+		t('finding no more than the whole frame did',
+			wide !== undefined && narrow !== undefined && narrow <= wide,
+			`${wide} everywhere, ${narrow} in the darkest quarter | panel says: ` +
+			`${wide} everywhere, ${narrow} in the darkest quarter`);
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Everywhere').click();
+		await new Promise((r) => setTimeout(r, 250));
+		await scan();
+	}
+
+	// Holding a scan and comparing it against a different view. This is the
+	// one measurement here that actually separates silicon from scenery.
+	{
+		const hold = host.querySelector('[data-act="hold-scan"]');
+		t('a scan can be held for comparison', !!hold);
+		hold.click();
+		await new Promise((r) => setTimeout(r, 120));
+		t('and says it is holding one',
+			host.querySelector('[data-act="hold-scan"]')?.disabled === true);
+
+		await ed.open(new Uint8Array(await (await fetch('/__defects.dng?mode=scattered&n=120&seed=77')).arrayBuffer()),
+			'other-view.dng');
+		await new Promise((r) => setTimeout(r, 250));
+		await scan();
+		t('scanning a different view compares the two',
+			/are here too/i.test(host.textContent),
+			host.textContent.match(/\d+ of the \d+ found in [^.]*\./)?.[0] || '(no comparison)');
+		const keep = host.querySelector('[data-act="keep-common"]');
+		t('and offers to keep only what appeared in both', !!keep);
+		// Two independently seeded scatterings share almost nothing, which is
+		// the correct answer and the point of the comparison.
+		t('which, for two unrelated views, is almost nothing',
+			!!keep && /Mark only those [0-5]$/.test(keep.textContent),
+			keep?.textContent);
+	}
+	ed.destroy();
+	host.remove();
+} catch (e) {
+	t('the defect scan reports its own trustworthiness', false, e.message);
+}
+
 /* Finding the chart rather than dragging it on.
  *
  * The engine's own tests prove the detector; this one proves the button --

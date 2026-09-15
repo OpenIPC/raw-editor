@@ -429,6 +429,82 @@ console.log('\ncalibration recovers a matrix it was not given');
 		`top row spans ${topRun.toFixed(1)}, bottom ${bottomRun.toFixed(1)}`);
 }
 
+console.log('\nthe defect scan reports its own trustworthiness');
+{
+	// The fixture is a 256x256 crop, so these are shape checks rather than
+	// checks on a defect population. What is being tested is that the extra
+	// reporting is computed and internally consistent, not what it says about
+	// one small frame.
+	engine.open(readFileSync(new URL('../tests/fixture.dng', import.meta.url)));
+	const d = engine.diagnose();
+
+	check('the deviation histogram has EMVA’s 256 bins', d.deviation.counts.length, 256);
+	assert('it counts nearly every pixel that has four same-colour neighbours',
+		d.deviation.total > 0.9 * 252 * 252 && d.deviation.total <= 256 * 256,
+		`${d.deviation.total} of ~${252 * 252}`);
+	assert('its bin width comes from the noise, not the extremes', d.deviation.binWidth > 0,
+		String(d.deviation.binWidth));
+	/*
+	 * The distribution has to be centred and roughly symmetric, or the
+	 * Gaussian overlay drawn against it is meaningless. A pixel is as likely
+	 * to sit above its neighbours as below.
+	 */
+	const mid = 128, lo = d.deviation.counts.slice(0, mid).reduce((a, b) => a + b, 0);
+	const hi = d.deviation.counts.slice(mid).reduce((a, b) => a + b, 0);
+	assert('and the deviations are balanced about zero, as noise is',
+		Math.abs(lo - hi) < 0.2 * d.deviation.total, `${lo} below, ${hi} above`);
+	assert('the spatial sigma is positive and of the order of the noise',
+		d.deviation.sigma > 0 && d.deviation.sigma < 200, String(d.deviation.sigma));
+
+	// The gate must actually restrict, and must be reported so a reader knows
+	// a restricted scan when they see one.
+	const gated = engine.diagnose({ backgroundPercentile: 25 });
+	assert('asking for only the darker parts finds no more than the whole frame did',
+		gated.defectCount <= d.defectCount, `${gated.defectCount} vs ${d.defectCount}`);
+	assert('and it says where it looked', gated.backgroundCut > 0, String(gated.backgroundCut));
+	assert('while the unrestricted scan says it looked everywhere',
+		!d.backgroundCut, String(d.backgroundCut));
+}
+
+console.log('\nand says how the defects it found are arranged');
+{
+	/*
+	 * Clark-Evans on frames built to have a known arrangement. This is the
+	 * check that matters: the index is what tells an operator whether a scan
+	 * found silicon or scenery, and it is worthless if it cannot tell a
+	 * scattered set from a clumped one.
+	 *
+	 * The implementation is exercised through a synthetic frame rather than a
+	 * photograph, so the expected answer is known before the engine runs.
+	 */
+	const { makeDefectFrame } = await import('./make-defects.mjs');
+
+	engine.open(makeDefectFrame({ mode: 'scattered', n: 120, seed: 3 }).bytes);
+	const scattered = engine.diagnose({ sigmas: 6 });
+	assert('a scattered set reports an index near 1',
+		scattered.spread && Math.abs(scattered.spread.index - 1) < 0.25,
+		scattered.spread ? `R = ${scattered.spread.index.toFixed(3)} over ${scattered.spread.over}`
+			: '(no index)');
+
+	engine.open(makeDefectFrame({ mode: 'clustered', n: 120, seed: 3 }).bytes);
+	const clustered = engine.diagnose({ sigmas: 6 });
+	assert('a clumped set reports one well below 1',
+		clustered.spread && clustered.spread.index < 0.7,
+		clustered.spread ? `R = ${clustered.spread.index.toFixed(3)} over ${clustered.spread.over}`
+			: '(no index)');
+	assert('and the two are not merely different, but the right way round',
+		scattered.spread && clustered.spread &&
+		scattered.spread.index > clustered.spread.index + 0.3,
+		`scattered ${scattered.spread?.index.toFixed(3)}, clustered ${clustered.spread?.index.toFixed(3)}`);
+
+	// Too few points to say anything is reported as nothing, not as a number.
+	engine.open(makeDefectFrame({ mode: 'scattered', n: 1, seed: 9 }).bytes);
+	const sparse = engine.diagnose({ sigmas: 6 });
+	assert('fewer than three defects gives no index rather than a meaningless one',
+		sparse.spread === null || sparse.spread.over >= 3,
+		JSON.stringify(sparse.spread));
+}
+
 console.log('\nthe chart is found where it was drawn');
 {
 	// A real photograph cannot test this: the chart's corners there are

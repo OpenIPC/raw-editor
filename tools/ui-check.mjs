@@ -42,6 +42,16 @@ const server = createServer(async (req, res) => {
 	 * comes back against them -- which is a stronger test than a fixture
 	 * anyway, since the right answer is known exactly rather than clicked.
 	 */
+	/* Frames with defects arranged as the test asks, so the panel's verdict
+	 * can be checked against an arrangement known in advance. */
+	if (req.url.startsWith('/__defects.dng')) {
+		const q = new URL(req.url, 'http://x').searchParams;
+		const { makeDefectFrame } = await import('./make-defects.mjs');
+		res.writeHead(200, { 'content-type': 'application/octet-stream' });
+		res.end(makeDefectFrame({ mode: q.get('mode') || 'scattered',
+			n: Number(q.get('n') || 120), seed: Number(q.get('seed') || 3) }).bytes);
+		return;
+	}
 	if (req.url.startsWith('/__chart.dng')) {
 		const q = new URL(req.url, 'http://x').searchParams;
 		const corners = JSON.parse(q.get('corners'));
