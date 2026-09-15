@@ -520,6 +520,13 @@ export function mountEditor(root, {
 
 	stage.addEventListener('click', (ev) => { if (picking) pickAt(ev); });
 
+	/* Both overlays are positioned against the canvas, and a window resize moves
+	 * the canvas without developing anything -- so nothing would otherwise put
+	 * them back, and the corners and the defect rings would sit where the
+	 * picture used to be. */
+	const onResize = () => { drawChart(); drawMarks(); };
+	window.addEventListener('resize', onResize);
+
 	/* ---- diagnose --------------------------------------------------------
 	 *
 	 * What is wrong with the sensor rather than with the picture. The numbers
@@ -529,6 +536,17 @@ export function mountEditor(root, {
 	 * findings and only one of them is visible as a number.
 	 */
 	let diag = null;
+
+	/* A scan is a reading of one frame under one set of inputs. The CFA tells
+	 * it which neighbours are the same colour and the white level tells it what
+	 * counts as clipped, so changing either leaves the old defect coordinates
+	 * describing a frame nobody is looking at any more. */
+	function invalidateScan() {
+		if (!diag) return;
+		diag = null;
+		marks.replaceChildren();
+		if (mode === 'diagnose') buildDiagnose();
+	}
 	const marks = el('div', 're-marks');
 	marks.hidden = true;
 	stage.append(marks);
@@ -1035,7 +1053,7 @@ export function mountEditor(root, {
 				'<span class="re-note re-mono">from file</span>',
 		}));
 		const cfaSeg = segmented(CFA_NAMES.map((label, value) => ({ label, value })),
-			state.cfa, (v) => { state.cfa = v; commit(); });
+			state.cfa, (v) => { state.cfa = v; invalidateScan(); commit(); });
 		cfaSeg.style.marginBottom = '9px';
 		raw.append(cfaSeg);
 		raw.append(new Row('Black', {
@@ -1046,7 +1064,7 @@ export function mountEditor(root, {
 		raw.append(new Row('White', {
 			min: Math.round(i.white * 0.25), max: (1 << i.bits) - 1, value: i.white,
 			onInput: (v) => { state.white = v; preview(); },
-			onCommit: (v) => { state.white = v; commit(); },
+			onCommit: (v) => { state.white = v; invalidateScan(); commit(); },
 		}).node);
 		insp.append(raw);
 
@@ -1058,6 +1076,7 @@ export function mountEditor(root, {
 		dm.append(segmented(DEMOSAIC.map(([label, value, title]) => ({ label, value, title })),
 			DEMOSAIC.findIndex(([, v]) => v === state.demosaic),
 			(v) => { state.demosaic = v; commit(); }));
+		// Demosaic does not enter a scan, so it alone does not invalidate one.
 		insp.append(dm);
 
 		// WHITE BALANCE — the gains the engine really applies, not a temperature
@@ -1225,6 +1244,7 @@ export function mountEditor(root, {
 			return openBytes(bytes, label);
 		},
 		destroy() {
+			window.removeEventListener('resize', onResize);
 			// A countdown that outlived its editor would revert a camera whose
 			// operator had closed the page and moved on.
 			stopHold();

@@ -228,6 +228,15 @@ EXPORT(dng_unpack) i32 dng_unpack(void) {
     const u8 *s = F.buf + F.strip_off;
     u16 *o = F.raw;
 
+    /* The packed cases below step in whole groups -- four pixels to five bytes
+     * at 10 bits, two to three at 12, four to seven at 14 -- so a frame whose
+     * pixel count is not a multiple of the group leaves a tail this never
+     * writes. The allocator does not promise zeroed memory, and everything
+     * downstream reads all px of it: the histogram counts it, the noise median
+     * includes it, and whatever happened to be in the heap becomes a defect.
+     * Zeroed first, so the tail is at least a definite value. */
+    for (u32 i = 0; i < px; i++) o[i] = 0;
+
     if (F.bits == 8) {
         for (u32 i = 0; i < px; i++) o[i] = s[i];
     } else if (F.bits == 10) {
@@ -287,18 +296,22 @@ static inline int plane_at(int cfa, int x, int y) {
  *
  * The coefficients are the paper's, over 8.
  */
+static inline int fold_same_plane(int v, int n) {
+    /* Step back inside the frame TWO at a time, so whatever lands here carries
+     * the same colour as the pixel it stands in for. Clamping would fold a red
+     * neighbour in where a blue one was wanted; reflecting keeps the plane on a
+     * large frame and loses it on a small one -- on a two-pixel axis,
+     * 2*w-2-x sends an odd coordinate to an even one, and the correction that
+     * pulls it back in range breaks the parity again. Folding by two cannot. */
+    while (v < 0) v += 2;
+    while (v >= n) v -= 2;
+    if (v < 0) v = 0;
+    return v;
+}
+
 static inline float mirrored(int x, int y, int w, int h) {
-    /* Mirror rather than clamp, and by two, so the mirrored pixel belongs to
-     * the same CFA plane as the one it stands in for. Clamping would fold a
-     * red neighbour in where a blue one was wanted. */
-    if (x < 0) x = -x;
-    if (y < 0) y = -y;
-    if (x >= w) x = 2 * w - 2 - x;
-    if (y >= h) y = 2 * h - 2 - y;
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    if (x >= w) x = w - 1;
-    if (y >= h) y = h - 1;
+    x = fold_same_plane(x, w);
+    y = fold_same_plane(y, h);
     return (float)F.raw[y * w + x];
 }
 

@@ -180,7 +180,11 @@ export class Engine {
 		const cfa = opts.cfa === undefined ? i.cfa : opts.cfa;
 		const white = opts.white === undefined ? i.white : opts.white;
 		const sigmas = opts.sigmas === undefined ? 8 : opts.sigmas;
-		const max = opts.maxDefects === undefined ? 4096 : opts.maxDefects;
+		// Reaches an allocation size and a native write limit, so it is pinned
+		// to a sane integer here rather than trusted: a NaN, a negative or a
+		// billion would each go somewhere unpleasant.
+		const asked = opts.maxDefects === undefined ? 4096 : Math.floor(Number(opts.maxDefects));
+		const max = Number.isFinite(asked) ? Math.max(0, Math.min(1 << 20, asked)) : 4096;
 		if (!this.statsPtr) this.statsPtr = x.alloc(13 * 4);
 		if (!this.defectPtr || this.defectRoom < max) {
 			this.defectPtr = x.alloc(max * 2 * 4);

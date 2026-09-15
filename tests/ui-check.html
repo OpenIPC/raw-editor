@@ -371,6 +371,23 @@ try {
 	t('and the black level it read is the one in the file',
 		new RegExp('file\\s*' + 50).test(text.replace(/\s+/g, ' ')) || /50/.test(text));
 
+	t('the defects it found are marked on the picture',
+		host.querySelectorAll('.re-mark').length > 0 ||
+		/None\./.test(host.querySelector('.re-insp').textContent));
+
+	// A scan describes one frame under one set of inputs. Change the Bayer
+	// pattern and the old defect coordinates describe nothing.
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+	await new Promise((r) => setTimeout(r, 200));
+	[...host.querySelectorAll('.re-panel .re-seg button')].find((b) => b.textContent === 'BGGR').click();
+	await new Promise((r) => setTimeout(r, 400));
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose').click();
+	await new Promise((r) => setTimeout(r, 300));
+	t('changing the Bayer pattern throws the old scan away',
+		!/Black level/.test(host.querySelector('.re-insp').textContent) &&
+		host.querySelectorAll('.re-mark').length === 0,
+		host.querySelector('.re-insp').textContent.replace(/\s+/g, ' ').slice(0, 70));
+
 	// Switching away must take the marks with it.
 	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
 	await new Promise((r) => setTimeout(r, 200));
