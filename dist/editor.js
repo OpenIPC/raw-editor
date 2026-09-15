@@ -864,25 +864,71 @@ export function mountEditor(root, {
 			innerHTML: '<h3 class="re-cap">Colour chart</h3><span class="re-rule"></span>',
 		}));
 		panel.append(Object.assign(el('p', 're-note'), {
-			textContent: 'Drag the four corners onto the corners of the chart — the dark ' +
-				'skin patch at the top left, the black patch at the bottom right. The dots ' +
-				'show where each patch will be read from.',
+			textContent: 'Put the four corners on the corners of the chart — the dark ' +
+				'skin patch at the top left, the black patch at the bottom right. Drag ' +
+				'them there, or let the editor look. The dots show where each patch will ' +
+				'be read from.',
 		}));
+		const out = el('div', 're-panel');
+		out.hidden = true;
+
 		const row = el('div');
-		row.style.cssText = 'display:flex;gap:8px;margin-top:9px';
+		row.style.cssText = 'display:flex;gap:8px;margin-top:9px;flex-wrap:wrap';
 		const measure = el('button', 're-btn re-pri', '');
 		measure.dataset.act = 'measure';
 		measure.textContent = 'Measure the chart';
+		const find = el('button', 're-btn', '');
+		find.textContent = 'Find it for me';
 		const reset = el('button', 're-btn', '');
 		reset.textContent = 'Reset corners';
 		reset.addEventListener('click', () => { corners = defaultCorners(); drawChart(); });
-		row.append(measure, reset);
+		row.append(measure, find, reset);
 		panel.append(row);
 		insp.append(panel);
-
-		const out = el('div', 're-panel');
-		out.hidden = true;
 		insp.append(out);
+
+		/*
+		 * The corners, without the dragging.
+		 *
+		 * It only ever offers an answer: whatever it finds lands on the same
+		 * four grips, which stay draggable, so a near miss is a starting point
+		 * rather than something to undo. When it finds nothing it says so and
+		 * changes nothing -- the corners already on screen are better than a
+		 * guess fitted to the furniture.
+		 */
+		find.addEventListener('click', async () => {
+			find.disabled = true;
+			find.textContent = 'Looking…';
+			const say = (cls, text) => {
+				out.hidden = false;
+				out.replaceChildren(Object.assign(el('div', 're-notice ' + cls, ICON.warn), {}));
+				out.firstChild.append(Object.assign(el('div'), { textContent: text }));
+			};
+			try {
+				const got = await call('detect', { cfa: state.cfa });
+				if (!got.chart) {
+					say('re-warn', 'No chart found in this frame. Drag the corners on by ' +
+						'hand, or take another shot with the chart flatter on and better lit.');
+				} else {
+					corners = got.chart.corners;
+					solved = null;
+					drawChart();
+					out.hidden = true;
+					// A chart short of its full 24 is still worth offering, but
+					// the corners came off fewer patches and are correspondingly
+					// looser, so say so rather than let it read as exact.
+					if (got.chart.cells < CHART_COLS * CHART_ROWS)
+						say('re-warn', `Found the chart, but only ${got.chart.cells} of its ` +
+							`${CHART_COLS * CHART_ROWS} patches stood out clearly. Check the ` +
+							'corners before measuring.');
+				}
+			} catch (e) {
+				say('re-warn', e.message);
+			} finally {
+				find.disabled = false;
+				find.textContent = 'Find it for me';
+			}
+		});
 
 		measure.addEventListener('click', async () => {
 			measure.disabled = true;

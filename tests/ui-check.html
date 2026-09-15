@@ -342,6 +342,95 @@ try {
 	t('calibrate works end to end', false, e.message);
 }
 
+/* Finding the chart rather than dragging it on.
+ *
+ * The engine's own tests prove the detector; this one proves the button --
+ * the worker round trip, and that what comes back reaches the four grips the
+ * operator can still drag. The frame is drawn to order by the check's server
+ * at corners chosen here, so the right answer is known exactly. */
+try {
+	const host = document.createElement('div');
+	document.body.append(host);
+	const ed = mountEditor(host, { base: '../dist/', styles: false });
+	const TRUTH = [[150, 60], [540, 120], [470, 420], [100, 330]];
+	const url = '/__chart.dng?corners=' + encodeURIComponent(JSON.stringify(TRUTH));
+	await ed.open(new Uint8Array(await (await fetch(url)).arrayBuffer()), 'chart.dng');
+
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Calibrate').click();
+	await new Promise((r) => setTimeout(r, 300));
+
+	const find = [...host.querySelectorAll('.re-btn')].find((b) => b.textContent === 'Find it for me');
+	t('Calibrate offers to find the chart', !!find);
+
+	const before = [...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left);
+	find.click();
+	for (let i = 0; i < 100 && find.disabled; i++) await new Promise((r) => setTimeout(r, 100));
+	const after = [...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left);
+	t('pressing it moves the corners off their default', before.join() !== after.join(),
+		`${before.join(' ')} -> ${after.join(' ')}`);
+	t('and it is usable again afterwards', !find.disabled && find.textContent === 'Find it for me');
+
+	/*
+	 * Where they landed.
+	 *
+	 * Compared as a SHAPE rather than in frame pixels. The editor puts the
+	 * grips through a fit transform -- letterboxing inside the canvas, a
+	 * scale, and a preview step -- and inverting all that here would be
+	 * reimplementing the editor in its own test, badly; the first attempt did,
+	 * and reported 26 px of error that was entirely its own arithmetic. That
+	 * transform is a translation and a uniform scale, so normalising each quad
+	 * about its centroid cancels it exactly, and what is left is the question
+	 * actually worth asking: is this the chart's quad, with its corners in the
+	 * right order?
+	 */
+	const norm = (q) => {
+		const cx = q.reduce((a, p) => a + p[0], 0) / 4, cy = q.reduce((a, p) => a + p[1], 0) / 4;
+		const r = Math.hypot(...q.map((p) => Math.hypot(p[0] - cx, p[1] - cy))) / 2;
+		return q.map((p) => [(p[0] - cx) / r, (p[1] - cy) / r]);
+	};
+	const got = norm([...host.querySelectorAll('.re-chart-grip')]
+		.map((g) => [parseFloat(g.style.left), parseFloat(g.style.top)]));
+	const want = norm(TRUTH);
+	let worst = 0;
+	for (let i = 0; i < 4; i++)
+		worst = Math.max(worst, Math.hypot(got[i][0] - want[i][0], got[i][1] - want[i][1]));
+	// In units of the quad's own radius: 0.04 is a few pixels on a chart this
+	// size, and getting a corner wrong -- the failure this is here for -- is
+	// worth more than one whole unit.
+	t('the corners land on the chart, in the right order', worst < 0.04,
+		`worst corner off by ${worst.toFixed(3)} of the chart's radius`);
+
+	// They must still be draggable: found corners are an offer, not a verdict.
+	{
+		const grip = host.querySelector('.re-chart-grip[data-corner="0"]');
+		const was = grip.style.left, r = grip.getBoundingClientRect();
+		grip.dispatchEvent(new PointerEvent('pointerdown',
+			{ bubbles: true, pointerId: 31, clientX: r.left + 9, clientY: r.top + 9 }));
+		const cr = host.querySelector('.re-stage canvas').getBoundingClientRect();
+		const to = { clientX: cr.left + cr.width * 0.4, clientY: cr.top + cr.height * 0.4 };
+		window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 31, ...to }));
+		window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 31, ...to }));
+		t('a found corner can still be dragged', grip.style.left !== was,
+			`${was} -> ${grip.style.left}`);
+	}
+
+	// And on a frame with no chart in it, it has to say so rather than leave
+	// a lattice fitted to the furniture sitting there looking placed.
+	await ed.open(new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer()), 'fixture.dng');
+	await new Promise((r) => setTimeout(r, 400));
+	const find2 = [...host.querySelectorAll('.re-btn')].find((b) => b.textContent === 'Find it for me');
+	const plain = [...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left);
+	find2.click();
+	for (let i = 0; i < 100 && find2.disabled; i++) await new Promise((r) => setTimeout(r, 100));
+	t('a frame with no chart is told so', /no chart found/i.test(host.textContent),
+		host.querySelector('.re-notice')?.textContent.slice(0, 60) || '(said nothing)');
+	t('and its corners are left where they were',
+		[...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left).join() === plain.join());
+	host.remove();
+} catch (e) {
+	t('finding the chart works end to end', false, e.message);
+}
+
 /* Diagnose: the third mode, and the demosaic choice that came with it. */
 try {
 	const host = document.createElement('div');

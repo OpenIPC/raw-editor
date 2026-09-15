@@ -68,7 +68,7 @@ export class Engine {
 		const x = this.x;
 		x.reset_alloc();
 		this.gammaPtr = this.fwdPtr = this.histPtr = this.samplePtr = 0;
-		this.statsPtr = this.defectPtr = 0;
+		this.statsPtr = this.defectPtr = this.chartPtr = 0;
 		this.defectRoom = 0;
 
 		const p = x.alloc(bytes.length);
@@ -209,6 +209,28 @@ export class Engine {
 			defectCount: n,
 			defects,                 // capped at maxDefects; defectCount is the total
 			truncated: n > max,
+		};
+	}
+
+	/*
+	 * Where the colour chart is, if it can be found at all.
+	 *
+	 * Returns the four corners in full-frame pixels in chart order and how many
+	 * of the 24 cells it actually saw, or null when nothing on the frame looks
+	 * like a lattice of patches. Null is a normal answer -- most frames have no
+	 * chart in them -- so it is returned rather than thrown.
+	 */
+	detectChart(opts = {}) {
+		const x = this.x, i = this.info;
+		const cfa = opts.cfa === undefined ? i.cfa : opts.cfa;
+		if (!this.chartPtr) this.chartPtr = x.alloc(8 * 4);
+		if (!this.chartPtr) throw new Error('out of memory looking for the chart');
+		const found = x.detect_chart(cfa, this.chartPtr);
+		if (found <= 0) return null;
+		const f = new Float32Array(x.memory.buffer, this.chartPtr, 8);
+		return {
+			corners: [[f[0], f[1]], [f[2], f[3]], [f[4], f[5]], [f[6], f[7]]],
+			cells: found,
 		};
 	}
 
