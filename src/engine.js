@@ -113,7 +113,11 @@ export class Engine {
 	develop(opts = {}) {
 		const x = this.x, i = this.info;
 		const o = {
-			cfa: i.cfa, demosaic: DEMOSAIC.bilinear, black: i.black, white: i.white,
+			// RCD by default, so a caller who does not choose gets the closest
+			// reconstruction rather than the cheapest one. It costs a full
+			// green plane on the first develop of a frame -- about 75 ms on
+			// 2592x1520 -- and nothing after that, because the plane is kept.
+			cfa: i.cfa, demosaic: DEMOSAIC.rcd, black: i.black, white: i.white,
 			neutral: i.neutral, forward: i.forward, useForward: i.hasForward,
 			gain: 1, step: 1, ...opts,
 		};

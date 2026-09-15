@@ -354,6 +354,13 @@ try {
 		opts.includes('None') && opts.includes('Bilinear') && opts.includes('Gradient') &&
 		opts.includes('RCD'), JSON.stringify(opts));
 
+	// The one a frame opens on, which is the one most people will ever see.
+	t('RCD is what a frame opens on', (() => {
+		const seg = [...host.querySelectorAll('.re-panel .re-seg')]
+			.find((n) => n.textContent.includes('Bilinear'));
+		return seg?.querySelector('button.on')?.textContent === 'RCD';
+	})());
+
 	// RCD develops through a cached full-frame green plane rather than one
 	// filter per pixel, so it is the one that can fail to draw anything.
 	[...host.querySelectorAll('.re-panel .re-seg button')].find((b) => b.textContent === 'RCD').click();

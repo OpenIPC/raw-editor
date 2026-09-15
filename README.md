@@ -98,7 +98,7 @@ mean error per channel, lower is closer to the picture that was thrown away:
 |---|---|---|
 | Bilinear | 5.24 | average the neighbours |
 | Gradient | 2.97 | Malvar-He-Cutler: corrected by the curvature of the plane that was measured |
-| RCD | **2.28** | ratio-corrected, directional, colour differences against a finished green |
+| RCD | **2.28** | ratio-corrected, directional, colour differences against a finished green — **the default** |
 
 RCD is written from the method Luis Sanz Rodríguez published, not ported:
 RawTherapee's implementation is GPLv3 and this tree is not, so its code could
