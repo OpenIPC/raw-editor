@@ -545,30 +545,110 @@ try {
 		await scan();
 	}
 
-	// Holding a scan and comparing it against a different view. This is the
-	// one measurement here that actually separates silicon from scenery.
+	/* Accumulating captures and believing a site seen in N of them.
+	 *
+	 * A strict intersection drops random-telegraph pixels, which switch
+	 * between levels and need not clear the threshold every time -- and those
+	 * are largely the same population as the hot pixels. So the rule is N of
+	 * M, and the tally across all M is shown because where the numbers fall is
+	 * the answer. */
 	{
-		const hold = host.querySelector('[data-act="hold-scan"]');
-		t('a scan can be held for comparison', !!hold);
-		hold.click();
-		await new Promise((r) => setTimeout(r, 120));
-		t('and says it is holding one',
-			host.querySelector('[data-act="hold-scan"]')?.disabled === true);
-
-		await ed.open(new Uint8Array(await (await fetch('/__defects.dng?mode=scattered&n=120&seed=77')).arrayBuffer()),
-			'other-view.dng');
+		// From here every capture carries the same 12 planted sensor defects
+		// plus 60 of its own, so the tally has a real population to find.
+		await ed.open(new Uint8Array(await (await fetch('/__defects.dng?mode=scattered&n=60&shared=12&seed=55')).arrayBuffer()),
+			'first-view.dng');
 		await new Promise((r) => setTimeout(r, 250));
 		await scan();
-		t('scanning a different view compares the two',
-			/are here too/i.test(host.textContent),
-			host.textContent.match(/\d+ of the \d+ found in [^.]*\./)?.[0] || '(no comparison)');
-		const keep = host.querySelector('[data-act="keep-common"]');
-		t('and offers to keep only what appeared in both', !!keep);
-		// Two independently seeded scatterings share almost nothing, which is
-		// the correct answer and the point of the comparison.
-		t('which, for two unrelated views, is almost nothing',
-			!!keep && /Mark only those [0-5]$/.test(keep.textContent),
-			keep?.textContent);
+		const keep = host.querySelector('[data-act="hold-scan"]');
+		t('a scan can be kept for comparison', !!keep);
+		keep.click();
+		await new Promise((r) => setTimeout(r, 120));
+		t('and says it has been kept',
+			host.querySelector('[data-act="hold-scan"]')?.disabled === true);
+
+		// A second view, sharing SOME defects with the first and not others,
+		// so the tally has something to distribute rather than a clean split.
+		await ed.open(new Uint8Array(await (await fetch('/__defects.dng?mode=scattered&n=60&shared=12&seed=77')).arrayBuffer()),
+			'second-view.dng');
+		await new Promise((r) => setTimeout(r, 250));
+		await scan();
+		t('a second capture is counted against the first',
+			/Across 2 captures/i.test(host.textContent),
+			host.textContent.match(/Across \d+ captures[^.]*\./)?.[0] || '(no tally)');
+		t('with the threshold offered as N of M',
+			!!host.querySelector('[data-act="need-2"]'));
+		t('and nothing offering a threshold of one, which would be a union',
+			!host.querySelector('[data-act="need-1"]'));
+		const mark = host.querySelector('[data-act="mark-common"]');
+		t('and offers to mark what met it', !!mark);
+
+		// Three captures, so "2 of 3" exists and differs from "3 of 3" -- the
+		// whole point of the rule.
+		host.querySelector('[data-act="hold-scan"]').click();
+		await new Promise((r) => setTimeout(r, 120));
+		await ed.open(new Uint8Array(await (await fetch('/__defects.dng?mode=scattered&n=60&shared=12&seed=99')).arrayBuffer()),
+			'third-view.dng');
+		await new Promise((r) => setTimeout(r, 250));
+		await scan();
+		t('a third capture widens the choice', !!host.querySelector('[data-act="need-3"]'),
+			host.textContent.match(/Across \d+ captures/)?.[0] || '(no tally)');
+		const two = host.querySelector('[data-act="need-2"]');
+		const three = host.querySelector('[data-act="need-3"]');
+		three.click();
+		await new Promise((r) => setTimeout(r, 150));
+		const strict = Number(host.querySelector('[data-act="mark-common"]')?.textContent.match(/\d+/)?.[0]);
+		two.click();
+		await new Promise((r) => setTimeout(r, 150));
+		const loose = Number(host.querySelector('[data-act="mark-common"]')?.textContent.match(/\d+/)?.[0]);
+		t('asking for fewer captures admits at least as many sites',
+			Number.isFinite(strict) && Number.isFinite(loose) && loose >= strict,
+			`3 of 3 gives ${strict}, 2 of 3 gives ${loose}`);
+
+		// Marking from the tally must say so, rather than leaving the reader
+		// to think the number came from the frame on screen.
+		host.querySelector('[data-act="mark-common"]').click();
+		await new Promise((r) => setTimeout(r, 200));
+		t('marking from the tally says which rule produced it',
+			/turned up in at least 2 of 3 captures/i.test(host.textContent),
+			host.textContent.match(/\d+ sites? turned up[^.]*\./)?.[0] || '(said nothing)');
+		// The planted twelve are what three captures have in common; the rest
+		// differ by seed. Recovering about that many is the rule working.
+		// No \b: the "Defects" heading runs straight into the number in
+		// textContent, so there is no word boundary in front of it. This is
+		// the second time that has caught a check in this file.
+		t('and recovers close to the defects every capture really shared',
+			/(?:^|\D)(1[0-4]) sites? turned up/.test(host.textContent),
+			host.textContent.match(/\d+ sites? turned up[^.]*\./)?.[0] || '(none)');
+
+		const forget = [...host.querySelectorAll('.re-btn')].find((b) => /^Forget/.test(b.textContent));
+		t('and the kept scans can be discarded', !!forget, forget?.textContent);
+
+		/*
+		 * The two ways this measurement goes wrong need opposite remedies, and
+		 * the panel has to work out which one applies rather than leaving the
+		 * operator to guess. Both regimes are reproduced here.
+		 *
+		 * Scattered survivors across captures: the reading stands.
+		 * Clustered survivors that repeat forever: scene detail, and no number
+		 * of further captures of the same view will shift it -- so the panel
+		 * must say to move the camera, not to keep scanning.
+		 */
+		forget.click();
+		await new Promise((r) => setTimeout(r, 150));
+		for (const [i, seed] of [11, 22, 33].entries()) {
+			await ed.open(new Uint8Array(await (await fetch('/__textured.dng?n=160')).arrayBuffer()),
+				'textured-' + i + '.dng');
+			await new Promise((r) => setTimeout(r, 250));
+			await scan();
+			const k = host.querySelector('[data-act="hold-scan"]');
+			if (k && !k.disabled) { k.click(); await new Promise((r) => setTimeout(r, 120)); }
+		}
+		await new Promise((r) => setTimeout(r, 200));
+		t('survivors that keep coming back but are clumped say to move the camera',
+			/move the camera|point it at something plain/i.test(host.textContent),
+			[...host.querySelectorAll('.re-notice')].map((n) => n.textContent.trim().slice(0, 60)).join(' | ') || '(nothing)');
+		t('and are NOT reported as a sensor reading',
+			!/what sensor defects look like/i.test(host.textContent));
 	}
 	ed.destroy();
 	host.remove();

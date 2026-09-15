@@ -19,25 +19,39 @@ export function makeDng({ width, height, pixels, cfa = [0, 1, 1, 2], black = 0,
 	white = 4095, model = 'test', bits = 12 } = {}) {
 	if (!pixels || pixels.length !== width * height)
 		throw new Error('pixels must be width*height');
-	if (bits !== 12) throw new Error('this writer packs 12 bits and nothing else');
+	if (bits !== 12 && bits !== 16)
+		throw new Error('this writer packs 12 bits, or stores 16, and nothing else');
 
-	// Two pixels to three bytes, high bits first -- the order dng_unpack reads.
-	// An odd count is allowed so the tail of the unpacker can be tested: a real
-	// Bayer frame always has even dimensions, which is exactly why that path
-	// would otherwise never run.
-	const pairs = Math.floor(pixels.length / 2);
-	const strip = Buffer.alloc(pairs * 3 + (pixels.length & 1 ? 2 : 0));
-	for (let i = 0, o = 0; i + 1 < pixels.length; i += 2, o += 3) {
-		const a = Math.max(0, Math.min(4095, pixels[i] | 0));
-		const b = Math.max(0, Math.min(4095, pixels[i + 1] | 0));
-		strip[o] = a >> 4;
-		strip[o + 1] = ((a & 0x0f) << 4) | (b >> 8);
-		strip[o + 2] = b & 0xff;
-	}
-	if (pixels.length & 1) {
-		const a = Math.max(0, Math.min(4095, pixels[pixels.length - 1] | 0));
-		strip[pairs * 3] = a >> 4;
-		strip[pairs * 3 + 1] = (a & 0x0f) << 4;
+	let strip;
+	if (bits === 16) {
+		/*
+		 * 16 bits is not packed at all: one little-endian sample per two
+		 * bytes. The older HiSilicon parts write raw this way, and until the
+		 * engine learned to read it a whole class of camera could not be
+		 * opened -- so there has to be a way to make one without a camera.
+		 */
+		strip = Buffer.alloc(pixels.length * 2);
+		for (let i = 0; i < pixels.length; i++)
+			strip.writeUInt16LE(Math.max(0, Math.min(65535, pixels[i] | 0)), i * 2);
+	} else {
+		// Two pixels to three bytes, high bits first -- the order dng_unpack
+		// reads. An odd count is allowed so the tail of the unpacker can be
+		// tested: a real Bayer frame always has even dimensions, which is
+		// exactly why that path would otherwise never run.
+		const pairs = Math.floor(pixels.length / 2);
+		strip = Buffer.alloc(pairs * 3 + (pixels.length & 1 ? 2 : 0));
+		for (let i = 0, o = 0; i + 1 < pixels.length; i += 2, o += 3) {
+			const a = Math.max(0, Math.min(4095, pixels[i] | 0));
+			const b = Math.max(0, Math.min(4095, pixels[i + 1] | 0));
+			strip[o] = a >> 4;
+			strip[o + 1] = ((a & 0x0f) << 4) | (b >> 8);
+			strip[o + 2] = b & 0xff;
+		}
+		if (pixels.length & 1) {
+			const a = Math.max(0, Math.min(4095, pixels[pixels.length - 1] | 0));
+			strip[pairs * 3] = a >> 4;
+			strip[pairs * 3 + 1] = (a & 0x0f) << 4;
+		}
 	}
 
 	const entries = [];
