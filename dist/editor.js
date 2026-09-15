@@ -245,6 +245,11 @@ export function mountEditor(root, {
 	 * loader gives the CDN eight seconds; a test harness under a virtual clock
 	 * needs a number well above whatever budget the browser is running on. */
 	startupTimeoutMs = 15000,
+	/* How long to wait for the host to hand over a frame before giving the
+	 * stage back. Generous: a raw frame is several megabytes off a device with
+	 * a slow uplink, and six to eight seconds is normal on the boards this was
+	 * measured on. It bounds the wait rather than budgeting it. */
+	captureTimeoutMs = 45000,
 } = {}) {
 	root.classList.add('re-root');
 	root.innerHTML = '';
@@ -491,8 +496,40 @@ export function mountEditor(root, {
 			// things happening.
 			capturingState();
 		}
+		/*
+		 * A capture that never answers.
+		 *
+		 * The host hands over a promise and nothing more, so there is no way
+		 * to cancel the fetch behind it -- only to stop waiting. Without that,
+		 * a stalled transfer leaves "Capturing a frame..." on screen for ever
+		 * with no button to press: measured on a lab camera, a 4.9 MB frame
+		 * that normally arrives in six seconds once took a hundred and forty.
+		 *
+		 * So the wait is bounded and the stage is handed back. The fetch is
+		 * left running, because it may well finish -- and if it does, and
+		 * nothing has been opened in the meantime, its frame is still the one
+		 * that was asked for and is used.
+		 */
+		let timedOut = false;
+		const deadline = new Promise((resolve) =>
+			setTimeout(() => { timedOut = true; resolve(null); }, captureTimeoutMs));
 		try {
-			const got = await capture();
+			const inFlight = capture();
+			// Whichever comes first. The capture is not cancelled by losing.
+			const got = await Promise.race([inFlight, deadline]);
+			if (timedOut) {
+				const secs = Math.max(1, Math.round(captureTimeoutMs / 1000));
+				fail('The camera has not sent a frame in ' + secs +
+					(secs === 1 ? ' second.' : ' seconds.') +
+					' It may still arrive on its own; otherwise try again.');
+				// Still worth having if it lands, so long as nobody has opened
+				// anything since.
+				inFlight.then((late) => {
+					if (late && !state.info && !hostOpened && !dead)
+						openBytes(late.bytes, late.name).catch(() => {});
+				}, () => {});
+				return;
+			}
 			// Only now is the engine wanted. Whatever of the module and the
 			// wasm was still arriving has had the whole transfer to get here.
 			await ready;
@@ -507,6 +544,17 @@ export function mountEditor(root, {
 			if (capBtn) capBtn.disabled = false;
 			busy.textContent = 'working';
 			busy.hidden = true;
+			/*
+			 * Whatever happened, the stage must stop claiming to be capturing.
+			 * Every path out of the try above used to be responsible for this
+			 * and one of them was not: an automatic capture standing down for
+			 * a frame the host had opened returned early, leaving the spinner
+			 * and "Capturing a frame..." sitting on top of a picture that had
+			 * loaded perfectly well. Restoring it here covers every exit.
+			 */
+			if (drop.querySelector('.re-spinner')) {
+				if (state.info) { drop.hidden = true; emptyState(); } else emptyState();
+			}
 		}
 	}
 
