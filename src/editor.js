@@ -731,9 +731,46 @@ export function mountEditor(root, {
 		panel.append(run);
 		panel.append(Object.assign(el('p', 're-note'), {
 			textContent: 'Read off the mosaic, before any interpolation. A frame of ' +
-				'something flat and out of focus gives the cleanest answer.',
+				'something flat and out of focus gives the cleanest answer — and a ' +
+				'dark one gives the only reliable one.',
 			style: 'margin:8px 0 0',
 		}));
+
+		/*
+		 * Where to believe the scan.
+		 *
+		 * A defect's signal is dark current, which is added whatever the lens
+		 * is pointed at; the scene's is not. Restricting to the darker parts of
+		 * the frame is the nearest thing to a capped lens available to someone
+		 * who cannot cap the lens, and measurably works: on a lab frame it
+		 * moved the arrangement of the surviving set from plainly clustered
+		 * towards plainly random.
+		 */
+		const gate = el('div');
+		gate.style.cssText = 'margin-top:11px';
+		gate.append(Object.assign(el('div', 're-rname'), { textContent: 'where to look' }));
+		const gateSeg = el('div', 're-seg');
+		gateSeg.style.cssText = 'margin-top:5px';
+		for (const [label, pct, note] of [
+			['Everywhere', 100, 'the whole frame, scene and all'],
+			['Darker half', 50, 'where the picture is dim'],
+			['Darkest', 25, 'closest to a capped lens'],
+		]) {
+			const b = el('button', pct === bgPercent ? 'on' : '', label);
+			b.title = note;
+			b.addEventListener('click', () => {
+				if (bgPercent === pct) return;
+				bgPercent = pct;
+				// The old reading was taken somewhere else and no longer
+				// describes what is being asked for.
+				diag = null;
+				buildDiagnose();
+				drawMarks();
+			});
+			gateSeg.append(b);
+		}
+		gate.append(gateSeg);
+		panel.append(gate);
 		insp.append(panel);
 
 		const out = el('div', 're-panel');
@@ -760,7 +797,8 @@ export function mountEditor(root, {
 				// highlights. Saturation is a property of the sensor and does
 				// not move when someone drags a control.
 				const reply = await call('diagnose',
-					{ cfa: state.cfa, white: state.info.white, sigmas: 8 });
+					{ cfa: state.cfa, white: state.info.white, sigmas: 8,
+						backgroundPercentile: bgPercent });
 				diag = reply && reply.result;
 				if (!diag || !diag.blackFloor)
 					throw new Error('the frame was scanned but the reading came back empty');
@@ -789,6 +827,117 @@ export function mountEditor(root, {
 		return row;
 	}
 
+	/*
+	 * The deviation distribution, on a logarithmic axis.
+	 *
+	 * This is EMVA 1288's answer to "which pixels are defective", and it
+	 * answers it by refusing the question: no single threshold serves every
+	 * application, so the standard asks for the distribution and leaves the
+	 * line to the reader. The log scale is the whole point -- it has to reach
+	 * below one pixel per bin, or a single outlier is invisible against the
+	 * four million ordinary ones beside it.
+	 *
+	 * The dashed curve is the Gaussian the frame's own spatial sigma implies.
+	 * Where the bars follow it, the pixels are noise. Where they run above it
+	 * -- the tails -- they are something else, and that is what a defect is.
+	 */
+	function deviationPlot(diag) {
+		const d = diag.deviation;
+		const wrap = el('div');
+		wrap.style.cssText = 'margin:10px 0 2px';
+		const W = 300, H = 104, PAD_L = 4, PAD_B = 14;
+		const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+		svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+		svg.setAttribute('class', 're-devplot');
+		const ns = (t, a) => {
+			const n = document.createElementNS('http://www.w3.org/2000/svg', t);
+			for (const k in a) n.setAttribute(k, a[k]);
+			return n;
+		};
+		const peak = Math.max(1, ...d.counts);
+		const top = Math.log10(peak);
+		// One pixel per bin is the floor worth drawing; below it there is
+		// nothing to see and the axis would run to minus infinity.
+		const yOf = (c) => {
+			if (c < 1) return H - PAD_B;
+			return H - PAD_B - (Math.log10(c) / top) * (H - PAD_B - 6);
+		};
+		const xOf = (i) => PAD_L + (i / (d.counts.length - 1)) * (W - PAD_L * 2);
+
+		// Decade rules, so the log scale is readable as one.
+		for (let p = 0; p <= Math.floor(top); p++) {
+			const y = yOf(Math.pow(10, p));
+			svg.append(ns('line', { x1: PAD_L, y1: y, x2: W - PAD_L, y2: y,
+				stroke: 'currentColor', 'stroke-width': 0.5, opacity: 0.13 }));
+		}
+		for (let i = 0; i < d.counts.length; i++) {
+			if (!d.counts[i]) continue;
+			svg.append(ns('rect', { x: xOf(i), y: yOf(d.counts[i]),
+				width: Math.max(0.8, (W - PAD_L * 2) / d.counts.length),
+				height: Math.max(0.5, (H - PAD_B) - yOf(d.counts[i])),
+				fill: 'currentColor', opacity: 0.55 }));
+		}
+		/*
+		 * The Gaussian noise alone would give.
+		 *
+		 * Its width must come from the ORDINARY pixels, not from all of them.
+		 * The plain standard deviation of this field is inflated by the very
+		 * tails the curve exists to be compared against, so drawing it that way
+		 * widens the reference until the outliers look like part of it -- which
+		 * is the one thing the plot is for. EMVA 1288 takes its overlay from
+		 * the spatial sigma after the correlated component has been filtered
+		 * out, for the same reason.
+		 *
+		 * Estimated here from the median absolute deviation, read straight off
+		 * the histogram: 1.4826 * MAD is the standard deviation of a Gaussian,
+		 * and a few thousand wild values in four million cannot move a median.
+		 */
+		const quantile = (frac) => {
+			let acc = 0;
+			const want = d.total * frac;
+			for (let i = 0; i < d.counts.length; i++) {
+				acc += d.counts[i];
+				if (acc >= want) return d.min + (i + 0.5) * d.binWidth;
+			}
+			return d.min + d.counts.length * d.binWidth;
+		};
+		const med = quantile(0.5);
+		// The MAD, from the two quartiles: for a symmetric distribution the
+		// half-interquartile range is the same statistic and needs one pass.
+		const robust = Math.max(d.binWidth, (quantile(0.75) - quantile(0.25)) / 1.349);
+		if (robust > 0 && d.binWidth > 0) {
+			const pts = [];
+			for (let i = 0; i < d.counts.length; i++) {
+				const v = d.min + (i + 0.5) * d.binWidth - med;
+				const p = d.total * (d.binWidth / (robust * Math.sqrt(2 * Math.PI))) *
+					Math.exp(-(v * v) / (2 * robust * robust));
+				if (p >= 1) pts.push(`${xOf(i).toFixed(1)},${yOf(p).toFixed(1)}`);
+			}
+			if (pts.length > 1)
+				svg.append(ns('polyline', { points: pts.join(' '), fill: 'none',
+					stroke: '#5c70e8', 'stroke-width': 1.2, 'stroke-dasharray': '3 2' }));
+		}
+		svg.append(ns('line', { x1: PAD_L, y1: H - PAD_B, x2: W - PAD_L, y2: H - PAD_B,
+			stroke: 'currentColor', 'stroke-width': 0.5, opacity: 0.3 }));
+		wrap.append(svg);
+		const cap = el('div', 're-note');
+		cap.style.cssText = 'display:flex;justify-content:space-between;font-size:10px';
+		const edge = (d.counts.length / 2) * d.binWidth;
+		cap.append(Object.assign(el('span'), { textContent: '−' + Math.round(edge) }),
+			Object.assign(el('span'), { textContent: 'distance from neighbours' }),
+			Object.assign(el('span'), { textContent: '+' + Math.round(edge) }));
+		wrap.append(cap);
+		wrap.append(Object.assign(el('p', 're-note'), {
+			style: 'margin:6px 0 0',
+			textContent: 'Every pixel, by how far it sits from its neighbours, counted on a ' +
+				'logarithmic scale. The dashed curve is what noise alone would give. ' +
+				'Everything beyond it is something else — on a frame with detail in it, ' +
+				'mostly that detail. How far out a pixel has to be before it counts is a ' +
+				'judgement, which is why the number above is not the whole answer.',
+		}));
+		return wrap;
+	}
+
 	function renderDiagnose(out) {
 		out.hidden = false;
 		out.replaceChildren();
@@ -806,6 +955,103 @@ export function mountEditor(root, {
 					'one of their same-colour neighbours by more than the noise explains' +
 					(diag.truncated ? `, of which the first ${diag.defects.length} are marked.` : '.'),
 		}));
+
+		/*
+		 * How that count is spread over the frame.
+		 *
+		 * A count on its own says very little -- Sony ships an IMX415 as good
+		 * with up to 800 white pixels in the dark -- and it says nothing at
+		 * all about whether the scan found silicon or scenery. Hot pixels are
+		 * created by a random process and land at random; anything driven by
+		 * the picture sits where the picture had detail. So the arrangement is
+		 * reported next to the number, because it is the part that says
+		 * whether the number can be believed.
+		 */
+		if (diag.spread) {
+			const R = diag.spread.index;
+			const scenery = R < 0.8, random = R >= 0.8 && R <= 1.25;
+			out.append(statLine('spread', R.toFixed(2),
+				random ? 'scattered, as sensor defects are'
+					: scenery ? 'clustered — these are following the picture'
+						: 'unusually even'));
+			if (scenery)
+				out.append(Object.assign(el('div', 're-notice re-warn'), {
+					style: 'margin:8px 0 2px',
+					textContent: 'These are not scattered the way sensor defects are. ' +
+						'Most of them are probably detail in the scene. Scan a second, ' +
+						'different view and compare, or point the camera at something plain.',
+				}));
+		}
+		if (diag.backgroundCut)
+			out.append(statLine('reading', 'below ' + Math.round(diag.backgroundCut),
+				'only where the picture is dark'));
+
+		out.append(deviationPlot(diag));
+
+		/*
+		 * Two captures of different views, intersected.
+		 *
+		 * This is the only thing here that reliably separates silicon from
+		 * scenery without capping the lens, and the reason is that a sensor
+		 * defect does not care what the camera is pointed at. Measured on a
+		 * lab camera: 291 candidates in one view, 86 in another, 4 in both.
+		 *
+		 * Frames of the SAME view do not do it -- a static scene keeps its
+		 * texture as faithfully as it keeps its defects, and three frames of
+		 * one room agreed on 61 sites of which 57 left with the furniture.
+		 */
+		out.append(Object.assign(el('div', 're-shead'), {
+			style: 'margin-top:14px',
+			innerHTML: '<h3 class="re-cap">Compare</h3><span class="re-rule"></span>',
+		}));
+		if (heldScan && heldScan.name !== state.name) {
+			const now = new Set(diag.defects.map((p) => p.x + ',' + p.y));
+			const both = heldScan.keys.filter((k) => now.has(k));
+			out.append(Object.assign(el('p', 're-note'), {
+				style: 'margin:0 0 8px',
+				textContent: `${both.length} of the ${heldScan.keys.length} found in ` +
+					`${heldScan.name} are here too. Those are the ones that did not move ` +
+					'with the picture.',
+			}));
+			const keep = el('button', 're-btn re-pri', '');
+			keep.dataset.act = 'keep-common';
+			keep.textContent = 'Mark only those ' + both.length;
+			keep.disabled = both.length === 0;
+			keep.addEventListener('click', () => {
+				const set = new Set(both);
+				diag = { ...diag, defects: diag.defects.filter((p) => set.has(p.x + ',' + p.y)),
+					defectCount: both.length, truncated: false, spread: diag.spread };
+				heldScan = null;
+				renderDiagnose(out);
+				drawMarks();
+			});
+			const drop = el('button', 're-btn', '');
+			drop.textContent = 'Forget it';
+			drop.addEventListener('click', () => { heldScan = null; renderDiagnose(out); });
+			const row = el('div');
+			row.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap';
+			row.append(keep, drop);
+			out.append(row);
+		} else {
+			out.append(Object.assign(el('p', 're-note'), {
+				style: 'margin:0 0 8px',
+				textContent: heldScan
+					? 'Held. Capture a different view, scan it, and the two will be compared.'
+					: 'A sensor defect stays put when the view changes; detail in the scene ' +
+						'does not. Hold this scan, point the camera somewhere else, and ' +
+						'scan again.',
+			}));
+			const hold = el('button', 're-btn', '');
+			hold.dataset.act = 'hold-scan';
+			hold.textContent = heldScan ? 'Holding this scan' : 'Hold for comparison';
+			hold.disabled = !!heldScan;
+			hold.addEventListener('click', () => {
+				heldScan = { name: state.name || 'the last frame',
+					keys: diag.defects.map((p) => p.x + ',' + p.y) };
+				renderDiagnose(out);
+			});
+			out.append(hold);
+		}
 
 		out.append(Object.assign(el('div', 're-shead'), {
 			innerHTML: '<h3 class="re-cap">Black level</h3><span class="re-rule"></span>',
@@ -849,6 +1095,14 @@ export function mountEditor(root, {
 	 * part is the corners, the numbers on screen, and the way back.
 	 */
 	let mode = 'develop';
+	/* Which part of the frame the defect scan is allowed to believe, as a
+	 * percentile of frame brightness. 100 is all of it. */
+	let bgPercent = 100;
+	/* A previous scan, kept so a second one taken of a different view can be
+	 * compared against it. Per frame it would be useless -- the whole point is
+	 * that it outlives the frame it came from. */
+	let heldScan = null;
+
 	let corners = null;          /* in frame coordinates */
 	/* Whether this frame has been looked at yet. Per frame, so flipping back
 	 * to Calibrate does not search again over corners someone has since

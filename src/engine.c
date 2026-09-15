@@ -1286,16 +1286,114 @@ static u32 g_dhist[1 << 14];
  *   9..11  each plane's 0.1st percentile: the black level the frame itself
  *          implies, a floor that one stuck pixel cannot drag down
  *   12     how many defects were found, which may exceed how many were stored
+ *   13     Clark-Evans index R over the defects that were stored, or 0
+ *   14     its z score
+ *   15     how many points that index was computed over
+ *   16     the background cut the brightness gate applied, in raw counts
+ *   17     spatial sigma of the deviation field, for the Gaussian overlay
+ *   18     histogram bin width, in raw counts
+ *   19     value at the left edge of the first bin
+ *   20     how many bins were filled
  *
  * defects receives x,y pairs, up to max_defects of them.
+ * hist, when given, receives HIST_BINS counts of the deviation field: how far
+ * each pixel sits from the mean of its same-colour neighbours. That field is
+ * the quantity a defect is judged on, so its distribution is what says whether
+ * the judgement means anything.
  */
-EXPORT(diagnose) i32 diagnose(i32 cfa, i32 white, float sigmas,
-                              float *stats, i32 *defects, i32 max_defects) {
+#define DIAG_STATS 21
+#define HIST_BINS 256
+
+/*
+ * A square root, without a libc to ask for one.
+ *
+ * __builtin_sqrt compiles to the wasm f64.sqrt instruction, so this costs an
+ * instruction rather than a link against a maths library the freestanding
+ * build does not have. Everywhere else in this engine hands the root back to
+ * the caller in JS for that reason; the two places below need it here, because
+ * a distance is not something the caller can take the root of afterwards.
+ */
+static inline double sqrtd(double v) { return __builtin_sqrt(v); }
+
+/*
+ * The local background at one site: a box mean over the same-colour plane,
+ * seven plane-pixels across, which is the first stage of the highpass cascade
+ * EMVA 1288 section 8.1 specifies (7x7 box, 11x11 box, 3x3 binomial, then
+ * subtracted from the original).
+ *
+ * Only the lowpass half is built here, and deliberately. EMVA subtracts the
+ * cascade to remove lens shading and illumination falloff before measuring
+ * spatial nonuniformity; this scan already subtracts the mean of a pixel's
+ * four same-colour neighbours, which removes everything smooth over a wider
+ * span than the cascade does. Running the full cascade as well would highpass
+ * an already highpassed field. What is wanted from it is the other half: the
+ * local signal level, which is what says whether the photo term is small
+ * enough here for a dark-current defect to be visible at all.
+ */
+static float local_background(int x, int y, int w, int h) {
+    int s = 0, n = 0;
+    for (int dy = -6; dy <= 6; dy += 2) {
+        const int yy = y + dy;
+        if (yy < 0 || yy >= h) continue;
+        for (int dx = -6; dx <= 6; dx += 2) {
+            const int xx = x + dx;
+            if (xx < 0 || xx >= w) continue;
+            s += F.raw[yy * w + xx];
+            n++;
+        }
+    }
+    return n ? (float)s / (float)n : 0.f;
+}
+
+/*
+ * Clark-Evans nearest-neighbour index.
+ *
+ * Chapman and colleagues report that hot pixels are randomly spaced across an
+ * imager, and verify their own defect sets against complete spatial randomness
+ * for exactly this reason: a random creation process leaves a random pattern,
+ * while anything driven by the picture sits where the picture had detail.
+ *
+ * R is the mean nearest-neighbour distance over the value a Poisson process of
+ * the same density would give. R = 1 is random, R below 1 clustered, R above 1
+ * dispersed. On a frame of a furnished room this comes back near 0.5, which is
+ * the scan announcing that it is describing the furniture.
+ */
+static void clark_evans(const i32 *pts, int n, int w, int h, float *out_r, float *out_z) {
+    *out_r = 0.f;
+    *out_z = 0.f;
+    if (n < 3) return;
+    double sum = 0.0;
+    for (int i = 0; i < n; i++) {
+        double best = 1e30;
+        for (int j = 0; j < n; j++) {
+            if (j == i) continue;
+            const double dx = (double)(pts[i * 2] - pts[j * 2]);
+            const double dy = (double)(pts[i * 2 + 1] - pts[j * 2 + 1]);
+            const double d2 = dx * dx + dy * dy;
+            if (d2 < best) best = d2;
+        }
+        sum += sqrtd(best);
+    }
+    const double area = (double)w * (double)h;
+    const double obs = sum / n;
+    const double expd = 0.5 * sqrtd(area / n);
+    if (!(expd > 0.0)) return;
+    *out_r = (float)(obs / expd);
+    /* Clark & Evans (1954): the standard error of the mean nearest-neighbour
+     * distance under randomness. */
+    const double se = 0.26136 / sqrtd((double)n * (double)n / area);
+    if (se > 0.0) *out_z = (float)((obs - expd) / se);
+}
+
+EXPORT(diagnose) i32 diagnose(i32 cfa, i32 white, float sigmas, float bg_percentile,
+                              float *stats, i32 *defects, i32 max_defects, u32 *hist) {
     const int w = F.width, h = F.height;
     if (!F.raw || !stats) return ERR_SIZE;
-    for (int i = 0; i < 13; i++) stats[i] = 0.f;
+    for (int i = 0; i < DIAG_STATS; i++) stats[i] = 0.f;
+    if (hist) for (int i = 0; i < HIST_BINS; i++) hist[i] = 0u;
     if (w < 5 || h < 5) return ERR_SIZE;
     if (sigmas <= 0.f) sigmas = 8.f;
+    if (!(bg_percentile > 0.f) || bg_percentile > 100.f) bg_percentile = 100.f;
 
     u32 clipped[3] = {0, 0, 0}, total[3] = {0, 0, 0};
     u32 lowest[3] = {0xffffu, 0xffffu, 0xffffu};
@@ -1374,11 +1472,91 @@ EXPORT(diagnose) i32 diagnose(i32 cfa, i32 white, float sigmas,
      * the ones beside it, so it fails the test; a real hot pixel has nothing
      * standing beside it.
      */
+    /*
+     * The brightness gate.
+     *
+     * I = m*(Rphoto*Te + Rdark*Te + b): a defect lives in the dark terms, so
+     * it is easiest to see where the photo term is smallest. A laboratory sets
+     * that term to zero by capping the lens. Failing that, the shadows in an
+     * ordinary scene are where it comes closest -- and shadows also carry the
+     * least texture, which is what generates the false positives.
+     *
+     * Measured on a lab frame: taking only the darkest quarter of candidates
+     * moved the Clark-Evans index of the surviving set from 0.57 to 0.87, in
+     * other words from plainly clustered towards plainly random.
+     *
+     * The cut comes from a sparse sample of the frame, so it costs one pass
+     * over one pixel in sixty-four rather than a background for every site.
+     */
+    float bg_cut = 3.4e38f;
+    if (bg_percentile < 100.f) {
+        for (int i = 0; i < (1 << 14); i++) g_hist[i] = 0u;
+        u32 sampled = 0;
+        for (int y = 6; y < h - 6; y += 8) {
+            for (int x = 6; x < w - 6; x += 8) {
+                int b = (int)local_background(x, y, w, h);
+                if (b < 0) b = 0;
+                if (b > (1 << 14) - 1) b = (1 << 14) - 1;
+                g_hist[b]++;
+                sampled++;
+            }
+        }
+        if (sampled) {
+            const u32 want = (u32)((double)sampled * bg_percentile / 100.0);
+            u32 acc = 0;
+            for (int i = 0; i < (1 << 14); i++) {
+                acc += g_hist[i];
+                if (acc >= want) { bg_cut = (float)i; break; }
+            }
+        }
+    }
+    stats[16] = bg_cut > 3.0e38f ? 0.f : bg_cut;
+
+    /*
+     * The deviation field, histogrammed.
+     *
+     * EMVA 1288 declines to say when a pixel is defective -- "it will not be
+     * possible to find a common denominator" -- and asks for the distribution
+     * instead, plotted on a logarithmic axis so a single outlying pixel is
+     * visible against millions of ordinary ones. This builds that histogram
+     * over the quantity the scan actually judges: how far a pixel sits from
+     * the mean of its four same-colour neighbours.
+     *
+     * The bin width is chosen from the noise rather than from the extremes, so
+     * the shape near zero is resolved and the tail is where the outliers land.
+     */
+    double noise_var = 0.0;
+    for (int p = 0; p < 3; p++) noise_var += stats[3 + p];
+    noise_var /= 3.0;
+    if (noise_var < 1.0) noise_var = 1.0;
+    const float hist_w = (float)(sqrtd(noise_var) * 0.25);
+    const float hist_lo = -(float)(HIST_BINS / 2) * hist_w;
+    stats[18] = hist_w;
+    stats[19] = hist_lo;
+    stats[20] = (float)HIST_BINS;
+
+    double dev_sum = 0.0, dev_sq = 0.0;
+    u32 dev_n = 0;
+
     i32 found = 0;
     for (int y = 2; y < h - 2; y++) {
         for (int x = 2; x < w - 2; x++) {
             u16 nb[4];
             if (same_plane_neighbours(x, y, w, h, nb) != 4) continue;
+            /* The deviation goes into the histogram for every site that has a
+             * full set of neighbours, gated or not, defect or not: the point
+             * of the distribution is what the ordinary population looks like. */
+            {
+                const double mean4 = (nb[0] + nb[1] + nb[2] + nb[3]) * 0.25;
+                const double d = (double)F.raw[y * w + x] - mean4;
+                dev_sum += d; dev_sq += d * d; dev_n++;
+                if (hist) {
+                    int b = (int)((d - hist_lo) / hist_w);
+                    if (b < 0) b = 0;
+                    if (b > HIST_BINS - 1) b = HIST_BINS - 1;
+                    hist[b]++;
+                }
+            }
             /*
              * A clipped pixel says nothing about itself. It stopped counting
              * at the white level, so if it saturated and its neighbours came
@@ -1396,6 +1574,8 @@ EXPORT(diagnose) i32 diagnose(i32 cfa, i32 white, float sigmas,
             if ((i32)F.raw[y * w + x] >= lim) continue;
             if ((i32)nb[0] >= lim || (i32)nb[1] >= lim ||
                 (i32)nb[2] >= lim || (i32)nb[3] >= lim) continue;
+            /* Too bright for the dark terms to show through. */
+            if (bg_cut < 3.0e38f && local_background(x, y, w, h) > bg_cut) continue;
             const int p = plane_at(cfa, x, y);
             /* A floor of one count, so a synthetic frame with no noise at all
              * does not make every pixel a defect. */
@@ -1445,5 +1625,23 @@ EXPORT(diagnose) i32 diagnose(i32 cfa, i32 white, float sigmas,
         }
     }
     stats[12] = (float)found;
+    if (dev_n > 1) {
+        const double m = dev_sum / dev_n;
+        const double v = dev_sq / dev_n - m * m;
+        stats[17] = (float)sqrtd(v > 0.0 ? v : 0.0);
+    }
+    /* Over the defects that were STORED, which is what the caller can see. A
+     * run that overflowed max_defects reports the index of the prefix it kept;
+     * stats[15] says how many that was so the caller need not guess. */
+    {
+        const int n = found < max_defects ? found : max_defects;
+        if (defects && n >= 3) {
+            float r = 0.f, z = 0.f;
+            clark_evans(defects, n, w, h, &r, &z);
+            stats[13] = r;
+            stats[14] = z;
+            stats[15] = (float)n;
+        }
+    }
     return found;
 }

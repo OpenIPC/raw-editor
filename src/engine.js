@@ -68,7 +68,7 @@ export class Engine {
 		const x = this.x;
 		x.reset_alloc();
 		this.gammaPtr = this.fwdPtr = this.histPtr = this.samplePtr = 0;
-		this.statsPtr = this.defectPtr = this.chartPtr = 0;
+		this.statsPtr = this.defectPtr = this.chartPtr = this.histPtrD = 0;
 		this.defectRoom = 0;
 
 		const p = x.alloc(bytes.length);
@@ -189,18 +189,27 @@ export class Engine {
 		// billion would each go somewhere unpleasant.
 		const asked = opts.maxDefects === undefined ? 4096 : Math.floor(Number(opts.maxDefects));
 		const max = Number.isFinite(asked) ? Math.max(0, Math.min(1 << 20, asked)) : 4096;
-		if (!this.statsPtr) this.statsPtr = x.alloc(13 * 4);
+		/* Keep only candidates whose neighbourhood is in the darkest N% of the
+		 * frame. 100 is every one of them, which is what a caller that has not
+		 * thought about it gets. */
+		const bg = opts.backgroundPercentile === undefined
+			? 100 : Math.max(1, Math.min(100, Number(opts.backgroundPercentile) || 100));
+		if (!this.statsPtr) this.statsPtr = x.alloc(21 * 4);
+		if (!this.histPtrD) this.histPtrD = x.alloc(256 * 4);
 		if (!this.defectPtr || this.defectRoom < max) {
 			this.defectPtr = x.alloc(max * 2 * 4);
 			this.defectRoom = max;
 		}
-		if (!this.statsPtr || !this.defectPtr) throw new Error('out of memory diagnosing the frame');
-		const n = x.diagnose(cfa, white, sigmas, this.statsPtr, this.defectPtr, max);
+		if (!this.statsPtr || !this.defectPtr || !this.histPtrD)
+			throw new Error('out of memory diagnosing the frame');
+		const n = x.diagnose(cfa, white, sigmas, bg, this.statsPtr, this.defectPtr, max,
+			this.histPtrD);
 		if (n < 0) throw new Error(ERRORS[n] || 'the frame could not be diagnosed');
-		const s = new Float32Array(x.memory.buffer, this.statsPtr, 13);
+		const s = new Float32Array(x.memory.buffer, this.statsPtr, 21);
 		const d = new Int32Array(x.memory.buffer, this.defectPtr, Math.min(n, max) * 2);
 		const defects = [];
 		for (let k = 0; k < d.length; k += 2) defects.push({ x: d[k], y: d[k + 1] });
+		const counts = Array.from(new Uint32Array(x.memory.buffer, this.histPtrD, 256));
 		return {
 			clipped: [s[0], s[1], s[2]],
 			noise: [Math.sqrt(s[3]), Math.sqrt(s[4]), Math.sqrt(s[5])],
@@ -209,6 +218,24 @@ export class Engine {
 			defectCount: n,
 			defects,                 // capped at maxDefects; defectCount is the total
 			truncated: n > max,
+			/*
+			 * How far every pixel sits from the mean of its same-colour
+			 * neighbours, binned. EMVA 1288 asks for this rather than a count,
+			 * on the grounds that no single definition of "defective" can
+			 * serve every application -- so the distribution is the answer and
+			 * the threshold is the reader's to place.
+			 */
+			deviation: {
+				counts,
+				binWidth: s[18],
+				min: s[19],
+				sigma: s[17],        // spatial sigma, for the Gaussian overlay
+				total: counts.reduce((a, b) => a + b, 0),
+			},
+			/* Clark-Evans: 1 is spatially random, below 1 clustered. A set of
+			 * real defects is random; one that tracks the picture is not. */
+			spread: s[15] >= 3 ? { index: s[13], z: s[14], over: s[15] } : null,
+			backgroundCut: s[16] || null,
 		};
 	}
 
