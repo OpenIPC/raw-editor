@@ -151,10 +151,24 @@ try {
 	await ed.open(new Uint8Array(await (await fetch('./hostile-model.dng')).arrayBuffer()),
 		'hostile-model.dng');
 	await new Promise((r) => setTimeout(r, 600));
-	t('a host that opens its own frame is not captured over', asked === 0, 'asked ' + asked);
-	t('and the frame on screen is the one it opened',
+	/* The automatic capture starts at mount, before a host has had the chance
+	 * to open anything, so it may well have been asked -- that is the price of
+	 * overlapping the transfer with the module load, and autoCapture:false is
+	 * how a host that minds declines it. What must hold is that the frame it
+	 * fetched does not land on top of the one the host asked for. */
+	t('and the frame on screen is the one the host opened',
 		/hostile-model\.dng/.test(host.querySelector('.re-top').textContent),
 		host.querySelector('.re-top')?.textContent.slice(0, 60));
+	t('not the one the automatic capture was fetching',
+		!/auto\.dng/.test(host.querySelector('.re-top').textContent),
+		host.querySelector('.re-top')?.textContent.slice(0, 60));
+	// And it settles rather than leaving the stage stuck behind a spinner.
+	// The drop zone being HIDDEN is the test: its spinner is still in the DOM
+	// underneath the canvas, which is why looking for the element found it.
+	t('which leaves nothing still saying it is capturing',
+		host.querySelector('.re-drop')?.hidden === true &&
+		host.querySelector('.re-busy')?.hidden !== false,
+		`drop ${host.querySelector('.re-drop')?.hidden}, chip ${host.querySelector('.re-busy')?.hidden}`);
 	ed.destroy();
 	host.remove();
 } catch (e) {
