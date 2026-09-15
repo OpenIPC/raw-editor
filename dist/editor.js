@@ -64,23 +64,69 @@ const ICON = {
  * mount on the page and goes away with the last of them; a host that would
  * rather bundle the CSS itself passes styles: false.
  */
-let sheetEl = null, sheetRefs = 0;
-function acquireStylesheet(base) {
+let sheetEl = null, sheetRefs = 0, sheetReady = null;
+/*
+ * The stylesheet, and a promise for when it has actually arrived.
+ *
+ * It comes from the same CDN as the module and is fetched by a <link> this
+ * function appends, which means the browser has already painted the page by
+ * the time it starts. Build the interface straight away and the operator gets
+ * a second or two of unstyled markup first -- browser-default buttons at
+ * browser-default size, spilling down the page -- and then the studio. So
+ * callers wait on this before revealing anything.
+ *
+ * It resolves rather than rejects when the sheet fails: a stylesheet that will
+ * not load is not a reason to show nothing at all, and the interface is still
+ * usable, if ugly. What it must never do is hang, so there is a deadline.
+ */
+function acquireStylesheet(base, timeoutMs) {
 	if (!sheetEl) {
 		sheetEl = document.createElement('link');
 		sheetEl.rel = 'stylesheet';
 		sheetEl.href = new URL('editor.css', new URL(base, location.href)).href;
 		sheetEl.dataset.rawEditor = '';
+		sheetReady = new Promise((resolve) => {
+			let done = false;
+			const settle = () => { if (!done) { done = true; resolve(); } };
+			sheetEl.addEventListener('load', settle);
+			sheetEl.addEventListener('error', settle);
+			setTimeout(settle, timeoutMs);
+		});
 		document.head.append(sheetEl);
 		sheetRefs = 0;
 	}
 	sheetRefs++;
+	return sheetReady;
 }
 function releaseStylesheet() {
 	if (--sheetRefs > 0) return;
 	sheetEl?.remove();
 	sheetEl = null;
+	sheetReady = null;
 	sheetRefs = 0;
+	bootStyleEl?.remove();
+	bootStyleEl = null;
+}
+
+/*
+ * The few rules the splash needs, injected rather than linked.
+ *
+ * They cannot live in editor.css: the whole point is to have something to
+ * look at while editor.css is still in flight. A <style> element created here
+ * applies the moment it is appended, with no network in the way.
+ */
+let bootStyleEl = null;
+function acquireBootStyles() {
+	if (bootStyleEl) return;
+	bootStyleEl = document.createElement('style');
+	bootStyleEl.dataset.rawEditorBoot = '';
+	bootStyleEl.textContent =
+		'@keyframes re-spin{to{transform:rotate(360deg)}}' +
+		'.re-spinner{width:22px;height:22px;border-radius:50%;' +
+		'border:2px solid rgba(255,255,255,.16);border-top-color:#5c70e8;' +
+		'animation:re-spin .8s linear infinite}' +
+		'@media (prefers-reduced-motion:reduce){.re-spinner{animation-duration:2.4s}}';
+	document.head.append(bootStyleEl);
 }
 
 const el = (tag, cls, html) => {
@@ -173,6 +219,12 @@ export function mountEditor(root, {
 	 * when it is given one, so a host with nothing to capture from -- a plain
 	 * file viewer -- gets no button that cannot work. */
 	capture,
+	/* Whether to ask for that frame on its own, rather than waiting to be
+	 * told. On by default: a host that mounts the editor with somewhere to
+	 * capture from has said what it wants a frame for, and making the
+	 * operator press a button first is a step that answers itself. Hosts with
+	 * an expensive or surprising capture -- and the tests -- can turn it off. */
+	autoCapture = true,
 	/* How a solved matrix reaches the camera, and how it is taken back:
 	 * { apply({colorMatrix, ccm, neutral}), revert(), keep(), holdSeconds }.
 	 * Without one, Calibrate still measures and solves -- the numbers are
@@ -190,7 +242,42 @@ export function mountEditor(root, {
 } = {}) {
 	root.classList.add('re-root');
 	root.innerHTML = '';
-	if (styles) acquireStylesheet(base);
+
+	/*
+	 * Nothing is shown until it can be shown properly.
+	 *
+	 * .re-root is `position: fixed; inset: 0`, so without its stylesheet the
+	 * chrome is not merely unstyled -- it is laid out as ordinary page flow,
+	 * browser-default buttons stacked down over whatever is underneath. The
+	 * interface is therefore built hidden and revealed in one go.
+	 *
+	 * visibility rather than display, because the layout has to settle while
+	 * it is hidden: the canvas sizes itself from its container, and a stage
+	 * measured at display:none comes out zero. visibility inherits, which is
+	 * what lets the splash below opt itself back in with one declaration.
+	 */
+	let splash = null;
+	const reveal = () => {
+		root.style.visibility = '';
+		splash?.remove();
+		splash = null;
+	};
+	if (styles) {
+		acquireBootStyles();
+		root.style.visibility = 'hidden';
+		splash = el('div');
+		splash.dataset.act = 'splash';
+		splash.style.cssText = 'visibility:visible;position:fixed;inset:0;z-index:9999;' +
+			'display:flex;flex-direction:column;align-items:center;justify-content:center;' +
+			'gap:13px;background:#14161c;color:#878a94;' +
+			"font:13px/1.5 system-ui,-apple-system,'Segoe UI',Roboto,Arial,sans-serif";
+		splash.append(el('div', 're-spinner'),
+			Object.assign(el('div'), { textContent: 'Loading the editor…' }));
+		root.append(splash);
+		// Reveal on the sheet, or on the deadline. The interface being ugly is
+		// recoverable; the interface never appearing is not.
+		acquireStylesheet(base, startupTimeoutMs).then(reveal);
+	}
 
 	const state = { info: null, probe: null, cfa: 0, demosaic: 3, black: 0, white: 1023,
 		neutral: [1, 1, 1], gain: 1, fit: true, busy: false,
@@ -263,6 +350,23 @@ export function mountEditor(root, {
 				{ textContent: 'or open one from the camera' }));
 		}
 		drop.replaceChildren(...parts);
+	}
+
+	/* The same panel while a frame is on its way. A raw frame is several
+	 * megabytes off a camera with a hundred of them to spare, so this is
+	 * seconds, not milliseconds, and an empty stage with a button on it reads
+	 * as "nothing is happening" rather than "wait". */
+	function capturingState() {
+		acquireBootStyles();
+		drop.replaceChildren(
+			el('div', 're-spinner'),
+			Object.assign(el('div'), {
+				textContent: 'Capturing a frame…',
+				style: 'font-size:14px;color:#b9bec9',
+			}),
+			Object.assign(el('div', 're-note'), {
+				textContent: 'A raw frame is several megabytes, so this takes a moment.',
+			}));
 	}
 	const busy = el('div', 're-busy', 'working');
 	busy.hidden = true;
@@ -366,8 +470,17 @@ export function mountEditor(root, {
 		if (!capture || state.busy) return;
 		state.busy = true;
 		if (capBtn) capBtn.disabled = true;
-		busy.textContent = 'capturing';
-		busy.hidden = false;
+		if (state.info) {
+			// A frame is already on screen: leave it there and say so in the
+			// corner, rather than blanking the stage for the duration.
+			busy.textContent = 'capturing';
+			busy.hidden = false;
+		} else {
+			// Nothing to look at yet, so the stage itself does the saying. The
+			// corner chip stays down -- two labels for one wait reads as two
+			// things happening.
+			capturingState();
+		}
 		try {
 			const got = await capture();
 			await openBytes(got.bytes, got.name);
@@ -1308,10 +1421,33 @@ export function mountEditor(root, {
 	// of a message the page is already showing.
 	ready.catch(() => {});
 
+	/*
+	 * Ask for the first frame without being told to.
+	 *
+	 * A host that mounted this with somewhere to capture from has already said
+	 * what it wants; making the operator press Capture on an empty stage first
+	 * is a question that answers itself. Kicked off here rather than after the
+	 * stylesheet so the two waits overlap -- the frame is several megabytes off
+	 * the camera and the module is coming from a CDN, and doing them one after
+	 * the other doubles the time to first picture for no reason.
+	 *
+	 * hostOpened is the guard: a host that mounts WITH a capture provider and
+	 * then opens a frame of its own would otherwise have this one land on top
+	 * of it.
+	 */
+	let hostOpened = false;
+	if (capture && autoCapture) {
+		ready.then(() => {
+			if (hostOpened || state.info || state.busy || dead) return;
+			takeFrame();
+		}, () => {});
+	}
+
 	return {
 		root,
 		open: async (bytes, label) => {
 			if (dead) throw new Error(dead);
+			hostOpened = true;
 			await ready;
 			return openBytes(bytes, label);
 		},
@@ -1326,6 +1462,9 @@ export function mountEditor(root, {
 			worker = null;
 			if (styles) releaseStylesheet();
 			root.innerHTML = '';
+			// Destroyed before the stylesheet arrived, the root would otherwise
+			// be handed back to the host still invisible.
+			root.style.visibility = '';
 			root.classList.remove('re-root');
 		},
 	};

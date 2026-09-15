@@ -56,6 +56,9 @@ try {
 	const withCapture = mountEditor(host, {
 		base: '../dist/',
 		styles: false,
+		// Off, so the button below is what asks. The automatic path is checked
+		// on its own further down.
+		autoCapture: false,
 		capture: async () => {
 			asked++;
 			const b = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
@@ -85,6 +88,114 @@ try {
 	host.remove();
 } catch (e) {
 	t('the capture path works end to end', false, e.message);
+}
+
+/* A frame arrives without being asked for, and the wait is visible.
+ *
+ * The first version put an empty stage and a Capture button in front of an
+ * operator who had just navigated to the raw page -- a question that answers
+ * itself. */
+try {
+	const host = document.createElement('div');
+	document.body.append(host);
+	let asked = 0, release = null;
+	const held = new Promise((r) => { release = r; });
+	const ed = mountEditor(host, {
+		base: '../dist/',
+		styles: false,
+		capture: async () => {
+			asked++;
+			await held;               /* so the waiting state can be looked at */
+			const b = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
+			return { bytes: b, name: 'auto.dng' };
+		},
+	});
+	for (let i = 0; i < 60 && asked === 0; i++) await new Promise((r) => setTimeout(r, 50));
+	t('a capture provider is asked for a frame without being told', asked === 1,
+		'asked ' + asked);
+	// While it is in flight there must be something that reads as "wait",
+	// and NOT a button implying nothing has started.
+	t('and the wait says so, with a spinner', !!host.querySelector('.re-drop .re-spinner'));
+	t('rather than offering a button for what is already happening',
+		!host.querySelector('.re-drop [data-act="capture"]'));
+	// One wait, one label. The corner chip is for a re-capture over a frame
+	// that is already on screen.
+	t('and it is said once, not twice', host.querySelector('.re-busy')?.hidden !== false,
+		'corner chip also showing');
+	release();
+	for (let i = 0; i < 80 && !host.querySelector('.re-stage canvas:not([hidden])'); i++)
+		await new Promise((r) => setTimeout(r, 100));
+	t('and the frame it fetched is developed',
+		!!host.querySelector('.re-stage canvas:not([hidden])'));
+	t('asked exactly once, not once per render', asked === 1, 'asked ' + asked);
+	ed.destroy();
+	host.remove();
+} catch (e) {
+	t('the automatic first capture works', false, e.message);
+}
+
+/* A host that opens a frame itself must not have one dropped on top of it. */
+try {
+	const host = document.createElement('div');
+	document.body.append(host);
+	let asked = 0;
+	const ed = mountEditor(host, {
+		base: '../dist/',
+		styles: false,
+		capture: async () => {
+			asked++;
+			const b = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
+			return { bytes: b, name: 'auto.dng' };
+		},
+	});
+	await ed.open(new Uint8Array(await (await fetch('./hostile-model.dng')).arrayBuffer()),
+		'hostile-model.dng');
+	await new Promise((r) => setTimeout(r, 600));
+	t('a host that opens its own frame is not captured over', asked === 0, 'asked ' + asked);
+	t('and the frame on screen is the one it opened',
+		/hostile-model\.dng/.test(host.querySelector('.re-top').textContent),
+		host.querySelector('.re-top')?.textContent.slice(0, 60));
+	ed.destroy();
+	host.remove();
+} catch (e) {
+	t('the host still wins over the automatic capture', false, e.message);
+}
+
+/* Nothing is shown before it can be shown properly.
+ *
+ * .re-root is position:fixed;inset:0, so without its stylesheet the chrome is
+ * not merely unstyled -- it lays out as page flow, browser-default buttons
+ * stacked down over the host page. That is what an operator saw for the
+ * second or two the CDN took. */
+try {
+	const host = document.createElement('div');
+	document.body.append(host);
+	// styles:true is the point here, and the sheet is a real fetch.
+	const ed = mountEditor(host, { base: '../dist/' });
+	// Synchronously after mounting -- the worst moment, before anything has
+	// had a chance to arrive.
+	t('the chrome is not painted before its stylesheet',
+		host.style.visibility === 'hidden', `visibility ${host.style.visibility || '(unset)'}`);
+	t('but something is, so the page is not simply blank',
+		!!host.querySelector('[data-act="splash"] .re-spinner'));
+	t('and it carries its own styling, needing no stylesheet to look right',
+		(host.querySelector('[data-act="splash"]')?.style.position) === 'fixed');
+
+	for (let i = 0; i < 100 && host.style.visibility === 'hidden'; i++)
+		await new Promise((r) => setTimeout(r, 50));
+	t('once the stylesheet lands the interface is revealed',
+		host.style.visibility !== 'hidden', `visibility ${host.style.visibility || '(unset)'}`);
+	t('and the splash is gone rather than left over the picture',
+		!host.querySelector('[data-act="splash"]'));
+	t('the stylesheet really did arrive',
+		!!document.querySelector('link[data-raw-editor]'));
+
+	ed.destroy();
+	t('destroying before or after, the host is not left invisible',
+		host.style.visibility !== 'hidden');
+	host.remove();
+} catch (e) {
+	t('the editor does not paint itself unstyled', false, e.message);
 }
 
 /* The neutral picker, clicked the way a person clicks it: arm it from the
@@ -581,6 +692,25 @@ try {
 	t('a missing module fails rather than hangs', /http 404/.test(message), message || '(resolved!)');
 	t('and fails promptly', took < 10000, Math.round(took) + ' ms');
 	broken.destroy();
+
+	/* And a stylesheet that will not load must not hold the interface hostage.
+	 * Hiding it until the CSS lands is right; hiding it FOREVER because the
+	 * CSS 404'd would turn a cosmetic failure into a blank page. Here the
+	 * module is already imported, so a bad base breaks only the fetches --
+	 * the stylesheet among them. */
+	const noCss = document.createElement('div');
+	document.body.append(noCss);
+	const ed = mountEditor(noCss, { base: '../no-such-directory/' });
+	t('a page whose stylesheet 404s starts hidden all the same',
+		noCss.style.visibility === 'hidden');
+	for (let i = 0; i < 100 && noCss.style.visibility === 'hidden'; i++)
+		await new Promise((r) => setTimeout(r, 50));
+	t('but is revealed anyway rather than staying blank for ever',
+		noCss.style.visibility !== 'hidden', `visibility ${noCss.style.visibility || '(unset)'}`);
+	t('and the splash does not sit on top of it',
+		!noCss.querySelector('[data-act="splash"]'));
+	ed.destroy();
+	noCss.remove();
 } catch (e) {
 	t('the missing-module path is handled', false, e.message);
 }
