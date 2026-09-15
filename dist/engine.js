@@ -19,7 +19,7 @@ const ERRORS = {
 };
 
 export const CFA_NAMES = ['RGGB', 'GRBG', 'GBRG', 'BGGR'];
-export const DEMOSAIC = { none: 0, bilinear: 1 };
+export const DEMOSAIC = { none: 0, bilinear: 1, gradient: 2 };
 
 /* sRGB's own transfer function, not a 2.2 power — the toe matters in the
  * shadows, which is exactly where a raw frame is judged. */
@@ -68,6 +68,8 @@ export class Engine {
 		const x = this.x;
 		x.reset_alloc();
 		this.gammaPtr = this.fwdPtr = this.histPtr = this.samplePtr = 0;
+		this.statsPtr = this.defectPtr = 0;
+		this.defectRoom = 0;
 
 		const p = x.alloc(bytes.length);
 		if (!p) throw new Error('out of memory holding the file');
@@ -164,6 +166,42 @@ export class Engine {
 		// point is noise: both are refused rather than answered with infinity.
 		if (!(g > 0)) throw new Error('that patch is too dark to read a colour from');
 		return { raw: [r, g, b], neutral: [r / g, 1, b / g] };
+	}
+
+	/*
+	 * What is wrong with the sensor rather than with the picture.
+	 *
+	 * The engine returns a noise VARIANCE because it has no libc to take a
+	 * root with; the sigma a person reads is taken here, next to the gamma
+	 * curve, for the same reason.
+	 */
+	diagnose(opts = {}) {
+		const x = this.x, i = this.info;
+		const cfa = opts.cfa === undefined ? i.cfa : opts.cfa;
+		const white = opts.white === undefined ? i.white : opts.white;
+		const sigmas = opts.sigmas === undefined ? 8 : opts.sigmas;
+		const max = opts.maxDefects === undefined ? 4096 : opts.maxDefects;
+		if (!this.statsPtr) this.statsPtr = x.alloc(13 * 4);
+		if (!this.defectPtr || this.defectRoom < max) {
+			this.defectPtr = x.alloc(max * 2 * 4);
+			this.defectRoom = max;
+		}
+		if (!this.statsPtr || !this.defectPtr) throw new Error('out of memory diagnosing the frame');
+		const n = x.diagnose(cfa, white, sigmas, this.statsPtr, this.defectPtr, max);
+		if (n < 0) throw new Error(ERRORS[n] || 'the frame could not be diagnosed');
+		const s = new Float32Array(x.memory.buffer, this.statsPtr, 13);
+		const d = new Int32Array(x.memory.buffer, this.defectPtr, Math.min(n, max) * 2);
+		const defects = [];
+		for (let k = 0; k < d.length; k += 2) defects.push({ x: d[k], y: d[k + 1] });
+		return {
+			clipped: [s[0], s[1], s[2]],
+			noise: [Math.sqrt(s[3]), Math.sqrt(s[4]), Math.sqrt(s[5])],
+			darkest: [s[6], s[7], s[8]],
+			blackFloor: [s[9], s[10], s[11]],
+			defectCount: n,
+			defects,                 // capped at maxDefects; defectCount is the total
+			truncated: n > max,
+		};
 	}
 
 	histogram() {

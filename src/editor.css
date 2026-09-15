@@ -66,6 +66,11 @@
 	box-shadow: 0 1px 4px rgba(0,0,0,.5); cursor: grab; pointer-events: auto;
 	touch-action: none; }
 .re-chart-grip:active { cursor: grabbing; }
+
+/* Defects marked on the picture. Ringed rather than filled, so the pixel being
+ * complained about is still visible inside the mark. */
+.re-marks { position: absolute; inset: 0; pointer-events: none; }
+.re-mark { fill: none; stroke: #ff7a7a; stroke-width: 1.4; }
 /* Fit scales in both directions: a 256px crop in a 1100px stage should fill
  * it, not sit in the middle at native size. */
 .re-stage.re-fit { padding: 14px; }

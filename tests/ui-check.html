@@ -342,6 +342,45 @@ try {
 	t('calibrate works end to end', false, e.message);
 }
 
+/* Diagnose: the third mode, and the demosaic choice that came with it. */
+try {
+	const host = document.createElement('div');
+	document.body.append(host);
+	const ed = mountEditor(host, { base: '../dist/', styles: false });
+	await ed.open(new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer()), 'fixture.dng');
+
+	const opts = [...host.querySelectorAll('.re-panel .re-seg button')].map((b) => b.textContent);
+	t('the demosaic choice includes the gradient-corrected one',
+		opts.includes('None') && opts.includes('Bilinear') && opts.includes('Gradient'),
+		JSON.stringify(opts));
+
+	const diagBtn = [...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose');
+	t('Diagnose is a mode now, not a stub', !!diagBtn && !diagBtn.disabled);
+	diagBtn.click();
+	await new Promise((r) => setTimeout(r, 300));
+	t('and it offers to scan rather than scanning unasked',
+		!!host.querySelector('[data-act="scan"]') && !host.querySelector('.re-mark'));
+
+	host.querySelector('[data-act="scan"]').click();
+	for (let i = 0; i < 100 && !/Black level/.test(host.querySelector('.re-insp').textContent); i++)
+		await new Promise((r) => setTimeout(r, 100));
+	const text = host.querySelector('.re-insp').textContent;
+	t('the scan reports every heading it promises',
+		/Defects/.test(text) && /Black level/.test(text) && /Clipping/.test(text) && /Noise/.test(text),
+		text.replace(/\s+/g, ' ').slice(0, 200));
+	t('and the black level it read is the one in the file',
+		new RegExp('file\\s*' + 50).test(text.replace(/\s+/g, ' ')) || /50/.test(text));
+
+	// Switching away must take the marks with it.
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+	await new Promise((r) => setTimeout(r, 200));
+	t('leaving Diagnose hides its marks', host.querySelector('.re-marks').hidden);
+	ed.destroy();
+	host.remove();
+} catch (e) {
+	t('diagnose works end to end', false, e.message);
+}
+
 /* Confirming is only real once the host has been told. A keep() that fails
  * must not be reported as kept: the operator would stop watching a change the
  * host is still armed to undo. */
