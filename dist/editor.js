@@ -222,8 +222,14 @@ export function mountEditor(root, {
 	/* Whether to ask for that frame on its own, rather than waiting to be
 	 * told. On by default: a host that mounts the editor with somewhere to
 	 * capture from has said what it wants a frame for, and making the
-	 * operator press a button first is a step that answers itself. Hosts with
-	 * an expensive or surprising capture -- and the tests -- can turn it off. */
+	 * operator press a button first is a step that answers itself.
+	 *
+	 * It begins at mount, before the worker has booted, so the transfer
+	 * overlaps the module and wasm still arriving. The cost of starting that
+	 * early is that a host which mounts WITH a capture provider and then opens
+	 * a frame of its own has already paid for one it will not use -- the
+	 * editor stands down, but the bytes were fetched. Such a host should pass
+	 * false; so should one whose capture is expensive or has side effects. */
 	autoCapture = true,
 	/* How a solved matrix reaches the camera, and how it is taken back:
 	 * { apply({colorMatrix, ccm, neutral}), revert(), keep(), holdSeconds }.
@@ -285,6 +291,10 @@ export function mountEditor(root, {
 		 * the worker, so this is what Download must hand back -- re-encoding
 		 * what is on the canvas would save a preview, not the raw frame. */
 		bytes: null, name: null };
+
+	/* Whether the host opened a frame of its own. The automatic first capture
+	 * stands down for it, including mid-flight. */
+	let hostOpened = false;
 
 	/* ---- chrome ---- */
 	const top = el('div', 're-top');
@@ -466,7 +476,7 @@ export function mountEditor(root, {
 	/* Ask the host for a frame. The editor knows nothing about where it comes
 	 * from -- a camera, a file picker, a fixture in a test -- only that it
 	 * takes a moment and can fail. */
-	async function takeFrame() {
+	async function takeFrame(automatic) {
 		if (!capture || state.busy) return;
 		state.busy = true;
 		if (capBtn) capBtn.disabled = true;
@@ -483,6 +493,12 @@ export function mountEditor(root, {
 		}
 		try {
 			const got = await capture();
+			// Only now is the engine wanted. Whatever of the module and the
+			// wasm was still arriving has had the whole transfer to get here.
+			await ready;
+			// A host that opened a frame of its own while this was in the air
+			// wins: it asked for something specific, this did not.
+			if (automatic && (hostOpened || dead)) return;
 			await openBytes(got.bytes, got.name);
 		} catch (e) {
 			fail(e && e.message ? e.message : 'The frame could not be captured.');
@@ -1458,12 +1474,16 @@ export function mountEditor(root, {
 	 * then opens a frame of its own would otherwise have this one land on top
 	 * of it.
 	 */
-	let hostOpened = false;
-	if (capture && autoCapture) {
-		ready.then(() => {
-			if (hostOpened || state.info || state.busy || dead) return;
-			takeFrame();
-		}, () => {});
+	if (capture && autoCapture && !hostOpened && !state.info && !state.busy) {
+		/*
+		 * Not gated on the worker booting.
+		 *
+		 * capture() is the host's own fetch -- several megabytes off the
+		 * camera -- and the engine is needed only to decode what comes back.
+		 * Waiting for the worker first put the two in series: module, wasm,
+		 * THEN the transfer. Started here they overlap.
+		 */
+		takeFrame(true);
 	}
 
 	return {
