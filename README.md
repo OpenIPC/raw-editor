@@ -114,7 +114,10 @@ approximate wearing that name would be worse than not having it.
 
 ## What the engine does, and what it does not
 
-Handles uncompressed Bayer DNG at 8, 10, 12 and 14 bits, little-endian. It reads
+Handles uncompressed Bayer DNG at 8, 10, 12, 14 and 16 bits, little-endian.
+The 16-bit case is stored rather than packed, one sample per two bytes, which
+is what the older HiSilicon parts write — until the reader learned it, every
+camera in that class answered "unsupported bit depth". It reads
 `BlackLevel`, `WhiteLevel`, `CFAPattern`, `AsShotNeutral`, `ForwardMatrix1`,
 `UniqueCameraModel`, ISO and exposure, and develops through the forward matrix
 to sRGB — which is the transform the DNG spec defines for white-balanced camera
@@ -147,3 +150,10 @@ Full resolution is 5.5 fps, which is not a live slider — so `develop()` takes 
 `step`, and the interactive path renders a reduced preview with the full size on
 release. Stepping moves in whole Bayer quads so the preview keeps the CFA phase;
 the smoke test asserts a stepped render matches the full one.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE). The same licence `majestic-webui` carries, which
+matters here because RCD is implemented from the published method rather than
+ported: the reference implementation is GPLv3 and could not be used in a tree
+under this licence. [CONTRIBUTING.md](CONTRIBUTING.md) has the rest.
