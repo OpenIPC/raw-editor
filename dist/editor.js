@@ -520,11 +520,19 @@ export function mountEditor(root, {
 
 	stage.addEventListener('click', (ev) => { if (picking) pickAt(ev); });
 
-	/* Both overlays are positioned against the canvas, and a window resize moves
-	 * the canvas without developing anything -- so nothing would otherwise put
-	 * them back, and the corners and the defect rings would sit where the
-	 * picture used to be. */
+	/*
+	 * Both overlays are positioned against the canvas, so anything that moves
+	 * the canvas has to move them: a window resize, the inspector changing
+	 * width, and the Fit/100% zoom, which resizes the element without the
+	 * window ever changing. Watching the element itself catches all of those,
+	 * where a window listener catches only the first.
+	 */
 	const onResize = () => { drawChart(); drawMarks(); };
+	let ro = null;
+	if (typeof ResizeObserver === 'function') {
+		ro = new ResizeObserver(onResize);
+		ro.observe(canvas);
+	}
 	window.addEventListener('resize', onResize);
 
 	/* ---- diagnose --------------------------------------------------------
@@ -1244,6 +1252,7 @@ export function mountEditor(root, {
 			return openBytes(bytes, label);
 		},
 		destroy() {
+			ro?.disconnect();
 			window.removeEventListener('resize', onResize);
 			// A countdown that outlived its editor would revert a camera whose
 			// operator had closed the page and moved on.

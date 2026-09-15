@@ -230,12 +230,12 @@ EXPORT(dng_unpack) i32 dng_unpack(void) {
 
     /* The packed cases below step in whole groups -- four pixels to five bytes
      * at 10 bits, two to three at 12, four to seven at 14 -- so a frame whose
-     * pixel count is not a multiple of the group leaves a tail this never
-     * writes. The allocator does not promise zeroed memory, and everything
-     * downstream reads all px of it: the histogram counts it, the noise median
-     * includes it, and whatever happened to be in the heap becomes a defect.
-     * Zeroed first, so the tail is at least a definite value. */
-    for (u32 i = 0; i < px; i++) o[i] = 0;
+     * pixel count is not a multiple of the group has a tail they do not reach.
+     * A Bayer frame has even dimensions and never does, but the buffer is read
+     * in full by everything downstream, so the tail is unpacked rather than
+     * left to whatever the allocator last had there. Zeroing it would only make
+     * the wrong answer a repeatable one: the histogram would still count it and
+     * the defect scan would still find it. */
 
     if (F.bits == 8) {
         for (u32 i = 0; i < px; i++) o[i] = s[i];
@@ -255,6 +255,10 @@ EXPORT(dng_unpack) i32 dng_unpack(void) {
             d[0] = (u16)((b[0] << 4) | (b[1] >> 4));
             d[1] = (u16)(((b[1] & 0x0f) << 8) | b[2]);
         }
+        if (px & 1) {
+            const u8 *b = s + pairs * 3;
+            o[px - 1] = (u16)((b[0] << 4) | (b[1] >> 4));
+        }
     } else { /* 14 */
         u32 groups = px >> 2;
         for (u32 g = 0; g < groups; g++) {
@@ -263,6 +267,22 @@ EXPORT(dng_unpack) i32 dng_unpack(void) {
             d[1] = (u16)(((b[1] & 0x03) << 12) | (b[2] << 4) | (b[3] >> 4));
             d[2] = (u16)(((b[3] & 0x0f) << 10) | (b[4] << 2) | (b[5] >> 6));
             d[3] = (u16)(((b[5] & 0x3f) << 8) | b[6]);
+        }
+        const u32 rest = px & 3;
+        if (rest) {
+            const u8 *b = s + groups * 7; u16 *d = o + groups * 4;
+            if (rest > 0) d[0] = (u16)((b[0] << 6) | (b[1] >> 2));
+            if (rest > 1) d[1] = (u16)(((b[1] & 0x03) << 12) | (b[2] << 4) | (b[3] >> 4));
+            if (rest > 2) d[2] = (u16)(((b[3] & 0x0f) << 10) | (b[4] << 2) | (b[5] >> 6));
+        }
+    }
+    if (F.bits == 10) {
+        const u32 rest = px & 3;
+        if (rest) {
+            const u8 *b = s + (px >> 2) * 5; u16 *d = o + (px >> 2) * 4;
+            if (rest > 0) d[0] = (u16)((b[0] << 2) | (b[1] >> 6));
+            if (rest > 1) d[1] = (u16)(((b[1] & 0x3f) << 4) | (b[2] >> 4));
+            if (rest > 2) d[2] = (u16)(((b[2] & 0x0f) << 6) | (b[3] >> 2));
         }
     }
     return ERR_OK;

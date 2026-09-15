@@ -169,6 +169,25 @@ console.log('\npicking a neutral');
 		/outside the frame/.test(refused), refused || '(no error)');
 }
 
+console.log('\nan odd pixel count still unpacks all the way to the end');
+// The packed unpackers step in whole groups, so a count that is not a multiple
+// of the group has a tail they do not reach. A Bayer frame always has even
+// dimensions and never exercises it -- which is why it is worth a test, since
+// everything downstream reads the whole buffer regardless.
+{
+	const { makeDng } = await import('./make-dng.mjs');
+	const W = 5, H = 5;                       // 25 pixels: twelve pairs and one
+	const px = new Uint16Array(W * H);
+	for (let i = 0; i < px.length; i++) px[i] = 100 + i * 37;
+	const e4 = await instantiate(readFileSync(new URL('../dist/engine.wasm', import.meta.url)));
+	e4.open(makeDng({ width: W, height: H, pixels: px, black: 0, white: 4095 }));
+	const raw = new Uint16Array(e4.x.memory.buffer, e4.x.dng_raw_ptr(), W * H);
+	let wrong = 0;
+	for (let i = 0; i < px.length; i++) if (raw[i] !== px[i]) wrong++;
+	check('every pixel of an odd-length frame survives, the last one included', wrong, 0);
+	check('and the last one is the value that was written', raw[W * H - 1], px[W * H - 1]);
+}
+
 console.log('\ngradient-corrected demosaicing beats bilinear on a frame we know the answer to');
 // The only way to score a demosaic is against the picture it was made from:
 // build an RGB scene, throw two thirds of it away in a Bayer pattern, and see
