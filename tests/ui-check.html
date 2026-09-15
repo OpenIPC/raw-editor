@@ -212,6 +212,71 @@ try {
 	t('the editor does not paint itself unstyled', false, e.message);
 }
 
+/* A capture that goes wrong must hand the stage back.
+ *
+ * All three of these left "Capturing a frame..." on screen with no way out,
+ * or were believed to and were not -- the rejection path was already right,
+ * which is why they are all checked rather than the one that looked broken. */
+try {
+	const fixture = async () => new Uint8Array(
+		await (await fetch('./fixture.dng')).arrayBuffer());
+	const probe = async (label, capture, opts, after, settle) => {
+		const host = document.createElement('div');
+		document.body.append(host);
+		const ed = mountEditor(host, { base: '../dist/', styles: false, capture, ...opts });
+		await new Promise((r) => setTimeout(r, 600));
+		if (after) await after(ed);
+		await new Promise((r) => setTimeout(r, settle || 2500));
+		const r = {
+			spinning: !!host.querySelector('.re-drop .re-spinner'),
+			error: /could not|failed|has not sent/i.test(host.textContent),
+			button: !!host.querySelector('.re-drop [data-act="capture"]'),
+			frame: !!host.querySelector('.re-stage canvas:not([hidden])'),
+			name: host.querySelector('.re-top')?.textContent || '',
+			said: (host.querySelector('.re-drop')?.textContent || '').replace(/\s+/g, ' '),
+		};
+		ed.destroy(); host.remove();
+		return r;
+	};
+
+	const rejected = await probe('rejects', async () => { throw new Error('Failed to fetch'); });
+	t('a capture that fails says so rather than spinning',
+		!rejected.spinning && rejected.error && rejected.button, JSON.stringify(rejected));
+
+	// A fetch that stalls cannot be cancelled -- the host hands over a promise
+	// and nothing else -- so the wait is bounded and the stage handed back.
+	const stalled = await probe('stalls', () => new Promise(() => {}), { captureTimeoutMs: 1200 });
+	t('a capture that never answers gives the stage back anyway',
+		!stalled.spinning && stalled.error && stalled.button, JSON.stringify(stalled));
+	// Against what the panel actually rendered. Asserting a literal against
+	// itself, which the first version of this did, passes whatever the code says.
+	t('and says so in seconds, with the number agreeing with the wait',
+		/has not sent a frame in 1 second\./i.test(stalled.said),
+		stalled.said.slice(0, 90) || '(said nothing)');
+
+	/*
+	 * The one that was actually broken. An automatic capture standing down for
+	 * a frame the host opened returned early, leaving the spinner and
+	 * "Capturing a frame..." sitting on top of a picture that had loaded.
+	 */
+	const stoodDown = await probe('stands down',
+		() => new Promise((r) => setTimeout(async () => r({ bytes: await fixture(), name: 'late.dng' }), 900)),
+		{}, async (ed) => { await ed.open(await fixture(), 'host.dng'); });
+	t('an automatic capture standing down clears the stage it claimed',
+		!stoodDown.spinning && stoodDown.frame, JSON.stringify(stoodDown));
+	t('and leaves the host’s frame on screen, not its own',
+		/host\.dng/.test(stoodDown.name) && !/late\.dng/.test(stoodDown.name), stoodDown.name.slice(0, 40));
+
+	// Giving up waiting is not the same as throwing the frame away.
+	const late = await probe('late',
+		() => new Promise((r) => setTimeout(async () => r({ bytes: await fixture(), name: 'late.dng' }), 1800)),
+		{ captureTimeoutMs: 700 }, null, 3500);
+	t('a frame that arrives after the wait was given up is still used',
+		late.frame && /late\.dng/.test(late.name), JSON.stringify(late));
+} catch (e) {
+	t('a failed capture hands the stage back', false, e.message);
+}
+
 /* The neutral picker, clicked the way a person clicks it: arm it from the
  * panel, click the picture, and the white balance must move to what was under
  * the pointer. */
