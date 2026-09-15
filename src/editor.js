@@ -192,7 +192,7 @@ export function mountEditor(root, {
 	root.innerHTML = '';
 	if (styles) acquireStylesheet(base);
 
-	const state = { info: null, probe: null, cfa: 0, demosaic: 1, black: 0, white: 1023,
+	const state = { info: null, probe: null, cfa: 0, demosaic: 3, black: 0, white: 1023,
 		neutral: [1, 1, 1], gain: 1, fit: true, busy: false,
 		/* The file exactly as it arrived. Developing happens on a copy inside
 		 * the worker, so this is what Download must hand back -- re-encoding
