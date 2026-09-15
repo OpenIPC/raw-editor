@@ -296,6 +296,13 @@ console.log('\ndiagnose finds what was planted, and nothing else');
 		Math.abs(d.blackFloor[1] - BASE) < SIGMA * 4 && d.darkest[2] < d.blackFloor[2],
 		`floor ${d.blackFloor[1]}, darkest blue ${d.darkest[2]}`);
 
+	// The blown corner must not read as four hundred bad pixels. A clipped
+	// pixel stopped counting at the white level, so where it saturated and its
+	// neighbours came up just short it stands above all four by construction --
+	// which on a real frame lit up the whole rim of a highlight.
+	const inCorner = d.defects.filter((p) => p.x < 10 && p.y < 10).length;
+	check('a blown highlight is not a field of defects', inCorner, 0);
+
 	const found = new Set(d.defects.map((p) => p.x + ',' + p.y));
 	for (const [x, y] of HOT.concat(DEAD))
 		assert(`the defect planted at ${x},${y} was found`, found.has(x + ',' + y));
