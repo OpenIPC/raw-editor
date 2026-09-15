@@ -56,6 +56,9 @@ try {
 	const withCapture = mountEditor(host, {
 		base: '../dist/',
 		styles: false,
+		// Off, so the button below is what asks. The automatic path is checked
+		// on its own further down.
+		autoCapture: false,
 		capture: async () => {
 			asked++;
 			const b = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
@@ -85,6 +88,114 @@ try {
 	host.remove();
 } catch (e) {
 	t('the capture path works end to end', false, e.message);
+}
+
+/* A frame arrives without being asked for, and the wait is visible.
+ *
+ * The first version put an empty stage and a Capture button in front of an
+ * operator who had just navigated to the raw page -- a question that answers
+ * itself. */
+try {
+	const host = document.createElement('div');
+	document.body.append(host);
+	let asked = 0, release = null;
+	const held = new Promise((r) => { release = r; });
+	const ed = mountEditor(host, {
+		base: '../dist/',
+		styles: false,
+		capture: async () => {
+			asked++;
+			await held;               /* so the waiting state can be looked at */
+			const b = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
+			return { bytes: b, name: 'auto.dng' };
+		},
+	});
+	for (let i = 0; i < 60 && asked === 0; i++) await new Promise((r) => setTimeout(r, 50));
+	t('a capture provider is asked for a frame without being told', asked === 1,
+		'asked ' + asked);
+	// While it is in flight there must be something that reads as "wait",
+	// and NOT a button implying nothing has started.
+	t('and the wait says so, with a spinner', !!host.querySelector('.re-drop .re-spinner'));
+	t('rather than offering a button for what is already happening',
+		!host.querySelector('.re-drop [data-act="capture"]'));
+	// One wait, one label. The corner chip is for a re-capture over a frame
+	// that is already on screen.
+	t('and it is said once, not twice', host.querySelector('.re-busy')?.hidden !== false,
+		'corner chip also showing');
+	release();
+	for (let i = 0; i < 80 && !host.querySelector('.re-stage canvas:not([hidden])'); i++)
+		await new Promise((r) => setTimeout(r, 100));
+	t('and the frame it fetched is developed',
+		!!host.querySelector('.re-stage canvas:not([hidden])'));
+	t('asked exactly once, not once per render', asked === 1, 'asked ' + asked);
+	ed.destroy();
+	host.remove();
+} catch (e) {
+	t('the automatic first capture works', false, e.message);
+}
+
+/* A host that opens a frame itself must not have one dropped on top of it. */
+try {
+	const host = document.createElement('div');
+	document.body.append(host);
+	let asked = 0;
+	const ed = mountEditor(host, {
+		base: '../dist/',
+		styles: false,
+		capture: async () => {
+			asked++;
+			const b = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
+			return { bytes: b, name: 'auto.dng' };
+		},
+	});
+	await ed.open(new Uint8Array(await (await fetch('./hostile-model.dng')).arrayBuffer()),
+		'hostile-model.dng');
+	await new Promise((r) => setTimeout(r, 600));
+	t('a host that opens its own frame is not captured over', asked === 0, 'asked ' + asked);
+	t('and the frame on screen is the one it opened',
+		/hostile-model\.dng/.test(host.querySelector('.re-top').textContent),
+		host.querySelector('.re-top')?.textContent.slice(0, 60));
+	ed.destroy();
+	host.remove();
+} catch (e) {
+	t('the host still wins over the automatic capture', false, e.message);
+}
+
+/* Nothing is shown before it can be shown properly.
+ *
+ * .re-root is position:fixed;inset:0, so without its stylesheet the chrome is
+ * not merely unstyled -- it lays out as page flow, browser-default buttons
+ * stacked down over the host page. That is what an operator saw for the
+ * second or two the CDN took. */
+try {
+	const host = document.createElement('div');
+	document.body.append(host);
+	// styles:true is the point here, and the sheet is a real fetch.
+	const ed = mountEditor(host, { base: '../dist/' });
+	// Synchronously after mounting -- the worst moment, before anything has
+	// had a chance to arrive.
+	t('the chrome is not painted before its stylesheet',
+		host.style.visibility === 'hidden', `visibility ${host.style.visibility || '(unset)'}`);
+	t('but something is, so the page is not simply blank',
+		!!host.querySelector('[data-act="splash"] .re-spinner'));
+	t('and it carries its own styling, needing no stylesheet to look right',
+		(host.querySelector('[data-act="splash"]')?.style.position) === 'fixed');
+
+	for (let i = 0; i < 100 && host.style.visibility === 'hidden'; i++)
+		await new Promise((r) => setTimeout(r, 50));
+	t('once the stylesheet lands the interface is revealed',
+		host.style.visibility !== 'hidden', `visibility ${host.style.visibility || '(unset)'}`);
+	t('and the splash is gone rather than left over the picture',
+		!host.querySelector('[data-act="splash"]'));
+	t('the stylesheet really did arrive',
+		!!document.querySelector('link[data-raw-editor]'));
+
+	ed.destroy();
+	t('destroying before or after, the host is not left invisible',
+		host.style.visibility !== 'hidden');
+	host.remove();
+} catch (e) {
+	t('the editor does not paint itself unstyled', false, e.message);
 }
 
 /* The neutral picker, clicked the way a person clicks it: arm it from the
@@ -356,19 +467,57 @@ try {
 	const url = '/__chart.dng?corners=' + encodeURIComponent(JSON.stringify(TRUTH));
 	await ed.open(new Uint8Array(await (await fetch(url)).arrayBuffer()), 'chart.dng');
 
+	// The default corners, taken before Calibrate is opened, so the automatic
+	// look below has something to have moved them FROM.
 	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Calibrate').click();
-	await new Promise((r) => setTimeout(r, 300));
-
-	const find = [...host.querySelectorAll('.re-btn')].find((b) => b.textContent === 'Find it for me');
-	t('Calibrate offers to find the chart', !!find);
-
+	const find = host.querySelector('[data-act="find-chart"]');
+	t('Calibrate offers to look for the chart', !!find);
+	// Synchronously after the switch: the look is already under way, which is
+	// what says it was not waiting to be asked.
+	t('and starts looking without being asked', find.disabled && find.textContent === 'Looking…',
+		`button reads "${find.textContent}", ${find.disabled ? 'disabled' : 'enabled'}`);
 	const before = [...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left);
-	find.click();
+
 	for (let i = 0; i < 100 && find.disabled; i++) await new Promise((r) => setTimeout(r, 100));
 	const after = [...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left);
-	t('pressing it moves the corners off their default', before.join() !== after.join(),
+	t('and moves the corners off their default on its own', before.join() !== after.join(),
 		`${before.join(' ')} -> ${after.join(' ')}`);
-	t('and it is usable again afterwards', !find.disabled && find.textContent === 'Find it for me');
+	t('and it is usable again afterwards', !find.disabled && find.textContent === 'Look again');
+
+	// Pressing it again must still work -- it is the way back from a near miss
+	// the operator has since dragged about.
+	{
+		const grip = host.querySelector('.re-chart-grip[data-corner="0"]');
+		// Inside the canvas: a point in the letterbox margin is out of frame,
+		// where frameCoords rightly refuses it and nothing moves.
+		const cvr = host.querySelector('.re-stage canvas').getBoundingClientRect();
+		const moved = { clientX: cvr.left + cvr.width * 0.3, clientY: cvr.top + cvr.height * 0.3 };
+		const r0 = grip.getBoundingClientRect();
+		grip.dispatchEvent(new PointerEvent('pointerdown',
+			{ bubbles: true, pointerId: 41, clientX: r0.left + 9, clientY: r0.top + 9 }));
+		window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 41, ...moved }));
+		window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 41, ...moved }));
+		const dragged = grip.style.left;
+		find.click();
+		for (let i = 0; i < 100 && find.disabled; i++) await new Promise((r) => setTimeout(r, 100));
+		t('pressing it again puts a dragged corner back on the chart',
+			grip.style.left !== dragged, `${dragged} -> ${grip.style.left}`);
+	}
+
+	// Leaving and coming back must NOT search again: by then the corners may
+	// be where a person put them.
+	{
+		const placed = [...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left);
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+		await new Promise((r) => setTimeout(r, 200));
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Calibrate').click();
+		const again = host.querySelector('[data-act="find-chart"]');
+		t('coming back to Calibrate does not search over corners already placed',
+			!!again && !again.disabled, again ? `button reads "${again.textContent}"` : '(no button)');
+		await new Promise((r) => setTimeout(r, 300));
+		t('and leaves them where they were',
+			[...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left).join() === placed.join());
+	}
 
 	/*
 	 * Where they landed.
@@ -417,15 +566,19 @@ try {
 	// And on a frame with no chart in it, it has to say so rather than leave
 	// a lattice fitted to the furniture sitting there looking placed.
 	await ed.open(new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer()), 'fixture.dng');
-	await new Promise((r) => setTimeout(r, 400));
-	const find2 = [...host.querySelectorAll('.re-btn')].find((b) => b.textContent === 'Find it for me');
+	const find2 = host.querySelector('[data-act="find-chart"]');
 	const plain = [...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left);
-	find2.click();
 	for (let i = 0; i < 100 && find2.disabled; i++) await new Promise((r) => setTimeout(r, 100));
-	t('a frame with no chart is told so', /no chart found/i.test(host.textContent),
-		host.querySelector('.re-notice')?.textContent.slice(0, 60) || '(said nothing)');
-	t('and its corners are left where they were',
+	await new Promise((r) => setTimeout(r, 200));
+	t('a frame with no chart is told so, without being asked',
+		/no chart found/i.test(host.textContent),
+		host.querySelector('.re-notice')?.textContent.slice(0, 80) || '(said nothing)');
+	// The fallback IS the manual path, so the message has to send them to it.
+	t('and is sent to place the corners by hand', /by hand/i.test(host.textContent),
+		host.querySelector('.re-notice')?.textContent.slice(0, 80) || '(said nothing)');
+	t('and its corners are left at the default, ready to drag',
 		[...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left).join() === plain.join());
+	t('with the button still there to try again', !!find2 && !find2.disabled);
 	host.remove();
 } catch (e) {
 	t('finding the chart works end to end', false, e.message);
@@ -581,6 +734,25 @@ try {
 	t('a missing module fails rather than hangs', /http 404/.test(message), message || '(resolved!)');
 	t('and fails promptly', took < 10000, Math.round(took) + ' ms');
 	broken.destroy();
+
+	/* And a stylesheet that will not load must not hold the interface hostage.
+	 * Hiding it until the CSS lands is right; hiding it FOREVER because the
+	 * CSS 404'd would turn a cosmetic failure into a blank page. Here the
+	 * module is already imported, so a bad base breaks only the fetches --
+	 * the stylesheet among them. */
+	const noCss = document.createElement('div');
+	document.body.append(noCss);
+	const ed = mountEditor(noCss, { base: '../no-such-directory/' });
+	t('a page whose stylesheet 404s starts hidden all the same',
+		noCss.style.visibility === 'hidden');
+	for (let i = 0; i < 100 && noCss.style.visibility === 'hidden'; i++)
+		await new Promise((r) => setTimeout(r, 50));
+	t('but is revealed anyway rather than staying blank for ever',
+		noCss.style.visibility !== 'hidden', `visibility ${noCss.style.visibility || '(unset)'}`);
+	t('and the splash does not sit on top of it',
+		!noCss.querySelector('[data-act="splash"]'));
+	ed.destroy();
+	noCss.remove();
 } catch (e) {
 	t('the missing-module path is handled', false, e.message);
 }
