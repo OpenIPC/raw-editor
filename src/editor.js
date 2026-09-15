@@ -20,6 +20,10 @@ const DEMOSAIC = [
 	['Bilinear', 1, 'average the neighbours'],
 	['Gradient', 2, 'Malvar-He-Cutler: bilinear, corrected by the curvature of ' +
 		'the plane that was actually measured. Removes most of the colour on edges.'],
+	['RCD', 3, 'Ratio-corrected: decides at each site whether the detail runs across ' +
+		'or down, interpolates green along it, and carries red and blue as differences ' +
+		'against that green. The closest of the four, and the only one that needs a ' +
+		'pass over the whole frame first.'],
 ];
 
 /*

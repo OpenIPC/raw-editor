@@ -91,13 +91,26 @@ because a frame is mostly flat and occasionally an edge and squaring gives the
 edges all the say: on a synthetic frame with one hard boundary, a mean-square
 estimate read 98 counts where 12 had been added.
 
-**There is no RCD or AMaZE.** The plan named them; a faithful AMaZE is around a
-thousand lines of intricate float maths and there is no reference output here to
-check a port against, and something approximate wearing that name would be worse
-than not having it. What is here instead is Malvar-He-Cutler gradient-corrected
-interpolation, which is published in full, is one linear filter per case, and
-measures 2.97 mean error per channel against bilinear's 5.24 on a synthetic
-scene the test builds from a known RGB image.
+**Four demosaics**, scored against the RGB image the test mosaics them from —
+mean error per channel, lower is closer to the picture that was thrown away:
+
+| | | |
+|---|---|---|
+| Bilinear | 5.24 | average the neighbours |
+| Gradient | 2.97 | Malvar-He-Cutler: corrected by the curvature of the plane that was measured |
+| RCD | **2.28** | ratio-corrected, directional, colour differences against a finished green |
+
+RCD is written from the method Luis Sanz Rodríguez published, not ported:
+RawTherapee's implementation is GPLv3 and this tree is not, so its code could
+not be used here even though it is the reference everyone means by RCD. It is
+also the only one that cannot work a pixel at a time — red and blue are carried
+as differences against green, so green has to exist everywhere first. That plane
+is built once per frame and kept: on a 2592x1520 frame the first develop costs
+about 75 ms more than the others and every one after it is level with them.
+
+**There is no AMaZE.** A faithful one is around a thousand lines of intricate
+float maths with no reference output here to check a port against, and something
+approximate wearing that name would be worse than not having it.
 
 ## What the engine does, and what it does not
 

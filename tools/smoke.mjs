@@ -236,9 +236,22 @@ console.log('\ngradient-corrected demosaicing beats bilinear on a frame we know 
 	};
 	const bilinear = score(DEMOSAIC.bilinear);
 	const gradient = score(DEMOSAIC.gradient);
+	const rcd = score(DEMOSAIC.rcd);
+	console.log(`       mean error per channel — bilinear ${bilinear.toFixed(2)}, ` +
+		`gradient ${gradient.toFixed(2)}, rcd ${rcd.toFixed(2)}`);
 	assert('gradient-corrected reconstructs the scene more closely than bilinear',
 		gradient < bilinear * 0.9,
 		`mean error per channel: bilinear ${bilinear.toFixed(2)}, gradient ${gradient.toFixed(2)}`);
+	// RCD earns its place or it does not ship: it costs a full green plane and
+	// a second pass, so beating the cheap filter is the whole justification.
+	assert('and RCD reconstructs it more closely still',
+		rcd < gradient * 0.95,
+		`gradient ${gradient.toFixed(2)}, rcd ${rcd.toFixed(2)}`);
+	// The green plane is cached for the frame, so a second develop must give
+	// the same answer rather than a stale or half-built one.
+	const again = score(DEMOSAIC.rcd);
+	assert('and gives the same answer the second time, from its cached green',
+		Math.abs(again - rcd) < 1e-9, `${rcd} then ${again}`);
 	assert('and both are in the right ballpark rather than nonsense',
 		bilinear < 40 && gradient > 0,
 		`bilinear ${bilinear.toFixed(2)}, gradient ${gradient.toFixed(2)}`);
