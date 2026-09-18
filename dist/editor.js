@@ -2112,14 +2112,25 @@ export function mountEditor(root, {
 
 	/* ---- step 4: a burst, stacked ----------------------------------------
 	 *
-	 * Twenty exposures of the plate's own rectangle, averaged. Worth knowing
+	 * Sixteen exposures of the plate's own rectangle, averaged. Worth knowing
 	 * before reading any of this:
 	 *
-	 * IT IS NOT A BURST IN THE PHONE SENSE. Each frame is an independent
-	 * capture -- measured on an hi3516ev300, about 0.79 s each whatever the
-	 * rectangle's size -- so twenty of them span roughly SIXTEEN SECONDS. A car
-	 * can move and a cloud can pass in that time, which is why rejection is
-	 * offered beside the plain mean rather than as an afterthought.
+	 * THERE ARE TWO BURSTS HERE, and which one runs depends on the combine
+	 * mode. A plain MEAN is done by the camera: `?frames=N` averages up to
+	 * sixteen CONSECUTIVE sensor frames and returns one DNG. It is ONE request
+	 * and one capture, with the raw dump left running in between, so the whole
+	 * burst is 0.8 s of sensor time at 20 fps. REJECT cannot use it --
+	 * finding an outlier needs the frames it is an outlier among, and an
+	 * average has already thrown them away -- so it asks for them one at a
+	 * time, about 0.79 s each whatever the rectangle's size, and sixteen of
+	 * those span roughly THIRTEEN SECONDS. A car can move and a cloud can pass
+	 * in that time; that is the price of being able to reject anything, and it
+	 * is why the plain mean is the default rather than the other way round.
+	 *
+	 * On a camera too old to know `?frames=`, mean silently falls back to the
+	 * slow path -- the module checks `X-Frames-Averaged` rather than trusting
+	 * the request, because an old build serves a perfectly good single frame
+	 * for a burst request and says nothing.
 	 *
 	 * THERE IS NO ALIGNMENT, deliberately. The camera is bolted down and its
 	 * measured movement across a burst is 0.02 px RMS -- a fiftieth of a pixel.
@@ -2250,15 +2261,22 @@ export function mountEditor(root, {
 				innerHTML: '<h3 class="re-cap">Take a burst and stack it</h3><span class="re-rule"></span>',
 			}));
 			burst.append(Object.assign(el('p', 're-note'), {
-				textContent: 'Each frame is a separate capture of this rectangle, about 0.8 s ' +
-					'apart — twenty of them take the better part of a minute, and the camera ' +
-					'serves nothing else raw while they run.',
+				textContent: 'Mean asks the camera to average the frames itself: one ' +
+					'request, sixteen consecutive sensor frames, under a second of sensor ' +
+					'time. Reject cannot — an outlier cannot be found in an average that ' +
+					'has already been taken — so it asks for the frames one at a time, ' +
+					'each a separate capture about 0.8 s after the last. A camera too old ' +
+					'to average them falls back to that slow path for Mean as well, and ' +
+					'the progress line says so while it runs.',
 			}));
 
 			const row = el('div');
 			row.style.cssText = 'display:flex;gap:8px;margin-top:9px;align-items:center;flex-wrap:wrap';
 			const count = el('input');
-			count.type = 'number'; count.min = '2'; count.max = '40'; count.value = '20';
+			// Sixteen is the camera's own limit on `?frames=`; asking for more
+			// would silently get sixteen, and a control that lies about what it
+			// did is worse than one that stops where the hardware does.
+			count.type = 'number'; count.min = '2'; count.max = '16'; count.value = '16';
 			count.style.cssText = 'width:62px;background:transparent;color:inherit;' +
 				'border:1px solid var(--re-line,#2c313d);border-radius:6px;padding:4px 6px';
 			const modeSel = segmented([
@@ -2273,16 +2291,18 @@ export function mountEditor(root, {
             burst.append(row);
 
 			const prog = el('p', 're-note');
+			prog.dataset.act = 'burst-status';
 			prog.style.marginTop = '8px';
 			burst.append(prog);
 			const cmp = el('div');
+			cmp.dataset.act = 'burst-compare';
 			cmp.style.cssText = 'display:flex;gap:14px;margin-top:10px;flex-wrap:wrap';
 			burst.append(cmp);
 
 			go.addEventListener('click', async () => {
 				go.disabled = true;
 				cmp.replaceChildren();
-				const n = Math.max(2, Math.min(40, parseInt(count.value, 10) || 20));
+				const n = Math.max(2, Math.min(16, parseInt(count.value, 10) || 16));
 				// A margin round the plate: the recogniser wants context, and a
 				// rectangle cut exactly to the glyphs has none.
 				const want = {
@@ -2292,24 +2312,50 @@ export function mountEditor(root, {
 					height: Math.round(c.box.height * 5.4),
 				};
 				const full = plateFull || canvas;
-				let got;
+				let got, single;
 				try {
-					prog.textContent = 'Asking the camera for frame 1…';
+					/* Mean goes through the camera, which averages consecutive
+					 * sensor frames and hands back one. Reject cannot: finding
+					 * an outlier needs the frames it is an outlier among, and an
+					 * average has already thrown them away. */
+					const wantSeparate = combine === 'reject';
+					prog.textContent = wantSeparate
+						? 'Asking the camera for frame 1…'
+						: 'Asking the camera to average ' + n + ' frames…';
 					got = await plates.burst({
 						rect: want, frameW: full.width, frameH: full.height, frames: n,
+						separate: wantSeparate,
 						onProgress: (i, k) => {
+							/* The camera's own averaging is one request and
+							 * reports no progress at all; this fires on the slow
+							 * path, and on a firmware whose module still counts
+							 * the single averaged request as one of one. */
+							if (k <= 1) return;
 							prog.textContent = 'Frame ' + i + ' of ' + k + ' — about ' +
 								Math.max(0, Math.round((k - i) * 0.8)) + ' s left';
 						},
 					});
+					// One plain frame to compare against. On the camera-averaged
+					// path the burst is a single file, so the before picture has
+					// to be asked for separately -- it costs about 20 ms.
+					if (got.inCamera) {
+						prog.textContent = 'And one plain frame to compare against…';
+						const one = await plates.burst({
+							rect: want, frameW: full.width, frameH: full.height,
+							frames: 1, separate: true,
+						});
+						single = one.frames[0];
+					}
 				} catch (e) { prog.textContent = e.message; go.disabled = false; return; }
 
-				prog.textContent = 'Developing ' + got.frames.length + ' frames…';
+				const toDevelop = got.inCamera ? [single].concat(got.frames) : got.frames;
+				prog.textContent = 'Developing ' + toDevelop.length + ' frame' +
+					(toDevelop.length === 1 ? '' : 's') + '…';
 				const devd = [];
 				let W = 0, H = 0;
 				try {
-					for (let i = 0; i < got.frames.length; i++) {
-						const bytes = got.frames[i];
+					for (let i = 0; i < toDevelop.length; i++) {
+						const bytes = toDevelop[i];
 						const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 						const o = await call('open', { bytes: buf }, [buf]);
 						const d = await call('develop', {
@@ -2320,7 +2366,7 @@ export function mountEditor(root, {
 						});
 						W = d.width; H = d.height;
 						devd.push(d.pixels);
-						prog.textContent = 'Developing ' + (i + 1) + ' of ' + got.frames.length + '…';
+						prog.textContent = 'Developing ' + (i + 1) + ' of ' + toDevelop.length + '…';
 					}
 				} catch (e) {
 					prog.textContent = 'The engine would not develop a burst frame: ' + e.message;
@@ -2335,13 +2381,20 @@ export function mountEditor(root, {
 				} catch (e) { /* commit() reports through the usual path */ }
 
 				if (devd.length < 2) { go.disabled = false; return; }
+				/* On the camera-averaged path devd is [plain, averaged] and the
+				 * stacking is already done; on the separate path it is every
+				 * frame and the combining happens here. */
 				const one = canvasFrom(devd[0], W, H);
-				const st = canvasFrom(stackMean(devd, W * H, combine === 'reject'), W, H);
+				const st = got.inCamera
+					? canvasFrom(devd[1], W, H)
+					: canvasFrom(stackMean(devd, W * H, combine === 'reject'), W, H);
 				const inCrop = {
 					left: c.box.left - got.rect.left, top: c.box.top - got.rect.top,
 					width: c.box.width, height: c.box.height,
 				};
-				prog.textContent = got.frames.length + ' frames of ' + W + '×' + H +
+				prog.textContent = (got.inCamera ? got.averaged : got.frames.length) +
+					' frames of ' + W + '×' + H + ', ' +
+					(got.inCamera ? 'averaged by the camera' : 'combined here') +
 					', cut at ' + got.rect.left + ',' + got.rect.top + '. Reading both…';
 				let r1 = null, rN = null;
 				try {
@@ -2373,13 +2426,34 @@ export function mountEditor(root, {
 					cmp.append(box);
 				};
 				show('one frame', one, r1);
-				show(combine === 'reject' ? got.frames.length + ' frames, outliers rejected'
-					: got.frames.length + ' frames, mean', st, rN);
+				/* Not `combine` alone: a camera too old for `?frames=` falls
+				 * back to the slow path with the mode still set to Mean, and
+				 * labelling that "outliers rejected" would be a lie about what
+				 * the picture on the right went through. */
+				show(got.inCamera
+					? got.averaged + ' frames, averaged by the camera'
+					: got.frames.length + (combine === 'reject'
+						? ' frames, outliers rejected' : ' frames, mean'), st, rN);
 				if (r1 && rN) {
 					const d = rN.minConf - r1.minConf;
-					prog.textContent = 'Stacking moved the read ' + (d >= 0 ? '+' : '') +
-						d.toFixed(2) + ' — ' + r1.minConf.toFixed(2) + ' to ' + rN.minConf.toFixed(2) +
-						(rN.text === r1.text ? ', same characters.' : ', and changed a character.');
+					const same = rN.text === r1.text
+						? ', same characters.' : ', and changed a character.';
+					/* Only one of the two paths may claim cause. On the slow path
+					 * the single frame IS the burst's own first frame, so the
+					 * difference is the stacking and nothing else. On the camera's
+					 * path there is no constituent frame to be had -- the average
+					 * arrives already taken -- so the control is a separate
+					 * capture, and whatever moved between the two is in that
+					 * number as well. Saying "stacking moved the read" there would
+					 * attribute a passing car to the arithmetic. */
+					prog.textContent = got.inCamera
+						? 'The averaged frame reads ' + rN.minConf.toFixed(2) + ' against ' +
+							r1.minConf.toFixed(2) + ' for the plain one' + same +
+							' They are two separate captures, so anything that moved ' +
+							'between them is in that difference too.'
+						: 'Stacking moved the read ' + (d >= 0 ? '+' : '') +
+							d.toFixed(2) + ' — ' + r1.minConf.toFixed(2) + ' to ' +
+							rN.minConf.toFixed(2) + same;
 				}
 				go.disabled = false;
 			});
@@ -2418,6 +2492,7 @@ export function mountEditor(root, {
 						' px · detector ' + c.score.toFixed(2) + ' · read ' + c.minConf.toFixed(2),
 				}));
 				r.append(t);
+				r.dataset.act = 'plate-row';
 				r.addEventListener('click', () => { plateSel = i; paintList(); paintMeter(); paintBurst(); drawPlateMarks(); });
 				list.append(r);
 			});
