@@ -244,6 +244,32 @@ export function mountEditor(root, {
 	/* How long to wait for the module to arrive and answer. The camera's own
 	 * loader gives the CDN eight seconds; a test harness under a virtual clock
 	 * needs a number well above whatever budget the browser is running on. */
+	/* Reading number plates: the detector and recogniser, and the camera's own
+	 * exposure. Shaped like `calibrate` on purpose, because it is the same
+	 * bargain -- something that measures, something that writes to the camera,
+	 * and a way back:
+	 *
+	 *   { reader(), readerSupported, exposure: { plan, apply, revert, keep,
+	 *     supports, armed, holdSeconds } }
+	 *
+	 * Without one the Plates tab is not built at all. With one whose
+	 * `readerSupported` is false, or whose `reader()` rejects, the tab still
+	 * measures what the frame can support and still meters the camera -- only
+	 * the naming of characters goes away, and that is worth saying out loud
+	 * rather than hiding the tab.
+	 *
+	 * The reader is handed a develop from THIS editor's engine, which is the
+	 * whole reason the feature belongs in here rather than beside it: a plate
+	 * is fifty pixels across and a hand-rolled bilinear demosaic costs most of
+	 * what the recogniser has to work with.
+	 *
+	 * Not the canvas, though. What is on screen is developed at `step` -- 2 on
+	 * any ordinary stage -- because a preview only has to fill the stage. That
+	 * halves the plate to 26x7 and the read with it, measured: 0.30 where the
+	 * same frame at step 1 reads 0.98. So Plates asks the engine for its own
+	 * full-resolution develop and reads that, and the operator goes on looking
+	 * at the cheap one. */
+	plates,
 	startupTimeoutMs = 15000,
 	/* How long to wait for the host to hand over a frame before giving the
 	 * stage back. Generous: a raw frame is several megabytes off a device with
@@ -309,11 +335,15 @@ export function mountEditor(root, {
 	nameEl.style.cssText = 'font-size:13px;font-weight:500';
 	const sensorChip = el('span', 're-chip');
 	sensorChip.hidden = true;
-	const modeSeg = segmented([
+	const modeItems = [
 		{ label: 'Develop', value: 'develop' },
 		{ label: 'Diagnose', value: 'diagnose' },
 		{ label: 'Calibrate', value: 'calibrate' },
-	], 0, (v) => setMode(v), { wide: false });
+	];
+	// Not created and disabled: a tab that can never work is worse than no tab,
+	// and a host reading the DOM should find only what is really on offer.
+	if (plates) modeItems.push({ label: 'Plates', value: 'plates' });
+	const modeSeg = segmented(modeItems, 0, (v) => setMode(v), { wide: false });
 	// Not created at all without a provider, rather than created and hidden: a
 	// disabled-looking control that can never work is worse than none, and a
 	// host reading the DOM should find only what is really on offer.
@@ -593,13 +623,17 @@ export function mountEditor(root, {
 				gain: state.gain, step,
 			});
 			canvas.hidden = false; drop.hidden = true; hud.hidden = false;
+			// A develop means the picture changed, so the reader's full-size
+			// copy is of something that is no longer on screen.
+			plateFull = null;
 			canvas.width = r.width; canvas.height = r.height;
 			canvas.getContext('2d').putImageData(new ImageData(r.pixels, r.width, r.height), 0, 0);
 			if (mode === 'develop') histBox.innerHTML = histogramSVG(r.hist);
 			zoomEl.textContent = state.fit ? 'Fit' : '100%';
-			// The canvas may have changed size, and the overlay is positioned
+			// The canvas may have changed size, and the overlays are positioned
 			// against it.
 			drawChart();
+			drawPlateMarks();
 		} catch (e) {
 			fail(e.message);
 		} finally {
@@ -743,6 +777,105 @@ export function mountEditor(root, {
 	marks.hidden = true;
 	stage.append(marks);
 
+	/* The plate overlay, separate from the defect one so switching tabs does
+	 * not make one clear the other's work. */
+	const plateMarks = el('div', 're-marks');
+	plateMarks.hidden = true;
+	stage.append(plateMarks);
+	/* Set by buildPlates so the picture can drive the list. */
+	let plateRepaint = null;
+
+	/*
+	 * Where the plates are, on the picture.
+	 *
+	 * The list on the right says what was found; this says where. A detection
+	 * is drawn at its true size and then given a minimum, because at Fit a
+	 * 46-pixel plate on a 2592-pixel frame is sixteen pixels of stage and a
+	 * box that small is a dot -- the ring around it is a hit target, not a
+	 * claim about the plate's extent. The label sits outside the ring for the
+	 * same reason: over it, it would cover the thing it names.
+	 *
+	 * Clicking either end selects: a row selects its box, a box selects its
+	 * row. They are two views of one selection, so neither owns it.
+	 */
+	function drawPlateMarks() {
+		plateMarks.replaceChildren();
+		if (mode !== 'plates' || !plateCands || !state.info) return;
+		const NS = 'http://www.w3.org/2000/svg';
+		const svg = document.createElementNS(NS, 'svg');
+		svg.setAttribute('class', 're-chart-svg');
+		svg.style.pointerEvents = 'none';
+		const floor = plateReader ? plateReader.floor : 0.5;
+		plateCands.forEach((c, i) => {
+			const a = stageCoords(c.box.left, c.box.top);
+			const b = stageCoords(c.box.left + c.box.width, c.box.top + c.box.height);
+			if (!a || !b) return;
+			const sel = i === plateSel;
+			const w = Math.max(18, b.x - a.x), h = Math.max(12, b.y - a.y);
+			const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+			const r = document.createElementNS(NS, 'rect');
+			r.setAttribute('x', cx - w / 2); r.setAttribute('y', cy - h / 2);
+			r.setAttribute('width', w); r.setAttribute('height', h);
+			r.setAttribute('rx', 3);
+			r.setAttribute('fill', sel ? 'rgba(74,99,216,0.18)' : 'none');
+			r.setAttribute('stroke', sel ? '#6f86ff'
+				: c.minConf >= floor ? '#4ea97b' : 'rgba(255,255,255,0.55)');
+			r.setAttribute('stroke-width', sel ? 2.5 : 1.5);
+			r.style.pointerEvents = 'auto';
+			r.style.cursor = 'pointer';
+			r.addEventListener('click', (ev) => {
+				ev.stopPropagation();
+				plateSel = i;
+				if (plateRepaint) plateRepaint();
+				drawPlateMarks();
+			});
+			svg.append(r);
+			if (sel) {
+				/* The registration, whatever the confidence -- the size was no use
+				 * to anyone standing in front of the picture. What confidence
+				 * changes is the INK: white for a read above the floor, amber
+				 * below it, matching the greyed-out rows in the list. So a
+				 * doubtful reading is still shown, and still never looks like a
+				 * certain one. The size is only the fallback for a candidate the
+				 * reader returned nothing at all for. */
+				const label = c.text ||
+					(Math.round(c.box.width) + '×' + Math.round(c.box.height) + ' px');
+				const ink = c.minConf >= floor ? '#fff' : '#f0c04a';
+				/* Edged the way the camera's own OSD is: white ink standing on a
+				 * black halo, so it reads on a red bonnet and on tarmac alike.
+				 * majestic grows that halo from the glyph's own coverage; here
+				 * the same effect comes from drawing the label twice, larger in
+				 * black underneath and smaller in white on top.
+				 *
+				 * The black one is nudged up by the half-difference in size:
+				 * both share a baseline, so without that the halo would be all
+				 * under the letters and none above them. */
+				const t = document.createElementNS(NS, 'text');
+				t.setAttribute('x', cx);
+				t.setAttribute('y', cy - h / 2 - 8);
+				t.setAttribute('text-anchor', 'middle');
+				t.setAttribute('font-size', '12');
+				t.setAttribute('font-weight', '700');
+				t.setAttribute('font-family', 'ui-monospace, SFMono-Regular, monospace');
+				t.setAttribute('fill', ink);
+				t.setAttribute('stroke', '#000');
+				t.setAttribute('stroke-width', '3.5');
+				t.setAttribute('stroke-linejoin', 'round');
+				/* Stroke UNDER fill, which is what makes this a halo rather than
+				 * an outline drawn over the letters and eating them from both
+				 * sides. One element, so the two can never drift apart -- the
+				 * black-behind-white version could not line up at all, because a
+				 * larger copy of a nine-character string is a wider string and
+				 * only its middle glyph lands where the smaller one's did. */
+				t.setAttribute('paint-order', 'stroke fill');
+				t.style.paintOrder = 'stroke fill';
+				t.textContent = label;
+				svg.append(t);
+			}
+		});
+		plateMarks.append(svg);
+	}
+
 	function drawMarks() {
 		marks.replaceChildren();
 		if (mode !== 'diagnose' || !diag || !state.info) return;
@@ -765,7 +898,240 @@ export function mountEditor(root, {
 		marks.append(svg);
 	}
 
+
+	/* ---- step 2: can a plate be read here? --------------------------------
+	 *
+	 * The Sensor card above asks whether the SENSOR is healthy. This asks
+	 * whether this PICTURE can give up a registration, which is a different
+	 * question with different answers -- a flawless sensor out of focus fails
+	 * it, and a sensor with two hundred hot pixels passes.
+	 *
+	 * Three numbers, and only two of them are measurements.
+	 *
+	 * Sampling is exact: the plate's width in sensor pixels, straight off the
+	 * detection.
+	 *
+	 * Noise is Immerkaer's single-image estimate -- a 3x3 mask that annihilates
+	 * linear ramps, so what survives is the grain rather than the scene. It was
+	 * checked against known added noise before it was allowed on screen: within
+	 * 4% from 1 to 16 DN.
+	 *
+	 * Blur is NOT reported as a sigma, and that is deliberate. The obvious
+	 * estimator -- blur the frame again and watch the gradient energy fall --
+	 * was built, measured against known blur, and thrown away: it read 2.4 for
+	 * a true 1.0 and its error grew with the answer, because the 1/sigma^2 it
+	 * assumes is a property of an idealised edge and not of a photograph. A
+	 * calibrated-looking number that is wrong by a factor of two is worse than
+	 * no number.
+	 *
+	 * So the sharpness question is answered by EXPERIMENT instead: blur this
+	 * plate by increasing amounts, read it again after each, and report how
+	 * much it can take before it stops reading. That is the headroom, it needs
+	 * no calibration, and it uses the recogniser that will actually do the job.
+	 */
+	function blurGray(px, w, h, sigma) {
+		if (!(sigma > 0)) return px;
+		const r = Math.max(1, Math.ceil(sigma * 3));
+		const k = new Float64Array(2 * r + 1);
+		let sum = 0;
+		for (let i = -r; i <= r; i++) { k[i + r] = Math.exp(-(i * i) / (2 * sigma * sigma)); sum += k[i + r]; }
+		for (let i = 0; i < k.length; i++) k[i] /= sum;
+		const t = new Float64Array(w * h), o = new Float64Array(w * h);
+		for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+			let a = 0;
+			for (let i = -r; i <= r; i++) {
+				let xx = x + i; if (xx < 0) xx = 0; else if (xx >= w) xx = w - 1;
+				a += px[y * w + xx] * k[i + r];
+			}
+			t[y * w + x] = a;
+		}
+		for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+			let a = 0;
+			for (let i = -r; i <= r; i++) {
+				let yy = y + i; if (yy < 0) yy = 0; else if (yy >= h) yy = h - 1;
+				a += t[yy * w + x] * k[i + r];
+			}
+			o[y * w + x] = a;
+		}
+		return o;
+	}
+
+	/* Immerkaer 1996. Validated against known noise before shipping. */
+	function noiseDN(px, w, h) {
+		let s = 0, n = 0;
+		for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+			const i = y * w + x;
+			const v = px[i - w - 1] - 2 * px[i - w] + px[i - w + 1]
+				- 2 * px[i - 1] + 4 * px[i] - 2 * px[i + 1]
+				+ px[i + w - 1] - 2 * px[i + w] + px[i + w + 1];
+			s += Math.abs(v); n++;
+		}
+		return n ? (s / n) * Math.sqrt(Math.PI / 2) / 6 : 0;
+	}
+
+	function cropCanvas(src, box, padX, padY) {
+		const x0 = Math.max(0, Math.round(box.left - box.width * padX));
+		const y0 = Math.max(0, Math.round(box.top - box.height * padY));
+		const x1 = Math.min(src.width, Math.round(box.left + box.width * (1 + padX)));
+		const y1 = Math.min(src.height, Math.round(box.top + box.height * (1 + padY)));
+		const c = el('canvas');
+		c.width = Math.max(1, x1 - x0); c.height = Math.max(1, y1 - y0);
+		c.getContext('2d', { willReadFrequently: true })
+			.drawImage(src, x0, y0, c.width, c.height, 0, 0, c.width, c.height);
+		return { canvas: c, box: { left: box.left - x0, top: box.top - y0,
+			width: box.width, height: box.height } };
+	}
+
+	function grayOf(cv) {
+		const d = cv.getContext('2d', { willReadFrequently: true })
+			.getImageData(0, 0, cv.width, cv.height).data;
+		const g = new Float64Array(cv.width * cv.height);
+		for (let i = 0; i < g.length; i++)
+			g[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+		return g;
+	}
+
+	function grayToCanvas(g, w, h) {
+		const c = el('canvas'); c.width = w; c.height = h;
+		const im = new ImageData(w, h);
+		for (let i = 0; i < g.length; i++) {
+			const v = g[i] < 0 ? 0 : (g[i] > 255 ? 255 : g[i]);
+			im.data[i * 4] = im.data[i * 4 + 1] = im.data[i * 4 + 2] = v;
+			im.data[i * 4 + 3] = 255;
+		}
+		c.getContext('2d', { willReadFrequently: true }).putImageData(im, 0, 0);
+		return c;
+	}
+
 	function pct(v) { return (v * 100).toFixed(v >= 0.01 ? 1 : 3) + '%'; }
+
+	/* The second card in Diagnose: the picture's fitness for reading a plate,
+	 * as opposed to the sensor's own health. Built only when the host gave us
+	 * somewhere to read from. */
+	function buildPlateFitness() {
+		if (!plates) return;
+		const panel = el('div', 're-panel');
+		panel.append(Object.assign(el('div', 're-shead'), {
+			innerHTML: '<h3 class="re-cap">Reading a plate here</h3><span class="re-rule"></span>',
+		}));
+		const note = el('p', 're-note');
+		panel.append(note);
+		const rows = el('div');
+		rows.style.cssText = 'display:flex;flex-direction:column;gap:7px;margin-top:9px';
+		panel.append(rows);
+		insp.append(panel);
+
+		if (!plateCands || plateSel < 0) {
+			note.textContent = 'Pick a plate on the Plates tab first — these are questions ' +
+				'about one plate, and the answers differ across a frame.';
+			return;
+		}
+		const c = plateCands[plateSel];
+		const run = el('button', 're-btn re-pri', '');
+		run.dataset.act = 'plate-fitness';
+		run.textContent = 'Measure this plate';
+		note.textContent = 'Three questions about the plate you picked. The first two are ' +
+			'read off the frame; the third is answered by blurring it until it stops reading.';
+		panel.insertBefore(run, rows);
+
+		const bar = (label, frac, value, tone) => {
+			const r = el('div');
+			r.style.cssText = 'display:flex;align-items:center;gap:9px';
+			r.append(Object.assign(el('span', 're-note'), {
+				textContent: label, style: 'width:78px;flex:none',
+			}));
+			const track = el('div');
+			track.style.cssText = 'flex:1;height:5px;border-radius:3px;background:var(--re-line,#2c313d)';
+			const fill = el('div');
+			fill.style.cssText = 'height:100%;border-radius:3px;width:' +
+				Math.max(2, Math.min(100, frac * 100)).toFixed(0) + '%;background:' +
+				(tone === 'warn' ? '#c9a227' : tone === 'good' ? '#4ea97b' : '#7c869b');
+			track.append(fill);
+			r.append(track);
+			r.append(Object.assign(el('span', 're-mono'), {
+				textContent: value, style: 'width:92px;text-align:right;font-size:12px',
+			}));
+			return r;
+		};
+
+		run.addEventListener('click', async () => {
+			run.disabled = true;
+			rows.replaceChildren();
+			try {
+				const full = await plateFrame();
+				const cut = cropCanvas(full, c.box, 0.35, 1.1);
+				const g = grayOf(cut.canvas);
+				const w = cut.canvas.width, h = cut.canvas.height;
+
+				// exact
+				const px = Math.round(c.box.width);
+				const chars = Math.round(c.box.height * 0.62);
+				// measured
+				const dn = noiseDN(g, w, h);
+				// experiment
+				note.textContent = 'Blurring it until it stops reading…';
+				const floor = plateReader.floor;
+				const steps = [0, 0.3, 0.6, 0.9, 1.2, 1.6, 2.0];
+				const got = [];
+				/* The whole sweep, no early exit. Confidence is NOT monotonic in
+				 * blur -- measured on this camera, a plate went 0.69, 0.66,
+				 * 0.83, 0.34 across +0.0 to +0.9 px, because a little blur is
+				 * also a denoise and the recogniser is not above being helped
+				 * by one. Stopping at the first dip would have reported the
+				 * headroom as zero on a plate with half a pixel in hand. */
+				for (const sg of steps) {
+					const cv = sg ? grayToCanvas(blurGray(g, w, h, sg), w, h) : cut.canvas;
+					const r = await plateReader.read(cv, cut.box);
+					got.push({ sigma: sg, conf: r.minConf, text: r.text });
+					note.textContent = 'Blurring it until it stops reading… +' + sg.toFixed(1) + ' px';
+				}
+				const ok = got.filter((x) => x.conf >= floor);
+				const lastOk = ok.length ? ok[ok.length - 1] : null;
+				const head = lastOk ? lastOk.sigma : null;
+				// Did it dip below and come back? Worth saying, because it means
+				// the number above is a range rather than a threshold.
+				const bumpy = ok.length > 1 &&
+					got.findIndex((x) => x === lastOk) !== ok.length - 1;
+
+				rows.replaceChildren();
+				rows.append(bar('Sampling', Math.min(1, px / 120), px + ' px wide',
+					px >= 70 ? 'good' : px >= 45 ? '' : 'warn'));
+				rows.append(bar('Noise', Math.min(1, dn / 12), dn.toFixed(1) + ' DN',
+					dn <= 3 ? 'good' : dn <= 7 ? '' : 'warn'));
+				rows.append(bar('Sharpness', head === null ? 0.04 : Math.min(1, head / 1.6),
+					head === null ? 'none in hand' : '+' + head.toFixed(1) + ' px in hand',
+					head === null ? 'warn' : head >= 0.9 ? 'good' : ''));
+
+				const verdict = el('div', 're-notice');
+				verdict.style.marginTop = '10px';
+				if (head === null) {
+					verdict.textContent = 'This plate is already at the edge. It reads at ' +
+						got[0].conf.toFixed(2) + ' and the smallest blur worth measuring takes it ' +
+						'below the threshold — so nothing done to the picture afterwards will ' +
+						'help much. Focus, or a shorter shutter if it is moving, is what moves this.';
+				} else {
+					verdict.textContent = 'Worth reading. It survives ' + head.toFixed(1) +
+						' px of added blur and still reads, so there is room in hand — stacking ' +
+						'and a better develop have something to work with.' +
+						(bumpy ? ' The reading is not a clean slope, though: it dips and recovers ' +
+							'across the sweep, so treat the figure as roughly where the edge is ' +
+							'rather than exactly.' : '');
+				}
+				panel.append(verdict);
+				note.textContent = 'Measured on the plate you picked, ' + px + ' px wide.';
+
+				const tbl = el('p', 're-note');
+				tbl.style.cssText = 'margin-top:8px;white-space:pre';
+				tbl.textContent = got.map((x) => '  +' + x.sigma.toFixed(1) + ' px blur → ' +
+					x.conf.toFixed(2) + (x.conf >= floor ? '' : '  (below the floor)')).join('\n');
+				panel.append(tbl);
+			} catch (e) {
+				note.textContent = 'Could not measure it: ' + e.message;
+			}
+			run.disabled = false;
+			run.textContent = 'Measure again';
+		});
+	}
 
 	function buildDiagnose() {
 		insp.replaceChildren();
@@ -820,6 +1186,7 @@ export function mountEditor(root, {
 		gate.append(gateSeg);
 		panel.append(gate);
 		insp.append(panel);
+		buildPlateFitness();
 
 		const out = el('div', 're-panel');
 		out.hidden = true;
@@ -1701,12 +2068,489 @@ export function mountEditor(root, {
 		holdTimer = setTimeout(() => finish(true), hold * 1000);
 	}
 
+
+	/* ---- plates ----------------------------------------------------------
+	 *
+	 * Detect, read, and -- if the camera will take it -- point auto-exposure at
+	 * the plate. Three things are worth knowing about how this is shaped.
+	 *
+	 * It ranks candidates by how well each one READS, not by how confidently it
+	 * was found. Measured on an hi3516ev300 over a car park: the detector gives
+	 * a real plate 0.56 and a stretch of kerb 0.51, which is no separation at
+	 * all, while the reader gives them 0.97 and 0.24.
+	 *
+	 * It shows the rejects. A list that silently drops what it did not believe
+	 * looks the same as a list that found nothing, and the operator is the one
+	 * who knows which car matters.
+	 *
+	 * And it never prints a registration it does not trust. Below the reader's
+	 * floor the characters are shown greyed with the confidence beside them,
+	 * because a confident wrong plate is worse than no plate.
+	 */
+	let plateCands = null, plateSel = -1, plateReader = null;
+	/* The full-resolution develop the reader works on, kept so that picking a
+	 * different candidate does not pay for it again. Dropped whenever a new
+	 * frame arrives, because it would then be a picture of the old one. */
+	let plateFull = null;
+
+	async function plateFrame() {
+		if (plateFull && plateFull.width === state.info.width) return plateFull;
+		const r = await call('develop', {
+			cfa: state.cfa, demosaic: state.demosaic, black: state.black,
+			white: state.white, neutral: state.neutral,
+			forward: state.info.forward, useForward: state.info.hasForward,
+			gain: state.gain, step: 1,
+		});
+		const c = el('canvas');
+		c.width = r.width; c.height = r.height;
+		c.getContext('2d', { willReadFrequently: true })
+			.putImageData(new ImageData(r.pixels, r.width, r.height), 0, 0);
+		plateFull = c;
+		return c;
+	}
+
+
+	/* ---- step 4: a burst, stacked ----------------------------------------
+	 *
+	 * Twenty exposures of the plate's own rectangle, averaged. Worth knowing
+	 * before reading any of this:
+	 *
+	 * IT IS NOT A BURST IN THE PHONE SENSE. Each frame is an independent
+	 * capture -- measured on an hi3516ev300, about 0.79 s each whatever the
+	 * rectangle's size -- so twenty of them span roughly SIXTEEN SECONDS. A car
+	 * can move and a cloud can pass in that time, which is why rejection is
+	 * offered beside the plain mean rather than as an afterthought.
+	 *
+	 * THERE IS NO ALIGNMENT, deliberately. The camera is bolted down and its
+	 * measured movement across a burst is 0.02 px RMS -- a fiftieth of a pixel.
+	 * Sub-pixel registration would cost a Fourier transform per frame to correct
+	 * a shift far below what any of this can see, and an integer-pixel
+	 * alignment would be a no-op. If this ever runs on something that moves,
+	 * that is the moment to add it, and the honest thing meanwhile is to say it
+	 * is not there.
+	 *
+	 * The frames are developed by THIS engine, one at a time, because a crop is
+	 * a DNG like any other and a second hand-rolled demosaic is exactly what
+	 * cost the read its confidence the first time round. `open` replaces the
+	 * file the editor is holding, so the original is put back afterwards.
+	 */
+	function stackMean(frames, n, reject) {
+		const out = new Float32Array(n * 4);
+		if (!reject) {
+			for (const f of frames) for (let i = 0; i < n * 4; i++) out[i] += f[i];
+			for (let i = 0; i < n * 4; i++) out[i] /= frames.length;
+			return out;
+		}
+		/* Sigma-clipped: the mean and spread of each pixel across the burst,
+		 * then the mean again of only those within two of them. What this is
+		 * for is a headlight sweeping through, or a car leaving -- one frame
+		 * out of twenty carrying something the other nineteen do not. */
+		const k = frames.length;
+		for (let i = 0; i < n * 4; i++) {
+			let m = 0;
+			for (let j = 0; j < k; j++) m += frames[j][i];
+			m /= k;
+			let v = 0;
+			for (let j = 0; j < k; j++) { const d = frames[j][i] - m; v += d * d; }
+			const sd = Math.sqrt(v / k);
+			let acc = 0, cnt = 0;
+			for (let j = 0; j < k; j++) {
+				if (sd === 0 || Math.abs(frames[j][i] - m) <= 2 * sd) { acc += frames[j][i]; cnt++; }
+			}
+			out[i] = cnt ? acc / cnt : m;
+		}
+		return out;
+	}
+
+	function canvasFrom(buf, w, h) {
+		const c = el('canvas');
+		c.width = w; c.height = h;
+		const im = new ImageData(w, h);
+		for (let i = 0; i < w * h * 4; i++) im.data[i] = buf[i] < 0 ? 0 : (buf[i] > 255 ? 255 : buf[i]);
+		c.getContext('2d', { willReadFrequently: true }).putImageData(im, 0, 0);
+		return c;
+	}
+
+	function plateThumb(box, w, h) {
+		const c = el('canvas');
+		c.width = w; c.height = h;
+		c.style.cssText = 'border-radius:4px;flex:none;image-rendering:pixelated';
+		const mx = box.width * 0.12, my = box.height * 0.45;
+		c.getContext('2d').drawImage(plateFull || canvas,
+			Math.max(0, box.left - mx), Math.max(0, box.top - my),
+			box.width + 2 * mx, box.height + 2 * my, 0, 0, w, h);
+		return c;
+	}
+
+	/* One bar per character, each the width of its own glyph, so a contested
+	 * position is under the character it is about. Fixed-width bars under
+	 * proportionally-advancing text drift by a whole glyph across a plate. */
+	function plateChars(text, per, floor) {
+		const wrap = el('div');
+		wrap.style.cssText = 'display:flex;gap:3px;align-items:flex-end';
+		[...text].forEach((ch, i) => {
+			const col = el('div');
+			col.style.cssText = 'display:flex;flex-direction:column;gap:5px;align-items:stretch';
+			const g = el('div', 're-mono', ch);
+			g.style.cssText = 'font-size:19px;font-weight:700;line-height:1;text-align:center';
+			const bar = el('div');
+			const c = per && per[i] !== undefined ? per[i] : 1;
+			bar.style.cssText = 'height:3px;border-radius:2px;background:' +
+				(c >= floor ? '#4ea97b' : '#c9a227');
+			col.append(g, bar);
+			wrap.append(col);
+		});
+		return wrap;
+	}
+
+	function buildPlates() {
+		insp.replaceChildren();
+
+		const panel = el('div', 're-panel');
+		panel.append(Object.assign(el('div', 're-shead'), {
+			innerHTML: '<h3 class="re-cap">Plates in this frame</h3><span class="re-rule"></span>',
+		}));
+		panel.append(Object.assign(el('p', 're-note'), {
+			textContent: 'The detector runs over the developed frame in overlapping tiles — ' +
+				'letterboxed whole, a fifty-pixel plate arrives at the detector eight pixels ' +
+				'wide and it finds nothing. Candidates are listed best read first.',
+		}));
+
+		const row = el('div');
+		row.style.cssText = 'display:flex;gap:8px;margin-top:9px;flex-wrap:wrap';
+		const find = el('button', 're-btn re-pri', '');
+		find.dataset.act = 'find-plates';
+		find.textContent = plateCands ? 'Look again' : 'Find the plates';
+		row.append(find);
+		panel.append(row);
+
+		const status = el('p', 're-note');
+		status.style.marginTop = '8px';
+		panel.append(status);
+
+		const list = el('div');
+		list.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:10px';
+		panel.append(list);
+		insp.append(panel);
+
+		const meter = el('div', 're-panel');
+		meter.hidden = true;
+		insp.append(meter);
+
+		const burst = el('div', 're-panel');
+		burst.hidden = true;
+		insp.append(burst);
+
+		function paintBurst() {
+			burst.replaceChildren();
+			burst.hidden = plateSel < 0 || !plates.burst;
+			if (burst.hidden) return;
+			const c = plateCands[plateSel];
+			burst.append(Object.assign(el('div', 're-shead'), {
+				innerHTML: '<h3 class="re-cap">Take a burst and stack it</h3><span class="re-rule"></span>',
+			}));
+			burst.append(Object.assign(el('p', 're-note'), {
+				textContent: 'Each frame is a separate capture of this rectangle, about 0.8 s ' +
+					'apart — twenty of them take the better part of a minute, and the camera ' +
+					'serves nothing else raw while they run.',
+			}));
+
+			const row = el('div');
+			row.style.cssText = 'display:flex;gap:8px;margin-top:9px;align-items:center;flex-wrap:wrap';
+			const count = el('input');
+			count.type = 'number'; count.min = '2'; count.max = '40'; count.value = '20';
+			count.style.cssText = 'width:62px;background:transparent;color:inherit;' +
+				'border:1px solid var(--re-line,#2c313d);border-radius:6px;padding:4px 6px';
+			const modeSel = segmented([
+				{ label: 'Mean', value: 'mean' },
+				{ label: 'Reject', value: 'reject' },
+			], 0, (v) => { combine = v; }, { wide: false });
+			let combine = 'mean';
+			const go = el('button', 're-btn re-pri', '');
+			go.dataset.act = 'stack-burst';
+			go.textContent = 'Stack a burst';
+			row.append(Object.assign(el('span', 're-note'), { textContent: 'frames' }), count, modeSel, go);
+            burst.append(row);
+
+			const prog = el('p', 're-note');
+			prog.style.marginTop = '8px';
+			burst.append(prog);
+			const cmp = el('div');
+			cmp.style.cssText = 'display:flex;gap:14px;margin-top:10px;flex-wrap:wrap';
+			burst.append(cmp);
+
+			go.addEventListener('click', async () => {
+				go.disabled = true;
+				cmp.replaceChildren();
+				const n = Math.max(2, Math.min(40, parseInt(count.value, 10) || 20));
+				// A margin round the plate: the recogniser wants context, and a
+				// rectangle cut exactly to the glyphs has none.
+				const want = {
+					left: Math.max(0, Math.round(c.box.left - c.box.width * 0.9)),
+					top: Math.max(0, Math.round(c.box.top - c.box.height * 2.2)),
+					width: Math.round(c.box.width * 2.8),
+					height: Math.round(c.box.height * 5.4),
+				};
+				const full = plateFull || canvas;
+				let got;
+				try {
+					prog.textContent = 'Asking the camera for frame 1…';
+					got = await plates.burst({
+						rect: want, frameW: full.width, frameH: full.height, frames: n,
+						onProgress: (i, k) => {
+							prog.textContent = 'Frame ' + i + ' of ' + k + ' — about ' +
+								Math.max(0, Math.round((k - i) * 0.8)) + ' s left';
+						},
+					});
+				} catch (e) { prog.textContent = e.message; go.disabled = false; return; }
+
+				prog.textContent = 'Developing ' + got.frames.length + ' frames…';
+				const devd = [];
+				let W = 0, H = 0;
+				try {
+					for (let i = 0; i < got.frames.length; i++) {
+						const bytes = got.frames[i];
+						const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+						const o = await call('open', { bytes: buf }, [buf]);
+						const d = await call('develop', {
+							cfa: o.info.cfa, demosaic: state.demosaic, black: o.info.black,
+							white: o.info.white, neutral: o.info.neutral,
+							forward: o.info.forward, useForward: o.info.hasForward,
+							gain: 1, step: 1,
+						});
+						W = d.width; H = d.height;
+						devd.push(d.pixels);
+						prog.textContent = 'Developing ' + (i + 1) + ' of ' + got.frames.length + '…';
+					}
+				} catch (e) {
+					prog.textContent = 'The engine would not develop a burst frame: ' + e.message;
+				}
+				// Whatever happened, the editor must get its own frame back --
+				// `open` replaced it, and everything on screen refers to it.
+				try {
+					const b0 = state.bytes.slice();
+					await call('open', { bytes: b0.buffer }, [b0.buffer]);
+					plateFull = null;      // the engine held someone else's frame
+					commit();
+				} catch (e) { /* commit() reports through the usual path */ }
+
+				if (devd.length < 2) { go.disabled = false; return; }
+				const one = canvasFrom(devd[0], W, H);
+				const st = canvasFrom(stackMean(devd, W * H, combine === 'reject'), W, H);
+				const inCrop = {
+					left: c.box.left - got.rect.left, top: c.box.top - got.rect.top,
+					width: c.box.width, height: c.box.height,
+				};
+				prog.textContent = got.frames.length + ' frames of ' + W + '×' + H +
+					', cut at ' + got.rect.left + ',' + got.rect.top + '. Reading both…';
+				let r1 = null, rN = null;
+				try {
+					r1 = await plateReader.read(one, inCrop);
+					rN = await plateReader.read(st, inCrop);
+				} catch (e) { prog.textContent = 'Read failed: ' + e.message; }
+
+				const floor = plateReader.floor;
+				const show = (title, cv, r) => {
+					const box = el('div');
+					box.style.cssText = 'display:flex;flex-direction:column;gap:6px;min-width:190px';
+					box.append(Object.assign(el('div', 're-note'), { textContent: title }));
+					const view = el('canvas');
+					view.width = 190; view.height = Math.round(190 * H / W);
+					view.style.cssText = 'border-radius:6px;image-rendering:pixelated';
+					view.getContext('2d').drawImage(cv, 0, 0, view.width, view.height);
+					box.append(view);
+					if (r) {
+						box.append(r.minConf >= floor
+							? plateChars(r.text, r.perChar, floor)
+							: Object.assign(el('div', 're-mono'), {
+								textContent: r.text || '—',
+								style: 'font-size:15px;opacity:0.55;font-style:italic',
+							}));
+						box.append(Object.assign(el('div', 're-note'), {
+							textContent: 'read ' + r.minConf.toFixed(2),
+						}));
+					}
+					cmp.append(box);
+				};
+				show('one frame', one, r1);
+				show(combine === 'reject' ? got.frames.length + ' frames, outliers rejected'
+					: got.frames.length + ' frames, mean', st, rN);
+				if (r1 && rN) {
+					const d = rN.minConf - r1.minConf;
+					prog.textContent = 'Stacking moved the read ' + (d >= 0 ? '+' : '') +
+						d.toFixed(2) + ' — ' + r1.minConf.toFixed(2) + ' to ' + rN.minConf.toFixed(2) +
+						(rN.text === r1.text ? ', same characters.' : ', and changed a character.');
+				}
+				go.disabled = false;
+			});
+		}
+
+		function paintList() {
+			list.replaceChildren();
+			if (!plateCands) return;
+			if (!plateCands.length) {
+				status.textContent = 'Nothing that looks like a plate. On a frame this wide ' +
+					'that usually means the plates are smaller than the detector can see.';
+				return;
+			}
+			const floor = plateReader ? plateReader.floor : 0.5;
+			const good = plateCands.filter((c) => c.minConf >= floor).length;
+			status.textContent = plateCands.length + ' found, ' + good + ' read with confidence.';
+			plateCands.forEach((c, i) => {
+				const r = el('div');
+				const sel = i === plateSel;
+				r.style.cssText = 'display:flex;gap:10px;align-items:center;padding:7px 8px;' +
+					'border-radius:8px;cursor:pointer;border:1px solid ' +
+					(sel ? 'var(--re-acc,#4a63d8)' : 'var(--re-line,#2c313d)') +
+					(sel ? ';background:rgba(74,99,216,0.10)' : '');
+				r.append(plateThumb(c.box, 104, 32));
+				const t = el('div');
+				t.style.cssText = 'display:flex;flex-direction:column;gap:3px;min-width:0';
+				if (c.minConf >= floor) {
+					t.append(plateChars(c.text, c.perChar, floor));
+				} else {
+					const q = el('div', 're-mono', c.text || '—');
+					q.style.cssText = 'font-size:15px;opacity:0.55;font-style:italic';
+					t.append(q);
+				}
+				t.append(Object.assign(el('div', 're-note'), {
+					textContent: Math.round(c.box.width) + ' × ' + Math.round(c.box.height) +
+						' px · detector ' + c.score.toFixed(2) + ' · read ' + c.minConf.toFixed(2),
+				}));
+				r.append(t);
+				r.addEventListener('click', () => { plateSel = i; paintList(); paintMeter(); paintBurst(); drawPlateMarks(); });
+				list.append(r);
+			});
+		}
+
+		/* ---- pointing auto-exposure at the chosen plate --------------------
+		 * Same bargain as Calibrate: say what it will really do, do it, and
+		 * hold a countdown so a camera nobody confirms comes back on its own. */
+		function paintMeter() {
+			meter.replaceChildren();
+			meter.hidden = plateSel < 0 || !plates.exposure;
+			if (meter.hidden) return;
+			const c = plateCands[plateSel];
+			meter.append(Object.assign(el('div', 're-shead'), {
+				innerHTML: '<h3 class="re-cap">Meter the camera here</h3><span class="re-rule"></span>',
+			}));
+			const box = {
+				left: Math.round(c.box.left), top: Math.round(c.box.top),
+				width: Math.round(c.box.width), height: Math.round(c.box.height),
+			};
+			const plan = plates.exposure.plan(box,
+				(plateFull || canvas).width, (plateFull || canvas).height);
+			if (!plan) { meter.hidden = true; return; }
+			meter.append(Object.assign(el('p', 're-note'), {
+				innerHTML: plan.grown
+					? 'The ISP will not meter below ' + plan.minW + '×' + plan.minH +
+					  ', so this ' + box.width + '×' + box.height + ' plate is grown around its ' +
+					  'own centre to <b>' + plan.rect.width + '×' + plan.rect.height + '</b> — ' +
+					  plan.factor.toFixed(0) + '× the area. Still far more selective than the ' +
+					  'whole frame, but it is not what you picked.'
+					: 'Auto-exposure will meter exactly ' + plan.rect.width + '×' + plan.rect.height + '.',
+			}));
+			const acts = el('div');
+			acts.style.cssText = 'display:flex;gap:8px;margin-top:9px;flex-wrap:wrap';
+			const arm = el('button', 're-btn re-pri', '');
+			arm.dataset.act = 'meter-plate';
+			arm.textContent = 'Point the exposure here';
+			acts.append(arm);
+			meter.append(acts);
+			const note = el('p', 're-note');
+			note.style.marginTop = '8px';
+			meter.append(note);
+
+			arm.addEventListener('click', async () => {
+				arm.disabled = true;
+				const hold = Math.max(5, plates.exposure.holdSeconds || 30);
+				let left = hold, tick = null;
+				const stop = () => { if (tick) { clearInterval(tick); tick = null; } };
+				try {
+					await plates.exposure.apply({
+						rect: box, exposureMs: 1, aGain: 1024, dGain: 1024,
+						aeStrategy: 'highlight',
+						onExpire: (e) => {
+							stop(); arm.disabled = false; acts.replaceChildren(arm);
+							note.textContent = e
+								? 'The camera would not take the old settings back: ' + e.message
+								: 'Nobody confirmed it, so the camera put itself back.';
+						},
+					});
+				} catch (e) {
+					arm.disabled = false;
+					note.textContent = e.message;
+					return;
+				}
+				const keep = el('button', 're-btn re-pri', '');
+				keep.textContent = 'Keep it';
+				const back = el('button', 're-btn', '');
+				back.textContent = 'Put it back';
+				acts.replaceChildren(keep, back);
+				const paint = () => {
+					note.textContent = 'Metering the plate. Putting itself back in ' + left +
+						' s unless you keep it.';
+				};
+				paint();
+				tick = setInterval(() => { left--; if (left > 0) paint(); }, 1000);
+				keep.addEventListener('click', async () => {
+					stop(); await plates.exposure.keep();
+					acts.replaceChildren(arm); arm.disabled = false;
+					note.textContent = 'Kept. This camera stays metered here until it is changed back.';
+				});
+				back.addEventListener('click', async () => {
+					stop();
+					try { await plates.exposure.revert(); note.textContent = 'Put back.'; }
+					catch (e) { note.textContent = 'Could not put it back: ' + e.message; }
+					acts.replaceChildren(arm); arm.disabled = false;
+				});
+			});
+		}
+
+		find.addEventListener('click', async () => {
+			if (!state.info) { status.textContent = 'Open or capture a frame first.'; return; }
+			find.disabled = true;
+			plateSel = -1; meter.hidden = true; burst.hidden = true;
+			try {
+				if (!plateReader) {
+					status.textContent = 'Fetching the reader…';
+					plateReader = await plates.reader();
+				}
+				status.textContent = 'Developing the frame at full size…';
+				const full = await plateFrame();
+				plateCands = await plateReader.readAll(full, {
+					onProgress: (i, n) => { status.textContent = 'Looking… tile ' + i + ' of ' + n; },
+				});
+				paintList();
+				drawPlateMarks();
+			} catch (e) {
+				plateCands = null;
+				status.textContent = plates.readerSupported
+					? 'The plate reader could not be loaded. It is fetched from the internet ' +
+					  'the first time it is used, so a camera with no route out never gets it.'
+					: 'This browser cannot run the plate reader — it needs WebAssembly in a worker.';
+			}
+			find.disabled = false;
+			find.textContent = 'Look again';
+		});
+
+		// What a click on the picture calls. Assigned here rather than passed,
+		// because the overlay outlives any one build of this panel.
+		plateRepaint = () => { paintList(); paintMeter(); paintBurst(); };
+		paintList();
+		if (plateSel >= 0) { paintMeter(); paintBurst(); }
+		drawPlateMarks();
+	}
+
 	function setMode(m) {
 		mode = m;
 		chart.hidden = m !== 'calibrate';
 		marks.hidden = m !== 'diagnose';
+		plateMarks.hidden = m !== 'plates';
 		if (m !== 'calibrate') stopHold();
-		if (m === 'calibrate') {
+		if (m === 'plates') {
+			buildPlates();
+		} else if (m === 'calibrate') {
 			if (!corners) { corners = defaultCorners(); solved = null; }
 			buildCalibrate();
 		} else if (m === 'diagnose') {
@@ -1716,6 +2560,7 @@ export function mountEditor(root, {
 		}
 		drawChart();
 		drawMarks();
+		drawPlateMarks();
 	}
 
 	/* ---- inspector ---- */
