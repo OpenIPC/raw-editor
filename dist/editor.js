@@ -2326,6 +2326,10 @@ export function mountEditor(root, {
 						rect: want, frameW: full.width, frameH: full.height, frames: n,
 						separate: wantSeparate,
 						onProgress: (i, k) => {
+							/* The camera's own averaging is one request and
+							 * reports no progress at all; this fires on the slow
+							 * path, and on a firmware whose module still counts
+							 * the single averaged request as one of one. */
 							if (k <= 1) return;
 							prog.textContent = 'Frame ' + i + ' of ' + k + ' — about ' +
 								Math.max(0, Math.round((k - i) * 0.8)) + ' s left';
