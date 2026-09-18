@@ -629,7 +629,22 @@ EXPORT(develop) i32 develop(u8 *out, i32 cfa, i32 demosaic, i32 black, i32 white
                                    : 0.f;
             }
 
-            c3[0] /= neu[0]; c3[1] /= neu[1]; c3[2] /= neu[2];
+            /* White balance, and back into range on the far side of it. The
+             * clamp is the point. Linearising above pegs every clipped plane
+             * at exactly 1, which throws away the ratios between them, and
+             * dividing that flat result by the neutral cannot put a neutral
+             * back -- it only scales channels that have stopped counting.
+             * Clipped white therefore arrives at the matrix as the reciprocal
+             * of AsShotNeutral, which is not white but magenta, and a forward
+             * matrix renders that magenta faithfully. Measured on a
+             * hi3516ev300 + imx335 car park: white cars developed to sRGB
+             * 255,194,255 without this clamp and 255,255,255 with it, against
+             * 253,253,254 from dcraw on the same file.
+             *
+             * Clipping a blown highlight to white is the floor, not the
+             * ceiling: reconstructing one from the planes that did not clip
+             * is a larger piece of work and belongs on its own. */
+            for (int p = 0; p < 3; p++) c3[p] = clampf(c3[p] / neu[p], 0.f, 1.f);
 
             u8 *px = out + ((u32)oy * ow + ox) * 4;
             for (int i = 0; i < 3; i++) {

@@ -169,6 +169,68 @@ console.log('\npicking a neutral');
 		/outside the frame/.test(refused), refused || '(no error)');
 }
 
+console.log('\na blown highlight develops to white, not to the white balance gains');
+/*
+ * A neutral that has clipped is still a neutral. The sensor stops counting at
+ * the white level, so every plane reads the same ceiling and the ratios the
+ * white balance exists to correct are gone with it -- which means the balance
+ * must not be let loose to invent new ones. Divide a clipped (1, 1, 1) by an
+ * AsShotNeutral of (0.5, 1, 0.55) without bounding the result and the matrix
+ * is handed (2.00, 1.00, 1.82), which is not white but magenta, and a forward
+ * matrix renders that magenta faithfully.
+ *
+ * It reached a user as pink cars: on a hi3516ev300 + imx335 car park every
+ * white car developed to 255,194,255 while dcraw, given the same file and the
+ * same multipliers, rendered them 253,253,254.
+ *
+ * Two uniform frames rather than one scene with two patches, so no demosaic
+ * ever reaches across the boundary between them and the expected answer is the
+ * same at every interior pixel.
+ */
+{
+	const { makeDng } = await import('./make-dng.mjs');
+	const W = 32, H = 32, BLACK = 200, WHITE = 4095;
+	// The ForwardMatrix1 off the camera that produced the pink cars. Its rows
+	// sum to D50, so a neutral going in has to be a neutral coming out -- that
+	// property is the whole of what is being tested here.
+	const FWD = [0.564968, 0.172974, 0.225710,
+		0.113403, 0.879468, 0.006847,
+		-0.013249, -0.821984, 1.657816];
+	const NEU = [0.5, 1.0, 0.55];
+
+	// RGGB, every quad the same, so each plane carries one level everywhere.
+	const flat = (rgb) => {
+		const px = new Uint16Array(W * H);
+		for (let y = 0; y < H; y++)
+			for (let x = 0; x < W; x++)
+				px[y * W + x] = rgb[(y % 2 === 0) ? (x % 2 === 0 ? 0 : 1) : (x % 2 === 0 ? 1 : 2)];
+		return makeDng({ width: W, height: H, pixels: px, black: BLACK, white: WHITE });
+	};
+	const centre = async (bytes) => {
+		const e = await instantiate(readFileSync(new URL('../dist/engine.wasm', import.meta.url)));
+		e.open(bytes);
+		const r = e.develop({ demosaic: DEMOSAIC.bilinear, neutral: NEU, forward: FWD,
+			useForward: true, gain: 1, step: 1 });
+		const o = ((H / 2) * W + W / 2) * 4;   // interior: the border mirrors
+		return [r.pixels[o], r.pixels[o + 1], r.pixels[o + 2]];
+	};
+	const spread = (v) => Math.max(...v) - Math.min(...v);
+
+	// Half scale in each plane, in the as-shot ratio, so this one is a neutral
+	// the balance can still do its job on. It is the control: it says the
+	// matrix and the neutral above really do render a grey as grey, which is
+	// what makes the clipped case below evidence of anything.
+	const grey = await centre(flat([1174, 2148, 1271]));
+	console.log(`        an unclipped neutral develops to R ${grey[0]} G ${grey[1]} B ${grey[2]}`);
+	assert('an unclipped neutral develops to a grey', spread(grey) <= 2 && grey[1] > 20 && grey[1] < 235,
+		`${grey} spread ${spread(grey)}`);
+
+	const blown = await centre(flat([WHITE, WHITE, WHITE]));
+	console.log(`        a clipped neutral develops to  R ${blown[0]} G ${blown[1]} B ${blown[2]}`);
+	assert('a clipped neutral develops to a grey too', spread(blown) <= 3, `${blown} spread ${spread(blown)}`);
+	assert('and that grey is white, not some darker neutral', blown[1] >= 250, `G ${blown[1]}`);
+}
+
 console.log('\nan odd pixel count still unpacks all the way to the end');
 // The packed unpackers step in whole groups, so a count that is not a multiple
 // of the group has a tail they do not reach. A Bayer frame always has even
