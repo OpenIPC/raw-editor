@@ -206,11 +206,11 @@ console.log('\na blown highlight develops to white, not to the white balance gai
 				px[y * W + x] = rgb[(y % 2 === 0) ? (x % 2 === 0 ? 0 : 1) : (x % 2 === 0 ? 1 : 2)];
 		return makeDng({ width: W, height: H, pixels: px, black: BLACK, white: WHITE });
 	};
-	const centre = async (bytes) => {
+	const centre = async (bytes, gain = 1) => {
 		const e = await instantiate(readFileSync(new URL('../dist/engine.wasm', import.meta.url)));
 		e.open(bytes);
 		const r = e.develop({ demosaic: DEMOSAIC.bilinear, neutral: NEU, forward: FWD,
-			useForward: true, gain: 1, step: 1 });
+			useForward: true, gain, step: 1 });
 		const o = ((H / 2) * W + W / 2) * 4;   // interior: the border mirrors
 		return [r.pixels[o], r.pixels[o + 1], r.pixels[o + 2]];
 	};
@@ -229,6 +229,62 @@ console.log('\na blown highlight develops to white, not to the white balance gai
 	console.log(`        a clipped neutral develops to  R ${blown[0]} G ${blown[1]} B ${blown[2]}`);
 	assert('a clipped neutral develops to a grey too', spread(blown) <= 3, `${blown} spread ${spread(blown)}`);
 	assert('and that grey is white, not some darker neutral', blown[1] >= 250, `G ${blown[1]}`);
+
+	/*
+	 * The case that actually reached the user. Green carries a gain of 1.0 and
+	 * saturates a stop and a half before red and blue do, so the usual state of
+	 * a bright neutral is not "all three clipped" but "green clipped, the other
+	 * two still counting" -- on the car that started this, 97% of green samples
+	 * sat at the white level against 38% of red. A fix that only neutralises
+	 * pixels where every plane has gone is no fix for the frame that reported
+	 * the bug.
+	 */
+	const part = await centre(flat([3121, WHITE, 3413]));   // a neutral at 1.5x full scale
+	console.log(`        green alone clipped develops to R ${part[0]} G ${part[1]} B ${part[2]}`);
+	assert('a neutral with only green clipped develops to a grey', spread(part) <= 3,
+		`${part} spread ${spread(part)}`);
+
+	/*
+	 * And the headroom has to survive, because the Exposure slider is what
+	 * pulls it back: the control runs -3..+3 stops as gain = 2^v, so a render
+	 * at gain < 1 is the normal way to look into a highlight.
+	 *
+	 * A plane that never reached the sensor ceiling can still exceed 1 once
+	 * divided by its neutral -- that is real measurement, not saturation, and
+	 * capping it would quietly cost a stop. Both candidate answers are worked
+	 * out here from the raw levels and the matrix rather than read back from
+	 * the engine, so this says which of the two the engine computed.
+	 */
+	const XYZ50_TO_SRGB = [3.1338561, -1.6168667, -0.4906146,
+		-0.9787684, 1.9161415, 0.0334540,
+		0.0719453, -0.2289914, 1.4052427];
+	const GAIN = 0.25;                                      // -2 stops
+	const RAW = [3316, 1174, 1174];                         // red at 0.80 of full scale: bright, not clipped
+	const lin = RAW.map((v) => (v - BLACK) / (WHITE - BLACK));
+	assert('the red plane under test is genuinely below the ceiling', lin[0] < 1,
+		`lin R ${lin[0].toFixed(4)}`);
+	// The engine quantises through a 1024-entry sRGB table, so predict the same way.
+	const encode = (v) => {
+		const s = Math.round(Math.max(0, Math.min(1, v)) * 1023) / 1023;
+		return Math.round(255 * (s <= 0.0031308 ? s * 12.92 : 1.055 * Math.pow(s, 1 / 2.4) - 0.055));
+	};
+	const redOut = (w) => {
+		let s = 0;
+		for (let k = 0; k < 3; k++) {
+			let m = 0;
+			for (let j = 0; j < 3; j++) m += XYZ50_TO_SRGB[j] * FWD[j * 3 + k];
+			s += m * w[k];
+		}
+		return encode(s * GAIN);
+	};
+	const kept = redOut(lin.map((v, i) => v / NEU[i]));
+	const capped = redOut(lin.map((v, i) => Math.min(v / NEU[i], 1)));
+	const got = await centre(flat(RAW), GAIN);
+	console.log(`        at ${GAIN}x gain red reads ${got[0]}; keeping the headroom predicts ${kept}, capping it ${capped}`);
+	assert('the two answers are far enough apart to tell apart', Math.abs(kept - capped) > 20,
+		`kept ${kept} vs capped ${capped}`);
+	assert('an unclipped plane above the neutral keeps its headroom for the exposure slider',
+		Math.abs(got[0] - kept) <= 2, `read ${got[0]}, headroom predicts ${kept}, capped predicts ${capped}`);
 }
 
 console.log('\nan odd pixel count still unpacks all the way to the end');
