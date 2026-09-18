@@ -169,6 +169,124 @@ console.log('\npicking a neutral');
 		/outside the frame/.test(refused), refused || '(no error)');
 }
 
+console.log('\na blown highlight develops to white, not to the white balance gains');
+/*
+ * A neutral that has clipped is still a neutral. The sensor stops counting at
+ * the white level, so every plane reads the same ceiling and the ratios the
+ * white balance exists to correct are gone with it -- which means the balance
+ * must not be let loose to invent new ones. Divide a clipped (1, 1, 1) by an
+ * AsShotNeutral of (0.5, 1, 0.55) without bounding the result and the matrix
+ * is handed (2.00, 1.00, 1.82), which is not white but magenta, and a forward
+ * matrix renders that magenta faithfully.
+ *
+ * It reached a user as pink cars: on a hi3516ev300 + imx335 car park every
+ * white car developed to 255,194,255 while dcraw, given the same file and the
+ * same multipliers, rendered them 253,253,254.
+ *
+ * Two uniform frames rather than one scene with two patches, so no demosaic
+ * ever reaches across the boundary between them and the expected answer is the
+ * same at every interior pixel.
+ */
+{
+	const { makeDng } = await import('./make-dng.mjs');
+	const W = 32, H = 32, BLACK = 200, WHITE = 4095;
+	// The ForwardMatrix1 off the camera that produced the pink cars. Its rows
+	// sum to D50, so a neutral going in has to be a neutral coming out -- that
+	// property is the whole of what is being tested here.
+	const FWD = [0.564968, 0.172974, 0.225710,
+		0.113403, 0.879468, 0.006847,
+		-0.013249, -0.821984, 1.657816];
+	const NEU = [0.5, 1.0, 0.55];
+
+	// RGGB, every quad the same, so each plane carries one level everywhere.
+	const flat = (rgb) => {
+		const px = new Uint16Array(W * H);
+		for (let y = 0; y < H; y++)
+			for (let x = 0; x < W; x++)
+				px[y * W + x] = rgb[(y % 2 === 0) ? (x % 2 === 0 ? 0 : 1) : (x % 2 === 0 ? 1 : 2)];
+		return makeDng({ width: W, height: H, pixels: px, black: BLACK, white: WHITE });
+	};
+	const centre = async (bytes, gain = 1) => {
+		const e = await instantiate(readFileSync(new URL('../dist/engine.wasm', import.meta.url)));
+		e.open(bytes);
+		const r = e.develop({ demosaic: DEMOSAIC.bilinear, neutral: NEU, forward: FWD,
+			useForward: true, gain, step: 1 });
+		const o = ((H / 2) * W + W / 2) * 4;   // interior: the border mirrors
+		return [r.pixels[o], r.pixels[o + 1], r.pixels[o + 2]];
+	};
+	const spread = (v) => Math.max(...v) - Math.min(...v);
+
+	// Half scale in each plane, in the as-shot ratio, so this one is a neutral
+	// the balance can still do its job on. It is the control: it says the
+	// matrix and the neutral above really do render a grey as grey, which is
+	// what makes the clipped case below evidence of anything.
+	const grey = await centre(flat([1174, 2148, 1271]));
+	console.log(`        an unclipped neutral develops to R ${grey[0]} G ${grey[1]} B ${grey[2]}`);
+	assert('an unclipped neutral develops to a grey', spread(grey) <= 2 && grey[1] > 20 && grey[1] < 235,
+		`${grey} spread ${spread(grey)}`);
+
+	const blown = await centre(flat([WHITE, WHITE, WHITE]));
+	console.log(`        a clipped neutral develops to  R ${blown[0]} G ${blown[1]} B ${blown[2]}`);
+	assert('a clipped neutral develops to a grey too', spread(blown) <= 3, `${blown} spread ${spread(blown)}`);
+	assert('and that grey is white, not some darker neutral', blown[1] >= 250, `G ${blown[1]}`);
+
+	/*
+	 * The case that actually reached the user. Green carries a gain of 1.0 and
+	 * saturates a stop and a half before red and blue do, so the usual state of
+	 * a bright neutral is not "all three clipped" but "green clipped, the other
+	 * two still counting" -- on the car that started this, 97% of green samples
+	 * sat at the white level against 38% of red. A fix that only neutralises
+	 * pixels where every plane has gone is no fix for the frame that reported
+	 * the bug.
+	 */
+	const part = await centre(flat([3121, WHITE, 3413]));   // a neutral at 1.5x full scale
+	console.log(`        green alone clipped develops to R ${part[0]} G ${part[1]} B ${part[2]}`);
+	assert('a neutral with only green clipped develops to a grey', spread(part) <= 3,
+		`${part} spread ${spread(part)}`);
+
+	/*
+	 * And the headroom has to survive, because the Exposure slider is what
+	 * pulls it back: the control runs -3..+3 stops as gain = 2^v, so a render
+	 * at gain < 1 is the normal way to look into a highlight.
+	 *
+	 * A plane that never reached the sensor ceiling can still exceed 1 once
+	 * divided by its neutral -- that is real measurement, not saturation, and
+	 * capping it would quietly cost a stop. Both candidate answers are worked
+	 * out here from the raw levels and the matrix rather than read back from
+	 * the engine, so this says which of the two the engine computed.
+	 */
+	const XYZ50_TO_SRGB = [3.1338561, -1.6168667, -0.4906146,
+		-0.9787684, 1.9161415, 0.0334540,
+		0.0719453, -0.2289914, 1.4052427];
+	const GAIN = 0.25;                                      // -2 stops
+	const RAW = [3316, 1174, 1174];                         // red at 0.80 of full scale: bright, not clipped
+	const lin = RAW.map((v) => (v - BLACK) / (WHITE - BLACK));
+	assert('the red plane under test is genuinely below the ceiling', lin[0] < 1,
+		`lin R ${lin[0].toFixed(4)}`);
+	// The engine quantises through a 1024-entry sRGB table, so predict the same way.
+	const encode = (v) => {
+		const s = Math.round(Math.max(0, Math.min(1, v)) * 1023) / 1023;
+		return Math.round(255 * (s <= 0.0031308 ? s * 12.92 : 1.055 * Math.pow(s, 1 / 2.4) - 0.055));
+	};
+	const redOut = (w) => {
+		let s = 0;
+		for (let k = 0; k < 3; k++) {
+			let m = 0;
+			for (let j = 0; j < 3; j++) m += XYZ50_TO_SRGB[j] * FWD[j * 3 + k];
+			s += m * w[k];
+		}
+		return encode(s * GAIN);
+	};
+	const kept = redOut(lin.map((v, i) => v / NEU[i]));
+	const capped = redOut(lin.map((v, i) => Math.min(v / NEU[i], 1)));
+	const got = await centre(flat(RAW), GAIN);
+	console.log(`        at ${GAIN}x gain red reads ${got[0]}; keeping the headroom predicts ${kept}, capping it ${capped}`);
+	assert('the two answers are far enough apart to tell apart', Math.abs(kept - capped) > 20,
+		`kept ${kept} vs capped ${capped}`);
+	assert('an unclipped plane above the neutral keeps its headroom for the exposure slider',
+		Math.abs(got[0] - kept) <= 2, `read ${got[0]}, headroom predicts ${kept}, capped predicts ${capped}`);
+}
+
 console.log('\nan odd pixel count still unpacks all the way to the end');
 // The packed unpackers step in whole groups, so a count that is not a multiple
 // of the group has a tail they do not reach. A Bayer frame always has even

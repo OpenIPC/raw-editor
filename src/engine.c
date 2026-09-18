@@ -629,7 +629,60 @@ EXPORT(develop) i32 develop(u8 *out, i32 cfa, i32 demosaic, i32 black, i32 white
                                    : 0.f;
             }
 
-            c3[0] /= neu[0]; c3[1] /= neu[1]; c3[2] /= neu[2];
+            /*
+             * White balance, with any plane that reached the sensor ceiling
+             * rebuilt from the planes that did not.
+             *
+             * Clipping is per plane and so is the white balance, which is why
+             * the two go wrong together. Green carries a gain of 1.0 and
+             * saturates first; red and blue are then scaled past it, and a
+             * white car in daylight arrives at the matrix as the reciprocal
+             * of AsShotNeutral -- (1.98, 1.00, 1.84), which is not white but
+             * magenta, rendered faithfully as such. Measured on a
+             * hi3516ev300 + imx335 car park: sRGB 255,194,255, against
+             * 253,253,254 from dcraw on the same file.
+             *
+             * Clamping to 1 would neutralise that, but it would also discard
+             * the headroom every unclipped plane has above the neutral -- and
+             * pulling that back is exactly what the Exposure slider is for.
+             * The same highlight at -2 stops reads 136,135,137 clamped and
+             * 177,177,181 with the headroom kept, so clamping costs a real
+             * stop of the thing the control exists to recover.
+             *
+             * So a plane that saturated is raised to the brightest plane that
+             * did not: the best lower bound the pixel offers for a value the
+             * sensor stopped measuring. A plane that never saturated is left
+             * alone, headroom and all. When every plane saturated there is
+             * nothing left to measure against, and the largest of them is the
+             * bound -- which is what puts a fully blown neutral back at white.
+             *
+             * This is the floor of highlight reconstruction and not the
+             * ceiling; anything better has to model the subject.
+             */
+            {
+                int blown = 0;
+                for (int p = 0; p < 3; p++) {
+                    /* c3 was clamped into [0,1] above, so a plane that
+                     * reached the white level is exactly 1 by now. */
+                    if (c3[p] >= 1.f) blown |= 1 << p;
+                    c3[p] /= neu[p];
+                }
+                /* Nothing saturated is the overwhelmingly common case -- 99.5%
+                 * of the frame this was measured on -- so the reconstruction
+                 * sits behind a branch rather than in the per-pixel path. */
+                if (blown) {
+                    float ref = 0.f;
+                    if (blown == 7) {
+                        ref = c3[0] > c3[1] ? c3[0] : c3[1];
+                        if (c3[2] > ref) ref = c3[2];
+                    } else {
+                        for (int p = 0; p < 3; p++)
+                            if (!(blown >> p & 1) && c3[p] > ref) ref = c3[p];
+                    }
+                    for (int p = 0; p < 3; p++)
+                        if ((blown >> p & 1) && c3[p] < ref) c3[p] = ref;
+                }
+            }
 
             u8 *px = out + ((u32)oy * ow + ox) * 4;
             for (int i = 0; i < 3; i++) {
