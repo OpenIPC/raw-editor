@@ -36,6 +36,61 @@ try {
 	t('the editor opened the frame', false, e.message);
 }
 
+/* Plates: the tab exists only when the host gives it somewhere to read from,
+ * which is the same rule the Capture button follows. Both halves matter — the
+ * tab must not appear with nothing behind it, and it must appear and build its
+ * panel when there is. No reader is stubbed here on purpose: the point is the
+ * contract between host and editor, and a panel that offers to look is the
+ * whole of what this option promises before anything is fetched. */
+try {
+	const bare = document.createElement('div');
+	document.body.append(bare);
+	mountEditor(bare, { base: '../dist/', styles: false, autoCapture: false });
+	const tabNames = (el) => [...el.querySelectorAll('.re-seg button')].map((b) => b.textContent.trim());
+	t('no Plates tab without a plates provider', !tabNames(bare).includes('Plates'),
+		tabNames(bare).join('|'));
+	t('and Diagnose does not offer to read one either', (() => {
+		const d = [...bare.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Diagnose');
+		if (!d) return false;
+		d.click();
+		return !/Reading a plate here/i.test(bare.querySelector('.re-insp').textContent);
+	})());
+
+	const host = document.createElement('div');
+	document.body.append(host);
+	mountEditor(host, {
+		base: '../dist/', styles: false, autoCapture: false,
+		plates: {
+			readerSupported: false,
+			reader: () => Promise.reject(new Error('no module in a test')),
+			burst: () => Promise.reject(new Error('no camera in a test')),
+			exposure: {
+				holdSeconds: 30,
+				plan: () => null, supports: () => Promise.resolve({}),
+				apply: () => Promise.resolve(), revert: () => Promise.resolve(),
+				keep: () => Promise.resolve(), armed: () => false,
+			},
+		},
+	});
+	t('a plates provider grows a Plates tab', tabNames(host).includes('Plates'),
+		tabNames(host).join('|'));
+	const plates = [...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Plates');
+	plates.click();
+	const insp = host.querySelector('.re-insp');
+	t('and the tab builds a panel that offers to look',
+		!!insp.querySelector('[data-act="find-plates"]'));
+	t('which says nothing has been found yet rather than nothing at all',
+		/Candidates are listed best read first/i.test(insp.textContent));
+	const diag = [...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Diagnose');
+	diag.click();
+	t('Diagnose gains the plate card when a provider is there',
+		/Reading a plate here/i.test(host.querySelector('.re-insp').textContent));
+	t('and asks for a plate to be picked before it measures one',
+		/Pick a plate on the Plates tab/i.test(host.querySelector('.re-insp').textContent));
+} catch (e) {
+	t('the Plates tab follows the host', false, e.message);
+}
+
 /* Capture and Download live in the editor's own chrome now, so the host page
  * does not need a page of its own around it. Both halves matter: the button
  * must not appear when there is nothing behind it, and it must actually work
