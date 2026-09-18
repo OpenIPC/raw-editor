@@ -1170,6 +1170,18 @@ try {
 	t('and it says the camera did the averaging',
 		/averaged by the camera/.test(caption()), caption().slice(0, 160));
 
+	/* The control frame is captured AFTER the average, because the camera's
+	 * burst arrives already taken and has no constituent frame to hand back.
+	 * So the two pictures are two moments, and a car that moved between them
+	 * lands in the difference. Calling that "stacking moved the read" would
+	 * credit the arithmetic with the traffic. */
+	const status = () => (host.querySelector('[data-act="burst-status"]')
+		.textContent || '').replace(/\s+/g, ' ');
+	t('the camera path does not claim stacking caused the difference',
+		!/Stacking moved/.test(status()), status().slice(0, 170));
+	t('it says the two pictures are separate captures',
+		/two separate captures/.test(status()), status().slice(0, 170));
+
 	// Reject: the individual frames, or there is nothing to reject.
 	calls.length = 0;
 	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Reject').click();
@@ -1183,6 +1195,10 @@ try {
 		!calls.some((c) => c.frames === 1), JSON.stringify(calls));
 	t('and says the rejection happened here', /outliers rejected/.test(caption()),
 		caption().slice(0, 160));
+	// Here the control IS the burst's own first frame, so the causal wording
+	// is the correct one and has to survive.
+	t('and here the difference IS the stacking, and says so',
+		/Stacking moved/.test(status()), status().slice(0, 170));
 
 	/* An old camera ignores `?frames=` and sends one frame. The module falls
 	 * back to asking one at a time -- but the mode is still Mean, and calling

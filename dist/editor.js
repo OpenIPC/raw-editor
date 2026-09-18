@@ -2261,11 +2261,13 @@ export function mountEditor(root, {
 				innerHTML: '<h3 class="re-cap">Take a burst and stack it</h3><span class="re-rule"></span>',
 			}));
 			burst.append(Object.assign(el('p', 're-note'), {
-				textContent: 'Mean is averaged by the camera itself: one request, and ' +
-					'sixteen consecutive sensor frames — under a second of sensor time. ' +
-					'Reject has to have the frames one by one, because an outlier cannot ' +
-					'be found in an average that has already been taken, and each of ' +
-					'those is a separate capture about 0.8 s after the last.',
+				textContent: 'Mean asks the camera to average the frames itself: one ' +
+					'request, sixteen consecutive sensor frames, under a second of sensor ' +
+					'time. Reject cannot — an outlier cannot be found in an average that ' +
+					'has already been taken — so it asks for the frames one at a time, ' +
+					'each a separate capture about 0.8 s after the last. A camera too old ' +
+					'to average them falls back to that slow path for Mean as well, and ' +
+					'the progress line says so while it runs.',
 			}));
 
 			const row = el('div');
@@ -2289,6 +2291,7 @@ export function mountEditor(root, {
             burst.append(row);
 
 			const prog = el('p', 're-note');
+			prog.dataset.act = 'burst-status';
 			prog.style.marginTop = '8px';
 			burst.append(prog);
 			const cmp = el('div');
@@ -2429,9 +2432,24 @@ export function mountEditor(root, {
 						? ' frames, outliers rejected' : ' frames, mean'), st, rN);
 				if (r1 && rN) {
 					const d = rN.minConf - r1.minConf;
-					prog.textContent = 'Stacking moved the read ' + (d >= 0 ? '+' : '') +
-						d.toFixed(2) + ' — ' + r1.minConf.toFixed(2) + ' to ' + rN.minConf.toFixed(2) +
-						(rN.text === r1.text ? ', same characters.' : ', and changed a character.');
+					const same = rN.text === r1.text
+						? ', same characters.' : ', and changed a character.';
+					/* Only one of the two paths may claim cause. On the slow path
+					 * the single frame IS the burst's own first frame, so the
+					 * difference is the stacking and nothing else. On the camera's
+					 * path there is no constituent frame to be had -- the average
+					 * arrives already taken -- so the control is a separate
+					 * capture, and whatever moved between the two is in that
+					 * number as well. Saying "stacking moved the read" there would
+					 * attribute a passing car to the arithmetic. */
+					prog.textContent = got.inCamera
+						? 'The averaged frame reads ' + rN.minConf.toFixed(2) + ' against ' +
+							r1.minConf.toFixed(2) + ' for the plain one' + same +
+							' They are two separate captures, so anything that moved ' +
+							'between them is in that difference too.'
+						: 'Stacking moved the read ' + (d >= 0 ? '+' : '') +
+							d.toFixed(2) + ' — ' + r1.minConf.toFixed(2) + ' to ' +
+							rN.minConf.toFixed(2) + same;
 				}
 				go.disabled = false;
 			});
