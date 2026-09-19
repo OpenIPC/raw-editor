@@ -2091,10 +2091,23 @@ export function mountEditor(root, {
 	/* The full-resolution develop the reader works on, kept so that picking a
 	 * different candidate does not pay for it again. Dropped whenever a new
 	 * frame arrives, because it would then be a picture of the old one. */
-	let plateFull = null;
+	let plateFull = null, plateFullKey = '';
+
+	/* What the cached develop was made WITH. The cache used to be validated on
+	 * width alone and invalidated from render(), which clears it only after its
+	 * own develop has returned -- so changing the demosaic and pressing Find
+	 * inside that window handed the reader the PREVIOUS develop, and from
+	 * v0.11.2 a warning describing a picture the reader never saw. Keyed on the
+	 * parameters instead, the cache cannot be stale whoever clears it. */
+	function developKey() {
+		return [state.cfa, state.demosaic, state.black, state.white,
+			state.gain, String(state.neutral)].join('|');
+	}
 
 	async function plateFrame() {
-		if (plateFull && plateFull.width === state.info.width) return plateFull;
+		const key = developKey();
+		if (plateFull && plateFullKey === key && plateFull.width === state.info.width)
+			return plateFull;
 		const r = await call('develop', {
 			cfa: state.cfa, demosaic: state.demosaic, black: state.black,
 			white: state.white, neutral: state.neutral,
@@ -2106,6 +2119,7 @@ export function mountEditor(root, {
 		c.getContext('2d', { willReadFrequently: true })
 			.putImageData(new ImageData(r.pixels, r.width, r.height), 0, 0);
 		plateFull = c;
+		plateFullKey = key;
 		return c;
 	}
 
@@ -2226,6 +2240,34 @@ export function mountEditor(root, {
 				'letterboxed whole, a fifty-pixel plate arrives at the detector eight pixels ' +
 				'wide and it finds nothing. Candidates are listed best read first.',
 		}));
+
+		/* The reader is handed a develop from this engine, at whatever demosaic
+		 * Develop is set to -- and two of the four cost it real accuracy. Scored
+		 * against ground truth on 150 plate crops through THIS engine, at the
+		 * sampling a plate arrives at (exact match, clean / one frame of noise /
+		 * a twenty-frame stack):
+		 *
+		 *     none       12.0  /  0.0  /   2.0 %
+		 *     bilinear   89.3  / 68.7  /  88.7 %
+		 *     gradient   99.3  / 77.3  /  97.3 %
+		 *     RCD        99.3  / 76.0  / 100.0 %
+		 *
+		 * RCD and gradient are the same answer within the noise of 150 samples;
+		 * bilinear gives up about ten points and none gives up nearly all of it.
+		 * So this says so rather than reading a crippled picture in silence --
+		 * it does not override the choice, because someone comparing demosaics
+		 * is exactly who would want to read through each of them. */
+		if (state.demosaic < 2) {
+			const warn = el('p', 're-note');
+			warn.dataset.act = 'demosaic-warning';
+			warn.style.cssText = 'margin-top:8px;color:#c9a227';
+			warn.textContent = state.demosaic === 0
+				? 'Develop is set to no demosaic, and the reader is handed what ' +
+				  'Develop produces — it will read almost nothing. Gradient or RCD.'
+				: 'Develop is set to Bilinear. Measured on this engine, that costs ' +
+				  'the reader about ten points against Gradient or RCD.';
+			panel.append(warn);
+		}
 
 		const row = el('div');
 		row.style.cssText = 'display:flex;gap:8px;margin-top:9px;flex-wrap:wrap';
