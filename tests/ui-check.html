@@ -1104,11 +1104,23 @@ try {
 
 	const cand = { text: 'M759XP177', minConf: 0.82, score: 0.71, perChar: [],
 		box: { left: 100, top: 110, width: 40, height: 12 } };
+	// The stub records a fingerprint of the picture it was handed, so a test can
+	// tell whether the reader got the develop that is on screen or a stale one.
+	const seen = [];
+	const fingerprint = (cv) => {
+		try {
+			const g = cv.getContext('2d', { willReadFrequently: true });
+			const d = g.getImageData(0, 0, Math.min(16, cv.width), Math.min(16, cv.height)).data;
+			let h = 0;
+			for (let i = 0; i < d.length; i += 4) h = (h + d[i] * 31 + d[i + 1] * 7 + d[i + 2]) % 100000;
+			return cv.width + 'x' + cv.height + ':' + h;
+		} catch (e) { return 'unreadable'; }
+	};
 	const plates = {
 		readerSupported: true,
 		reader: async () => ({
 			floor: 0.5,
-			readAll: async () => [cand],
+			readAll: async (full) => { seen.push(fingerprint(full)); return [cand]; },
 			read: async () => ({ text: 'M759XP177', minConf: 0.9, perChar: [] }),
 		}),
 		burst: async (o) => { calls.push({ frames: o.frames, separate: !!o.separate }); return serve(o); },
@@ -1176,6 +1188,32 @@ try {
 	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'RCD').click();
 	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Plates').click();
 	await until('the plates panel again', () => host.querySelector('[data-act="find-plates"]'));
+	host.querySelector('[data-act="find-plates"]').click();
+	await until('the plate list again', () => host.querySelector('[data-act="plate-row"]'), 15000);
+	host.querySelector('[data-act="plate-row"]').click();
+
+	/* The develop handed to the reader is cached, and it used to be validated on
+	 * width alone while being invalidated from the renderer -- which clears it
+	 * only after its own develop returns. Switching demosaic and pressing Find
+	 * inside that window read the PREVIOUS picture, under a warning describing
+	 * the new one. The fingerprints have to differ. */
+	const pickDemosaic = async (label) => {
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+		await until('the demosaic control', () => [...host.querySelectorAll('.re-seg button')]
+			.some((b) => b.textContent === label));
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === label).click();
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Plates').click();
+		await until('the plates panel', () => host.querySelector('[data-act="find-plates"]'));
+		host.querySelector('[data-act="find-plates"]').click();
+		await until('a read', () => seen.length > 0, 15000);
+		return seen.pop();
+	};
+	seen.length = 0;
+	const fpNone = await pickDemosaic('None');
+	const fpRcd  = await pickDemosaic('RCD');
+	t('the reader is handed the develop that is actually selected, not a cached one',
+		fpNone !== fpRcd && fpNone !== 'unreadable', fpNone + ' vs ' + fpRcd);
+
 	host.querySelector('[data-act="find-plates"]').click();
 	await until('the plate list again', () => host.querySelector('[data-act="plate-row"]'), 15000);
 	host.querySelector('[data-act="plate-row"]').click();
