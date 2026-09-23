@@ -1832,13 +1832,39 @@ export function mountEditor(root, {
 	 * reverting; the clock and the question live here, where the picture is.
 	 */
 	let holdTimer = null, holdTick = null;
+	/* How the countdown in progress ends, while there is one. One at a time:
+	 * revert() and keep() answer for whatever was written LAST, so a second
+	 * write under a running countdown would have the first one's timer put
+	 * the second one back. */
+	let holdEnd = null;
 
 	function stopHold() {
 		if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
 		if (holdTick) { clearInterval(holdTick); holdTick = null; }
+		holdEnd = null;
+	}
+
+	/* The panel holding the countdown is going away -- another mode, a fresh
+	 * Calibrate panel. Nobody can confirm a change they can no longer see, so
+	 * it ends the way the clock would have ended it: put back. */
+	function abandonHold() {
+		if (holdEnd) holdEnd(true);
+	}
+
+	/* Refuse a second write while one is waiting to be confirmed or put back,
+	 * and say so where the button was pressed. */
+	function busyHolding(where) {
+		if (!holdEnd) return false;
+		const box = el('div', 're-notice re-warn', ICON.warn);
+		box.append(Object.assign(el('div'), {
+			textContent: 'The last change is still waiting — keep it or put it back first.',
+		}));
+		where.append(box);
+		return true;
 	}
 
 	function buildCalibrate() {
+		abandonHold();
 		insp.replaceChildren();
 		const panel = el('div', 're-panel');
 		panel.append(Object.assign(el('div', 're-shead'), {
@@ -2016,6 +2042,7 @@ export function mountEditor(root, {
 	}
 
 	async function applyToCamera(out, send) {
+		if (busyHolding(out)) return;
 		const hold = Math.max(5, calibrate.holdSeconds || 30);
 		send.disabled = true;
 		try {
@@ -2105,6 +2132,7 @@ export function mountEditor(root, {
 		};
 		keep.addEventListener('click', () => finish(false));
 		back.addEventListener('click', () => finish(true));
+		holdEnd = finish;
 		holdTick = setInterval(() => { left--; if (left > 0) paint(); }, 1000);
 		holdTimer = setTimeout(() => finish(true), hold * 1000);
 	}
@@ -2136,6 +2164,15 @@ export function mountEditor(root, {
 			if (!(k >= 1500 && k <= 15000)) {
 				ct.focus();
 				ct.setCustomValidity('between 1500 and 15000 K');
+				ct.reportValidity();
+				return;
+			}
+			/* Two lights at one temperature are one light measured twice: the
+			 * curve cannot be fitted through them, and the camera would be
+			 * handed two matrices to blend at the same point. */
+			const near = session.find((r) => Math.abs(r.ct - k) < 300);
+			if (near) {
+				ct.setCustomValidity(`a light at ${near.ct} K is already kept — drop it first`);
 				ct.reportValidity();
 				return;
 			}
@@ -2268,6 +2305,7 @@ export function mountEditor(root, {
 			save.dataset.act = 'persist-profile';
 			save.textContent = 'Save to the camera profile';
 			save.addEventListener('click', async () => {
+				if (busyHolding(result)) return;
 				save.disabled = true;
 				try {
 					await calibrate.persist(ini);
@@ -2880,7 +2918,7 @@ export function mountEditor(root, {
 		chart.hidden = m !== 'calibrate';
 		marks.hidden = m !== 'diagnose';
 		plateMarks.hidden = m !== 'plates';
-		if (m !== 'calibrate') stopHold();
+		if (m !== 'calibrate') abandonHold();
 		if (m === 'plates') {
 			buildPlates();
 		} else if (m === 'calibrate') {

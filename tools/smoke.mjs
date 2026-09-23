@@ -885,6 +885,44 @@ console.log('\nthe camera profile: its AWB curve, its matrices, and a new set bu
 	try { P.mergeCcmTables([{ ct: 5000, matrix: [1, 0, 0, 0, 1, 0, 0, 0, 1] }], v.ccm.slice(0, 1)); }
 	catch (e) { few = e.message; }
 	assert('fewer than three matrices is refused, as the camera would', /at least three/.test(few), few);
+
+	// Lights whose colour does not move with their temperature the way light
+	// does -- the same balance at two temperatures, or redder at the hotter
+	// one -- are a mistyped temperature, and a curve through them would
+	// divide by a slope of zero or come out upside down.
+	const I3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+	const refuse = (fn) => { try { fn(); return ''; } catch (e) { return e.message; } };
+	const a = own(6500), b = own(2800);
+	check('the same balance at two temperatures is refused',
+		/does not change with temperature/.test(refuse(() =>
+			P.fitAwbCurve([a, { ...a, ct: 2800 }], { staticWb: SWB, curve: CURVE }))), true);
+	check('and so is a balance that goes the wrong way',
+		/does not change with temperature/.test(refuse(() =>
+			P.fitAwbCurve([{ ...a, ct: 2800 }, { ...b, ct: 6500 }], { staticWb: SWB, curve: CURVE }))), true);
+	check('two lights at one temperature are refused',
+		/within 300 K/.test(refuse(() =>
+			P.fitAwbCurve([a, { ...b, ct: 6400 }], { staticWb: SWB, curve: CURVE }))), true);
+
+	// Every measured matrix reaches the profile, however many vendor ones
+	// there are; the vendor's only fill what is left.
+	const seven = [7500, 6500, 5500, 4500, 3800, 3200, 2600].map((ct) => ({ ct, matrix: I3 }));
+	const full = P.mergeCcmTables(seven, [{ ct: 10000, matrix: I3 }, { ct: 2000, matrix: I3 }, ...v.ccm]);
+	check('seven measured lights are seven measured matrices',
+		full.map((t) => t.source).join(), Array(7).fill('measured').join());
+	check('an eighth light is refused rather than one silently dropped',
+		/at most 7/.test(refuse(() => P.mergeCcmTables(
+			seven.concat([{ ct: 2100, matrix: I3 }]), v.ccm))), true);
+
+	// A profile that does not read cleanly is not built on.
+	const bad = (text) => P.readColour(P.parseIni(text));
+	check('NaN in the white balance is no white balance',
+		bad('[static_awb]\nAutoStaticWb = "483, NaN, 256, 465"\n').staticWb, null);
+	check('a table count of zero is no tables',
+		bad('[static_ccm]\nTotalNum = "0"\nAutoColorTemp = "4900"\n').ccm, null);
+	check('fewer temperatures than tables is no tables',
+		bad(exported.replace('"4900, 3850, 2650, 2100, 1600, 1400, 1000"', '"4900, 3850"')).ccm, null);
+	check('temperatures that do not fall are no tables',
+		bad(exported.replace('"4900, 3850, 2650, 2100, 1600, 1400, 1000"', '"2650, 3850, 4900"')).ccm, null);
 }
 
 console.log('\n16-bit raw opens, which a whole class of camera emits');

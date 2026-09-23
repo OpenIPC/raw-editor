@@ -37,27 +37,44 @@ export function parseIni(text) {
 	return out;
 }
 
-const numbers = (v) => (v === undefined ? null :
-	v.split(/[,|\s]+/).filter(Boolean).map(Number));
+/* A list of numbers, or null when any entry is not a finite number -- a
+ * profile that says "NaN" or trails a comma is not one to build on. */
+const numbers = (v) => {
+	if (v === undefined) return null;
+	const out = v.split(/[,|\s]+/).filter(Boolean).map(Number);
+	return out.length && out.every(Number.isFinite) ? out : null;
+};
 
-/* The colour half of a profile, decoded. Missing pieces come back null rather
- * than as zeros, because a zero curve is a real (and broken) curve. */
+/* The colour half of a profile, decoded. Anything malformed comes back null
+ * rather than half-read, because a profile is built on top of it and written
+ * to a camera: a zero curve is a real (and broken) curve, and a table set
+ * that is short a temperature would be blended at an undefined one. */
 export function readColour(ini) {
 	const awb = ini.static_awb || {}, ccm = ini.static_ccm || {};
 	const staticWb = numbers(awb.AutoStaticWb);
 	const curve = numbers(awb.AutoCurvePara);
-	const total = ccm.TotalNum !== undefined ? Number(ccm.TotalNum) : null;
+	const total = ccm.TotalNum !== undefined ? Number(ccm.TotalNum) : NaN;
 	const cts = numbers(ccm.AutoColorTemp);
-	const tables = [];
-	for (let i = 0; total !== null && i < total; i++) {
-		const t = numbers(ccm['AutoCCMTable_' + i]);
-		tables.push(t && t.length === 9 ? t.map(decodeCcmValue) : null);
+	let tables = null;
+	/* The chip's own limits: three to seven tables, temperatures 500 to 30000,
+	 * falling from one to the next. */
+	if (Number.isInteger(total) && total >= 3 && total <= 7 && cts && cts.length >= total) {
+		tables = [];
+		for (let i = 0; i < total && tables; i++) {
+			const t = numbers(ccm['AutoCCMTable_' + i]);
+			const ct = cts[i];
+			if (!t || t.length !== 9 || !(ct >= 500 && ct <= 30000) ||
+				(i && !(ct < cts[i - 1])) || t.some((v) => v < 0 || v > 0xffff))
+				tables = null;
+			else
+				tables.push({ ct, matrix: t.map(decodeCcmValue) });
+		}
 	}
 	return {
-		staticWb: staticWb && staticWb.length === 4 ? staticWb : null,
-		curve: curve && curve.length === 6 ? curve : null,
-		ccm: total !== null && cts && tables.every(Boolean)
-			? tables.map((m, i) => ({ ct: cts[i], matrix: m })) : null,
+		staticWb: staticWb && staticWb.length === 4 && staticWb.every((v) => v > 0 && v <= 0xfff)
+			? staticWb : null,
+		curve: curve && curve.length === 6 && curve[4] === 128 && curve[3] !== 0 ? curve : null,
+		ccm: tables,
 	};
 }
 
@@ -164,6 +181,14 @@ export const refCtOf = (curve) => 256000000 / (curve[3] + curve[5]);
  */
 export function fitAwbCurve(points, vendor) {
 	if (!points.length) throw new Error('no neutrals to fit a curve to');
+	for (const p of points)
+		if (!(p.ct >= 1500 && p.ct <= 15000) || !(p.r > 0) || !(p.b > 0))
+			throw new Error('a kept light has no usable temperature or white balance');
+	for (let i = 0; i < points.length; i++)
+		for (let j = i + 1; j < points.length; j++)
+			if (Math.abs(points[i].ct - points[j].ct) < 300)
+				throw new Error(`two kept lights are within 300 K of each other ` +
+					`(${points[i].ct} and ${points[j].ct} K); a curve needs different lights`);
 	const [vp1, vp2, vq1, va1, , vc1] = vendor.curve;
 	const vSR = vendor.staticWb[0] / 256, vSB = vendor.staticWb[3] / 256;
 	const refCt = refCtOf(vendor.curve);
@@ -193,6 +218,14 @@ export function fitAwbCurve(points, vendor) {
 		beta = (n * smu - sm * su) / d;
 		alpha = (su - beta * sm) / n;
 	}
+	/* Warmer light is redder light, on every sensor: the red gain a grey needs
+	 * falls as the temperature falls, so sqrt(G/R) rises with mired. A slope
+	 * of zero or the wrong sign is two lights whose temperatures do not match
+	 * their colour -- a mistyped temperature, most often -- and a curve fitted
+	 * through them would divide by it. */
+	if (!(beta > 0))
+		throw new Error('the kept lights\' white balance does not change with temperature ' +
+			'the way light does — check the temperatures entered for them');
 
 	/* The locus, regularised toward the vendor's. Rows are scaled by the
 	 * vendor's magnitudes so the pull means the same for each unknown. */
@@ -229,6 +262,12 @@ export function fitAwbCurve(points, vendor) {
 	const p2 = q1 + 256 - p1;
 	const staticWb = [SR, 256, 256, SB];
 	const curve = [p1, p2, q1, a1, 128, c1];
+	/* What the camera will take: gains the ISP can hold, a curve with no
+	 * hole in it, and numbers that are numbers. */
+	if (![SR, SB].every((v) => v > 0 && v <= 0xfff) || !(a1 > 0) ||
+		!curve.every(Number.isFinite) || !(Q + XaRef > 0))
+		throw new Error('the kept lights do not fit a white balance curve this camera can ' +
+			'use — keep lights further apart in temperature, or check their temperatures');
 
 	const at = points.map((p) => {
 		const g = gainsForCt(Math.round(p.ct), staticWb, curve, { normalise: false });
@@ -274,9 +313,22 @@ function lsq(A, b) {
  */
 export function mergeCcmTables(measured, vendor, { near = 600, max = 7 } = {}) {
 	const ours = measured.map((m) => ({ ct: Math.round(m.ct), matrix: m.matrix, source: 'measured' }));
+	if (ours.length > max)
+		throw new Error(`the camera holds at most ${max} colour matrices and ${ours.length} lights are kept`);
+	for (let i = 0; i < ours.length; i++)
+		for (let j = i + 1; j < ours.length; j++)
+			if (Math.abs(ours[i].ct - ours[j].ct) < 300)
+				throw new Error(`two kept lights are within 300 K of each other (${ours[i].ct} and ` +
+					`${ours[j].ct} K)`);
+	/* Every measured matrix is kept; the vendor's fill what room is left,
+	 * the ones furthest from any measurement first, because those are the
+	 * temperatures nothing else speaks for. */
+	const distance = (v) => Math.min(...ours.map((o) => Math.abs(o.ct - v.ct)));
 	const keep = (vendor || []).filter((v) => ours.every((o) => Math.abs(o.ct - v.ct) >= near))
+		.sort((a, b) => distance(b) - distance(a))
+		.slice(0, Math.max(0, max - ours.length))
 		.map((v) => ({ ...v, source: 'vendor' }));
-	const all = ours.concat(keep).sort((a, b) => b.ct - a.ct).slice(0, max);
+	const all = ours.concat(keep).sort((a, b) => b.ct - a.ct);
 	if (all.length < 3)
 		throw new Error(`the camera needs at least three colour matrices and this makes ${all.length}`);
 	return all;

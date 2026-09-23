@@ -621,6 +621,12 @@ try {
 		t('saving hands the host exactly that text',
 			calls.length === before + 1 && calls[before][0] === 'persist' &&
 			calls[before][1] === ini.textContent, JSON.stringify(calls.slice(before).map((c) => c[0])));
+		// A second save under a running countdown would be put back by the
+		// first one's timer: revert() answers for whatever was written last.
+		host.querySelector('[data-act="persist-profile"]').click();
+		await new Promise((r) => setTimeout(r, 200));
+		t('a second save is refused while the first is still waiting',
+			calls.length === before + 1, JSON.stringify(calls.slice(before).map((c) => c[0])));
 		k.click();
 		for (let i = 0; i < 20 && calls[calls.length - 1][0] !== 'keep'; i++)
 			await new Promise((r) => setTimeout(r, 100));
@@ -630,14 +636,41 @@ try {
 
 	// And closing the editor must not leave a timer that reverts a camera
 	// whose operator has gone.
+	// Leaving Calibrate with a change still waiting ends it the way the clock
+	// would have: put back. Nobody can confirm what they can no longer see,
+	// and silently dropping the countdown left the host never told either way.
 	send.click();
 	await untilKeep();
+	const revertsBefore = calls.filter((c) => c[0] === 'revert').length;
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+	for (let i = 0; i < 20 && calls.filter((c) => c[0] === 'revert').length === revertsBefore; i++)
+		await new Promise((r) => setTimeout(r, 100));
+	t('leaving Calibrate mid-countdown puts the change back',
+		calls.filter((c) => c[0] === 'revert').length === revertsBefore + 1,
+		JSON.stringify(calls.map((c) => c[0])));
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Calibrate').click();
+	await new Promise((r) => setTimeout(r, 300));
+	host.querySelector('[data-act="measure"]').click();
+	const send2 = await (async () => {
+		for (let i = 0; i < 100; i++) {
+			const b = host.querySelector('[data-act="apply-to-camera"]');
+			if (b) return b;
+			await new Promise((r) => setTimeout(r, 100));
+		}
+		return null;
+	})();
+
+	// And closing the editor must not leave a timer that reverts a camera
+	// whose operator has gone.
+	send2.click();
+	await untilKeep();
+	const revertsAtClose = calls.filter((c) => c[0] === 'revert').length;
 	ed.destroy();
 	await new Promise((r) => setTimeout(r, 6500));
 	// Counting calls would break every time the contract gains one; what this
 	// means is that destroy() added no revert of its own.
 	t('closing the editor cancels the countdown rather than firing it',
-		calls.filter((c) => c[0] === 'revert').length === 1 &&
+		calls.filter((c) => c[0] === 'revert').length === revertsAtClose &&
 		calls[calls.length - 1][0] === 'apply',
 		JSON.stringify(calls.map((c) => c[0])));
 	host.remove();
