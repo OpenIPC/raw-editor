@@ -740,6 +740,26 @@ console.log('\ncalibration recovers a matrix it was not given');
 		`top row spans ${topRun.toFixed(1)}, bottom ${bottomRun.toFixed(1)}`);
 }
 
+console.log('\na chart on a textured wall is still a chart');
+{
+	/*
+	 * tests/chart-on-wood.dng is a real 768x576 crop off a Hi3516EV300 + IMX335:
+	 * a 24-patch chart on a shelf against pine boards. Most of the frame is
+	 * wood grain, not flat surface, and the detector's noise estimate was the
+	 * median local range -- which here was the grain. The dark patches merged
+	 * into the chart's grey surround and it reported nothing. The corners
+	 * below were placed by hand on the frame, and the detector has to land
+	 * within 6 px of them.
+	 */
+	const e = await instantiate(readFileSync(new URL('../dist/engine.wasm', import.meta.url)));
+	const info = e.open(new Uint8Array(readFileSync(new URL('../tests/chart-on-wood.dng', import.meta.url))));
+	const ch = e.detectChart({ cfa: info.cfa });
+	assert('a chart on a wood wall is found', !!ch && ch.cells >= 18, ch ? ch.cells + ' cells' : 'nothing');
+	const hand = [[192.4, 203.4], [577.5, 185.2], [594.2, 443.1], [208.4, 468.8]];
+	const err = ch ? Math.max(...ch.corners.map((p, i) => Math.hypot(p[0] - hand[i][0], p[1] - hand[i][1]))) : Infinity;
+	assert('where it actually is', err < 6, err.toFixed(1) + ' px from the hand-placed corners');
+}
+
 console.log('\n16-bit raw opens, which a whole class of camera emits');
 {
 	/*

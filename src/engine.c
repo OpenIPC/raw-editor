@@ -1024,8 +1024,18 @@ EXPORT(detect_chart) i32 detect_chart(i32 cfa, float *out8) {
          * Three times the noise fills a flat patch completely and still stops
          * dead at the gaps between them, which are hundreds of counts.
          */
+        /*
+         * And the noise is the 10th percentile, not the median. "Most of a
+         * frame is flat" is not true of every frame: on a lab hi3516ev300
+         * looking at a chart on a pine wall, the median local range was the
+         * wood grain -- 91 counts against 21 at the 10th percentile -- and
+         * three times that merged every dark patch into the chart's grey
+         * surround. 17 patches were found and 18 are needed; at the 10th
+         * percentile all 24 are. Any frame with a chart in it has at least a
+         * tenth of flat surface: the chart's own patches and surround.
+         */
         u32 seen = 0; int med = 0;
-        for (int i = 0; i < 1024; i++) { seen += hist[i]; if (seen * 2 >= total) { med = i; break; } }
+        for (int i = 0; i < 1024; i++) { seen += hist[i]; if (seen * 10 >= total) { med = i; break; } }
         thr = (float)med / 1023.f * maxr * 3.f;
         if (thr < 1.f) thr = 1.f;
     }
