@@ -1104,5 +1104,116 @@ const hostile = engine.open(readFileSync(new URL('../tests/hostile-model.dng', i
 check('the model is carried through verbatim', hostile.model, '<img src=x onerror="window.__pwned=1">');
 check('and the frame still reads correctly', [hostile.width, hostile.cfaName, hostile.black], [256, 'RGGB', 50]);
 
+console.log('\nfocus statistics: the grid a person focuses a lens by');
+{
+	const A = await import('../src/aftune.js');
+
+	// A grid is a plain array of six-field zones, row-major.
+	const zone = (o = {}) => ({ h1: 0, h2: 0, v1: 0, v2: 0, y: 1000, hlcnt: 0, ...o });
+	const grid = (rows, cols, f) => Array.from({ length: rows * cols }, (_, i) => f(i));
+
+	// The blend is the camera's own integer arithmetic, not a tidier float one:
+	// the page and the ISP must not be able to disagree about where the peak is.
+	check('the blend is the chip\'s: (h2*54 + v2*10) >> 6',
+		A.blend(zone({ h2: 640, v2: 64 })), (640 * 54 + 64 * 10) >> 6);
+	check('and it is integer throughout', Number.isInteger(A.blend(zone({ h2: 7, v2: 3 }))), true);
+	// `>>` would coerce this to signed 32-bit and hand back a negative focus
+	// value -- which does not just read wrong, it sorts below every real zone
+	// and takes normalise() under the zero it promises. A camera's u16 fields
+	// cannot reach here; the JSON they arrive in can.
+	{
+		const huge = zone({ h2: 2 ** 26 });
+		check('a sum past 2^31 does not wrap negative', A.blend(huge), (2 ** 26) * 54 / 64);
+		assert('which the shift operator would have', (((2 ** 26) * 54) >> 6) < 0);
+	}
+
+	// Numbers, or nothing. A NaN propagates as a zone neither brighter nor
+	// darker than any other and a negative sits under every real one.
+	for (const bad of [{ h2: NaN }, { y: -1 }, { hlcnt: '4' }]) {
+		let refused = false;
+		try { A.summarise(grid(1, 1, () => zone(bad)), 1, 1); } catch { refused = true; }
+		assert(`a zone carrying ${JSON.stringify(bad)} is refused`, refused);
+	}
+
+	// A grid whose length disagrees with its shape would still draw -- shifted,
+	// every zone in the wrong place. Refused rather than rendered.
+	let threw = false;
+	try { A.summarise(grid(2, 3, () => zone()), 3, 3); } catch { threw = true; }
+	assert('a grid that disagrees with its shape is refused', threw);
+
+	// Dark, blown and simply-soft all report a small focus value, and drawing
+	// them alike tells the operator to chase focus that was never the problem.
+	{
+		const g = grid(3, 3, (i) => {
+			if (i === 0) return zone({ y: 1, h2: 10 });            // unlit
+			if (i === 1) return zone({ y: 1000, h2: 9999, hlcnt: 40 }); // blown, but "sharp"
+			return zone({ y: 1000, h2: 100 + i });
+		});
+		const s = A.summarise(g, 3, 3);
+		check('a dark zone reads unlit, not soft', s.state[0], 'unlit');
+		check('a blown zone reads clipped', s.state[1], 'clipped');
+		check('and the rest are measured', s.measured, 7);
+		// The blown zone has by far the largest response. If the peak followed
+		// the raw maximum it would sit on a specular highlight and the operator
+		// would focus on a reflection.
+		assert('the peak ignores the clipped zone that outscores everything',
+			s.peakAt.index !== 1, `peak at ${s.peakAt.index}`);
+		check('the peak is the sharpest MEASURED zone', s.peakAt.index, 8);
+	}
+
+	// Focusing by hand sweeps through the peak, and it is gone by the time a
+	// person looks up from the lens.
+	{
+		const hold = A.peakHold();
+		hold.push(A.summarise(grid(1, 2, (i) => zone({ h2: i ? 100 : 400 })), 1, 2));
+		const r = hold.push(A.summarise(grid(1, 2, (i) => zone({ h2: i ? 900 : 200 })), 1, 2));
+		check('peak-hold keeps the best each zone ever showed',
+			r.best, [A.blend(zone({ h2: 400 })), A.blend(zone({ h2: 900 }))]);
+		check('and the best overall', r.bestOverall, A.blend(zone({ h2: 900 })));
+		hold.reset();
+		const after = hold.push(A.summarise(grid(1, 2, () => zone({ h2: 5 })), 1, 2));
+		check('reset forgets it, because a held peak from another scene is a lie',
+			after.bestOverall, A.blend(zone({ h2: 5 })));
+	}
+
+	// The reason the current-frame peak skips clipped zones applies twice over
+	// to a held one: a highlight's response would become that zone's permanent
+	// record, still standing long after the highlight moved off.
+	{
+		const hold = A.peakHold();
+		const bogus = (i) => (i === 0
+			? zone({ h2: 9999, hlcnt: 40 })     // blown, and "sharpest" on the grid
+			: zone({ h2: 100 }));
+		hold.push(A.summarise(grid(1, 2, bogus), 1, 2));
+		const r = hold.push(A.summarise(grid(1, 2, (i) => zone({ h2: i ? 100 : 300 })), 1, 2));
+		check('a clipped zone\'s response is not held against it once it measures',
+			r.best[0], A.blend(zone({ h2: 300 })));
+
+		const dark = A.peakHold();
+		const d = dark.push(A.summarise(grid(1, 2, (i) => (i ? zone({ h2: 100 }) : zone({ y: 0, h2: 8000 }))), 1, 2));
+		check('nor an unlit one\'s', d.best[0], null);
+		check('and a zone that has never measured holds null, because 0 is a reading',
+			d.best.map((v) => v === null), [true, false]);
+	}
+
+	// Normalising each frame to its own maximum makes every frame look equally
+	// sharp -- brightest at the peak and just as bright far from it, which is
+	// exactly the information the operator came for.
+	{
+		const s = A.summarise(grid(1, 2, (i) => zone({ h2: i ? 200 : 100 })), 1, 2);
+		const ceiling = A.blend(zone({ h2: 800 }));
+		const n = A.normalise(s, ceiling);
+		assert('against a held ceiling, a soft frame reads soft', n[1] < 0.3, n[1].toFixed(2));
+		const own = A.normalise(s);
+		check('against its own maximum it would read perfectly sharp', own[1], 1);
+	}
+
+	// A zone that measured nothing has no value to draw, and 0 is a value.
+	{
+		const s = A.summarise(grid(1, 2, (i) => (i ? zone({ h2: 300 }) : zone({ y: 0 }))), 1, 2);
+		check('an unmeasured zone normalises to null, not zero', A.normalise(s)[0], null);
+	}
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall checks passed');
 process.exit(failures ? 1 : 0);
