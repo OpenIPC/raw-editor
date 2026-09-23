@@ -1117,6 +1117,23 @@ console.log('\nfocus statistics: the grid a person focuses a lens by');
 	check('the blend is the chip\'s: (h2*54 + v2*10) >> 6',
 		A.blend(zone({ h2: 640, v2: 64 })), (640 * 54 + 64 * 10) >> 6);
 	check('and it is integer throughout', Number.isInteger(A.blend(zone({ h2: 7, v2: 3 }))), true);
+	// `>>` would coerce this to signed 32-bit and hand back a negative focus
+	// value -- which does not just read wrong, it sorts below every real zone
+	// and takes normalise() under the zero it promises. A camera's u16 fields
+	// cannot reach here; the JSON they arrive in can.
+	{
+		const huge = zone({ h2: 2 ** 26 });
+		check('a sum past 2^31 does not wrap negative', A.blend(huge), (2 ** 26) * 54 / 64);
+		assert('which the shift operator would have', (((2 ** 26) * 54) >> 6) < 0);
+	}
+
+	// Numbers, or nothing. A NaN propagates as a zone neither brighter nor
+	// darker than any other and a negative sits under every real one.
+	for (const bad of [{ h2: NaN }, { y: -1 }, { hlcnt: '4' }]) {
+		let refused = false;
+		try { A.summarise(grid(1, 1, () => zone(bad)), 1, 1); } catch { refused = true; }
+		assert(`a zone carrying ${JSON.stringify(bad)} is refused`, refused);
+	}
 
 	// A grid whose length disagrees with its shape would still draw -- shifted,
 	// every zone in the wrong place. Refused rather than rendered.
@@ -1157,6 +1174,26 @@ console.log('\nfocus statistics: the grid a person focuses a lens by');
 		const after = hold.push(A.summarise(grid(1, 2, () => zone({ h2: 5 })), 1, 2));
 		check('reset forgets it, because a held peak from another scene is a lie',
 			after.bestOverall, A.blend(zone({ h2: 5 })));
+	}
+
+	// The reason the current-frame peak skips clipped zones applies twice over
+	// to a held one: a highlight's response would become that zone's permanent
+	// record, still standing long after the highlight moved off.
+	{
+		const hold = A.peakHold();
+		const bogus = (i) => (i === 0
+			? zone({ h2: 9999, hlcnt: 40 })     // blown, and "sharpest" on the grid
+			: zone({ h2: 100 }));
+		hold.push(A.summarise(grid(1, 2, bogus), 1, 2));
+		const r = hold.push(A.summarise(grid(1, 2, (i) => zone({ h2: i ? 100 : 300 })), 1, 2));
+		check('a clipped zone\'s response is not held against it once it measures',
+			r.best[0], A.blend(zone({ h2: 300 })));
+
+		const dark = A.peakHold();
+		const d = dark.push(A.summarise(grid(1, 2, (i) => (i ? zone({ h2: 100 }) : zone({ y: 0, h2: 8000 }))), 1, 2));
+		check('nor an unlit one\'s', d.best[0], null);
+		check('and a zone that has never measured holds null, because 0 is a reading',
+			d.best.map((v) => v === null), [true, false]);
 	}
 
 	// Normalising each frame to its own maximum makes every frame look equally

@@ -20,9 +20,17 @@
  * display and then lets autofocus run should not watch it move. */
 const BLEND_SHIFT = 6;
 const BELTA = 54;
+const SCALE = 1 << BLEND_SHIFT;
 
 export function blend(z) {
-	return ((z.h2 * BELTA) + (z.v2 * ((1 << BLEND_SHIFT) - BELTA))) >> BLEND_SHIFT;
+	/* Arithmetic, not `>>`. The shift operator coerces to signed 32-bit, so a
+	 * weighted sum past 2^31 wraps negative -- and a negative focus value does
+	 * not merely read wrong, it sinks below every real zone in peak selection
+	 * and drives normalise() below the zero it promises. A camera's own u16
+	 * fields cannot reach that (65535 * 64 is 4.2 million), but these arrive as
+	 * JSON over a network and nothing upstream of here guarantees they are u16.
+	 * The result is identical for every input a camera can actually produce. */
+	return Math.trunc(((z.h2 * BELTA) + (z.v2 * (SCALE - BELTA))) / SCALE);
 }
 
 /*
@@ -58,6 +66,21 @@ export function zoneState(z, { yFloor = 0, hlCeil = 0 } = {}) {
 export function summarise(zones, rows, cols, opts = {}) {
 	if (!Array.isArray(zones) || zones.length !== rows * cols)
 		throw new Error(`expected ${rows * cols} zones, got ${zones && zones.length}`);
+	/* Refuse a grid that is not numbers rather than drawing one. Everything
+	 * below assumes finite, non-negative accumulators; a NaN would propagate
+	 * into the peak and the normalisation as a zone that is neither brighter
+	 * nor darker than any other, and a negative would sit under every real
+	 * one. The caller already has to handle a camera that stopped answering,
+	 * and this is that same case. */
+	for (let i = 0; i < zones.length; i++) {
+		const z = zones[i];
+		if (!z) throw new Error(`zone ${i} is missing`);
+		for (const k of ['h1', 'h2', 'v1', 'v2', 'y', 'hlcnt']) {
+			const v = z[k];
+			if (typeof v !== 'number' || !Number.isFinite(v) || v < 0)
+				throw new Error(`zone ${i} field ${k} is not a count: ${v}`);
+		}
+	}
 
 	const ys = zones.map((z) => z.y).slice().sort((a, b) => a - b);
 	const medianY = ys[ys.length >> 1] || 0;
@@ -95,9 +118,18 @@ export function peakHold() {
 	let best = null, bestOverall = 0;
 	return {
 		push(sum) {
-			if (!best || best.length !== sum.fv.length) best = sum.fv.slice();
-			else for (let i = 0; i < sum.fv.length; i++)
-				if (sum.fv[i] > best[i]) best[i] = sum.fv[i];
+			if (!best || best.length !== sum.fv.length) best = sum.fv.map(() => null);
+			for (let i = 0; i < sum.fv.length; i++) {
+				/* Only a zone that measured may set its own record. A blown
+				 * zone reports a huge response -- that is the whole reason the
+				 * current-frame peak skips it -- and holding that value would
+				 * make it the zone's permanent, unbeatable maximum, still
+				 * standing long after the highlight moved off and the zone
+				 * became readable. `null` where a zone has never yet measured,
+				 * because 0 is a reading and "no reading" is not. */
+				if (sum.state[i] !== 'measured') continue;
+				if (best[i] === null || sum.fv[i] > best[i]) best[i] = sum.fv[i];
+			}
 			if (sum.peak !== null && sum.peak > bestOverall) bestOverall = sum.peak;
 			return { best: best.slice(), bestOverall };
 		},
