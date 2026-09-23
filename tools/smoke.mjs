@@ -740,6 +740,24 @@ console.log('\ncalibration recovers a matrix it was not given');
 		`top row spans ${topRun.toFixed(1)}, bottom ${bottomRun.toFixed(1)}`);
 }
 
+console.log('\na chart beside a blown-out window is still a chart');
+{
+	/*
+	 * A clipped area has no noise at all: every neighbourhood in it has a
+	 * local range of exactly zero. Once that is a tenth of the frame the
+	 * 10th-percentile noise estimate lands on zero, the flatness threshold
+	 * collapses to one count, every patch's ordinary noise exceeds it, and the
+	 * chart vanishes. Here the right 45% of the frame is saturated.
+	 */
+	const { makeChartFrame } = await import('./make-chart.mjs');
+	const truth = [[40, 90], [330, 90], [330, 300], [40, 300]];
+	const e = await instantiate(readFileSync(new URL('../dist/engine.wasm', import.meta.url)));
+	e.open(makeChartFrame({ corners: truth, saturated: [350, 0, 290, 480] }).bytes);
+	const ch = e.detectChart();
+	assert('a chart beside a clipped region is found', !!ch && ch.cells === 24,
+		ch ? ch.cells + ' cells' : 'nothing');
+}
+
 console.log('\na chart on a textured wall is still a chart');
 {
 	/*
