@@ -1405,6 +1405,267 @@ try {
 } catch (e) {
 	t('the teardown path is handled', false, e.message);
 }
+/* Focus: the tab follows the same rule as Plates and Capture, and the poll it
+ * starts must die with the tab. A leaked interval is the failure that hides
+ * best -- nothing on screen changes, and a camera answers a page nobody is
+ * looking at until the browser is closed. */
+try {
+	const tabNames = (el) => [...el.querySelectorAll('.re-seg button')].map((b) => b.textContent.trim());
+	const bare = document.createElement('div');
+	document.body.append(bare);
+	mountEditor(bare, { base: '../dist/', styles: false, autoCapture: false });
+	t('no Focus tab without a focus provider', !tabNames(bare).includes('Focus'),
+		tabNames(bare).join('|'));
+
+	let calls = 0;
+	const GRID = { rows: 2, cols: 3 };
+	const host = document.createElement('div');
+	document.body.append(host);
+	const ed = mountEditor(host, {
+		base: '../dist/', styles: false, autoCapture: false,
+		focus: {
+			intervalMs: 20,
+			zones: () => {
+				calls++;
+				// one blown zone, one dark, the rest ordinary
+				return Promise.resolve({ ...GRID, zones: [
+					[0, 900, 0, 100, 1000, 40],
+					[0, 100, 0, 10, 1000, 0],
+					[0, 300, 0, 30, 1000, 0],
+					[0, 50, 0, 5, 1, 0],
+					[0, 700, 0, 70, 1000, 0],
+					[0, 200, 0, 20, 1000, 0],
+				] });
+			},
+		},
+	});
+	t('a focus provider grows a Focus tab', tabNames(host).includes('Focus'),
+		tabNames(host).join('|'));
+
+	const tab = [...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus');
+	tab.click();
+	await new Promise((r) => setTimeout(r, 120));
+	const insp = host.querySelector('.re-insp');
+	const status = insp.querySelector('[data-act="focus-status"]');
+	t('entering Focus polls the camera', calls > 0, `${calls} call(s)`);
+	t('and says where the sharpest zone is', !!status && /Sharpest at row \d+, column \d+/.test(status.textContent),
+		status ? status.textContent : '(no status)');
+	// The blown zone has the largest response of all six. A display that
+	// followed the raw maximum would send the operator to a reflection.
+	t('the peak is not the blown zone', !!status && /row 2, column 2/.test(status.textContent),
+		status ? status.textContent : '');
+	t('and it counts what it could not measure', !!status &&
+		/1 too dark/.test(status.textContent) && /1 blown out/.test(status.textContent),
+		status ? status.textContent : '');
+	t('4 of 6 zones measured', !!status && /4 of 6 zones measured/.test(status.textContent),
+		status ? status.textContent : '');
+
+	// Leaving the tab must stop the poll.
+	const before = calls;
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Develop').click();
+	await new Promise((r) => setTimeout(r, 120));
+	t('leaving Focus stops the poll', calls === before, `${before} -> ${calls}`);
+
+	// And so must closing the editor, from inside the tab.
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+	await new Promise((r) => setTimeout(r, 60));
+	const beforeDestroy = calls;
+	ed.destroy();
+	await new Promise((r) => setTimeout(r, 120));
+	t('and destroying the editor stops it too', calls === beforeDestroy,
+		`${beforeDestroy} -> ${calls}`);
+} catch (e) {
+	t('the Focus tab is handled', false, e.message);
+}
+
+/* The heatmap itself, over a real frame. The zone maths is unit-tested without
+ * a browser; what can only be checked here is that a grid of the shape the
+ * camera reported is laid over the picture, and that the three zone states
+ * stay visually distinct once drawn. */
+try {
+	const host = document.createElement('div');
+	document.body.append(host);
+	const ed = mountEditor(host, {
+		base: '../dist/', styles: false, autoCapture: false,
+		focus: {
+			intervalMs: 20,
+			zones: () => Promise.resolve({ rows: 2, cols: 3, zones: [
+				[0, 900, 0, 100, 1000, 40],
+				[0, 100, 0, 10, 1000, 0],
+				[0, 300, 0, 30, 1000, 0],
+				[0, 50, 0, 5, 1, 0],
+				[0, 700, 0, 70, 1000, 0],
+				[0, 200, 0, 20, 1000, 0],
+			] }),
+		},
+	});
+	const bytes = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
+	await ed.open(bytes, 'fixture.dng');
+	await new Promise((r) => setTimeout(r, 300));
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+	await new Promise((r) => setTimeout(r, 150));
+
+	const cells = host.querySelectorAll('.re-fz, .re-fz-none');
+	t('a cell is drawn for every zone the camera reported', cells.length === 6,
+		`${cells.length} cell(s)`);
+	t('the two it could not measure are drawn unfilled',
+		host.querySelectorAll('.re-fz-none').length === 2,
+		`${host.querySelectorAll('.re-fz-none').length} unfilled`);
+	t('and the sharpest is marked', host.querySelectorAll('.re-fz-peak').length === 1);
+	// Brightness has to carry the measurement, or every zone reads the same.
+	const fills = [...host.querySelectorAll('.re-fz')].map((r) => +r.getAttribute('fill-opacity'));
+	t('brighter where the picture is sharper', Math.max(...fills) > Math.min(...fills),
+		fills.map((v) => v.toFixed(2)).join(' '));
+	// The grid has to cover the frame, not a corner of it.
+	const box = host.querySelector('.re-chart-svg').getBoundingClientRect();
+	const spread = [...cells].reduce((a, r) => {
+		const b = r.getBoundingClientRect();
+		return { l: Math.min(a.l, b.left), r: Math.max(a.r, b.right) };
+	}, { l: Infinity, r: -Infinity });
+	t('and it spans the frame rather than a corner',
+		spread.r - spread.l > box.width * 0.5,
+		`${(spread.r - spread.l).toFixed(0)}px of ${box.width.toFixed(0)}px`);
+	ed.destroy();
+} catch (e) {
+	t('the focus heatmap is handled', false, e.message);
+}
+
+/* The poll reads a camera over a network, so every one of these is a question
+ * about time: two reads in flight at once, an answer that outlives the thing
+ * that asked for it, and a frame replaced under a grid measured of another. */
+try {
+	const GZ = (h2) => ({ rows: 1, cols: 2,
+		zones: [[0, h2, 0, h2 / 10, 1000, 0], [0, 10, 0, 1, 1000, 0]] });
+	const HIGH = 773, MED = 429, LOW = 85;   // blend() of h2 = 900 / 500 / 100
+	const best = (el) => {
+		const s = el.querySelector('[data-act="focus-status"]');
+		const m = s && s.textContent.match(/best seen (\d+)/);
+		return m ? +m[1] : null;
+	};
+	const toFocus = (el) => [...el.querySelectorAll('.re-seg button')]
+		.find((b) => b.textContent.trim() === 'Focus').click();
+	const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+	// A camera slower than the polling interval. On a fixed interval the reads
+	// pile up, and the answer that arrives second is not the one measured
+	// second -- so the grid steps backwards in time.
+	{
+		let live = 0, most = 0;
+		const host = document.createElement('div');
+		document.body.append(host);
+		const ed = mountEditor(host, {
+			base: '../dist/', styles: false, autoCapture: false,
+			focus: { intervalMs: 10, zones: () => {
+				live++; most = Math.max(most, live);
+				return new Promise((r) => setTimeout(() => { live--; r(GZ(500)); }, 70));
+			} },
+		});
+		toFocus(host);
+		await pause(300);
+		t('a slow camera is never asked twice at once', most === 1, `${most} in flight`);
+		ed.destroy();
+	}
+
+	// An answer can outlive what asked for it: the tab it was read for, or the
+	// peak the operator cleared. Both would put a discarded measurement back.
+	{
+		const waiting = [];
+		const host = document.createElement('div');
+		document.body.append(host);
+		const ed = mountEditor(host, {
+			base: '../dist/', styles: false, autoCapture: false,
+			focus: { intervalMs: 5, zones: () => new Promise((r) => waiting.push(r)) },
+		});
+		toFocus(host);
+		await pause(60);
+		waiting.shift()(GZ(500));                       // MED, the honest reading
+		await pause(60);
+		t('the held best starts at the reading taken', best(host) === MED, `best=${best(host)}`);
+
+		// Leave with a read outstanding, answer it, come back.
+		[...host.querySelectorAll('.re-seg button')]
+			.find((b) => b.textContent.trim() === 'Develop').click();
+		await pause(30);
+		const orphan = waiting.shift();
+		if (orphan) orphan(GZ(900));                    // HIGH, for a tab that is gone
+		await pause(30);
+		toFocus(host);
+		await pause(30);
+		waiting.shift()(GZ(100));                       // LOW, this tab's own
+		await pause(60);
+		t('an answer read for a closed tab does not enter the peak history',
+			best(host) === MED, `best=${best(host)} (HIGH would be ${HIGH})`);
+
+		// Clear the best with a read outstanding, then answer it.
+		const reset = host.querySelector('[data-act="focus-reset"]');
+		const stale = waiting.shift();
+		reset.click();
+		await pause(20);
+		if (stale) stale(GZ(900));                      // HIGH, from before the clear
+		await pause(30);
+		waiting.shift()(GZ(100));                       // LOW, after it
+		await pause(60);
+		t('nor does one read before the best was cleared',
+			best(host) === LOW, `best=${best(host)} (HIGH would be ${HIGH})`);
+		ed.destroy();
+	}
+
+	// A shape that is not a shape. `rows * cols === zones.length` holds, so the
+	// count check passes and the frame would be divided into no cells at all.
+	{
+		const host = document.createElement('div');
+		document.body.append(host);
+		const ed = mountEditor(host, {
+			base: '../dist/', styles: false, autoCapture: false,
+			focus: { intervalMs: 20, zones: () => Promise.resolve({ rows: 0, cols: 0, zones: [] }) },
+		});
+		toFocus(host);
+		await pause(120);
+		const warn = host.querySelector('.re-insp .re-notice.re-warn');
+		t('a grid with no shape is reported, not drawn',
+			!!warn && /stopped answering/.test(warn.textContent),
+			warn ? warn.textContent.slice(0, 60) : '(no notice)');
+		t('and no cells are drawn for it', host.querySelectorAll('.re-fz, .re-fz-none').length === 0);
+		ed.destroy();
+	}
+
+	// Opening another frame is opening another scene: the zones were measured
+	// of the old one, at its dimensions, against a peak held from a lens
+	// position that no longer exists.
+	{
+		let n = 0;
+		const host = document.createElement('div');
+		document.body.append(host);
+		const ed = mountEditor(host, {
+			base: '../dist/', styles: false, autoCapture: false,
+			focus: { intervalMs: 20, zones: () => (++n === 1
+				? Promise.resolve(GZ(900)) : new Promise(() => {})) },
+		});
+		const bytes = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
+		await ed.open(bytes, 'fixture.dng');
+		await pause(300);
+		toFocus(host);
+		await pause(150);
+		t('a reading is on screen before the frame changes',
+			best(host) === HIGH, `best=${best(host)}`);
+		t('and its cells are drawn', host.querySelectorAll('.re-fz, .re-fz-none').length === 2);
+
+		await ed.open(bytes, 'again.dng');
+		await pause(150);
+		const notes = [...host.querySelectorAll('.re-insp .re-note')]
+			.map((n) => n.textContent);
+		t('a new frame starts from nothing rather than the last scene',
+			best(host) === null && notes.some((s) => /Reading/.test(s)),
+			`best=${best(host)} notes=${notes.length}`);
+		t('and the previous scene’s cells are gone',
+			host.querySelectorAll('.re-fz, .re-fz-none').length === 0,
+			`${host.querySelectorAll('.re-fz, .re-fz-none').length} left`);
+		ed.destroy();
+	}
+} catch (e) {
+	t('the focus timing paths are handled', false, e.message);
+}
+
 // Reported over HTTP rather than through the title: the harness then runs on
 // a real clock. A virtual-time budget fires every timer as fast as it can,
 // which loses the race against the module's own fetches every time.

@@ -14,6 +14,7 @@
 
 import { solveFromPatches, patchCentres, scoreCcm, CHART_COLS, CHART_ROWS } from './calibrate.js';
 import { parseIni, readColour, fitAwbCurve, gainsForCt, mergeCcmTables, colourFragment } from './iqprofile.js';
+import { summarise, peakHold, normalise } from './aftune.js';
 
 const CFA_NAMES = ['RGGB', 'GRBG', 'GBRG', 'BGGR'];
 const DEMOSAIC = [
@@ -248,6 +249,14 @@ export function mountEditor(root, {
 	 * sections given into the camera's profile. revert() and keep() then
 	 * answer for whichever was written last. */
 	calibrate,
+	/* Live focus statistics: { zones(), intervalMs }. zones() resolves to the
+	 * camera's AF grid -- { rows, cols, zones: [[h1,h2,v1,v2,y,hlcnt], ...] },
+	 * row-major. Without one there is no Focus tab at all, because a focus
+	 * display with nothing to display is worse than none.
+	 *
+	 * Read-only, unlike `calibrate` and `plates`: this one measures and never
+	 * writes, so it needs no revert and no countdown. */
+	focus,
 	/* How long to wait for the module to arrive and answer. The camera's own
 	 * loader gives the CDN eight seconds; a test harness under a virtual clock
 	 * needs a number well above whatever budget the browser is running on. */
@@ -350,6 +359,7 @@ export function mountEditor(root, {
 	// Not created and disabled: a tab that can never work is worse than no tab,
 	// and a host reading the DOM should find only what is really on offer.
 	if (plates) modeItems.push({ label: 'Plates', value: 'plates' });
+	if (focus) modeItems.push({ label: 'Focus', value: 'focus' });
 	const modeSeg = segmented(modeItems, 0, (v) => setMode(v), { wide: false });
 	// Not created at all without a provider, rather than created and hidden: a
 	// disabled-looking control that can never work is worse than none, and a
@@ -749,7 +759,7 @@ export function mountEditor(root, {
 	 * window ever changing. Watching the element itself catches all of those,
 	 * where a window listener catches only the first.
 	 */
-	const onResize = () => { drawChart(); drawMarks(); };
+	const onResize = () => { drawChart(); drawMarks(); drawFocusMarks(); };
 	let ro = null;
 	if (typeof ResizeObserver === 'function') {
 		ro = new ResizeObserver(onResize);
@@ -1702,6 +1712,13 @@ export function mountEditor(root, {
 	const chart = el('div', 're-chart');
 	chart.hidden = true;
 	stage.append(chart);
+
+	/* The focus heatmap. Its own layer rather than a mode of the chart overlay:
+	 * the chart draws where a person put something, this draws what the camera
+	 * measured, and the two are never on screen together. */
+	const focusMarks = el('div', 're-chart');
+	focusMarks.hidden = true;
+	stage.append(focusMarks);
 
 	function defaultCorners() {
 		const w = state.info?.width || 0, h = state.info?.height || 0;
@@ -2913,17 +2930,228 @@ export function mountEditor(root, {
 		drawPlateMarks();
 	}
 
+	/* ---- Focus: what the camera's AF block measured, zone by zone ---------
+	 *
+	 * The picture underneath is the frame that was captured; the numbers over
+	 * it are live. That mismatch is deliberate and is said out loud in the
+	 * panel, because the alternative -- a still heatmap -- cannot be focused
+	 * by, and a live preview is not this editor's job. The grid does not move
+	 * while a lens is turned, so a fixed backdrop costs nothing: only the
+	 * values change, and those are what is being read.
+	 */
+	let focusSum = null, focusBest = null, focusErr = null;
+	let focusHold = null, focusTimer = null, focusStatus = null;
+	/* Bumped whenever polling stops or restarts. A read already in flight
+	 * carries the number it started under, and an answer whose number has
+	 * moved on is dropped: it was measured of a poll that no longer exists --
+	 * a closed tab, a cleared peak, another frame -- and writing it back would
+	 * resurrect exactly the state that was just discarded. */
+	let focusGen = 0;
+
+	function stopFocusPoll() {
+		if (focusTimer) { clearTimeout(focusTimer); focusTimer = null; }
+		focusGen++;
+	}
+
+	/* Clears what belonged to one scene. The held peak is the reason: it is a
+	 * target to beat, and one carried over from a different frame or a moved
+	 * lens can never be beaten, so it reads as "you are getting worse". */
+	function resetFocusState() {
+		focusSum = null; focusBest = null; focusErr = null; focusHold = null;
+	}
+
+	async function focusTick() {
+		if (!focus) return;
+		const gen = focusGen;
+		let sum = null, err = null;
+		try {
+			const g = await focus.zones();
+			const zones = g.zones.map((z) => (Array.isArray(z)
+				? { h1: z[0], h2: z[1], v1: z[2], v2: z[3], y: z[4], hlcnt: z[5] }
+				: z));
+			sum = summarise(zones, g.rows, g.cols);
+		} catch (e) {
+			err = e && e.message ? e.message : String(e);
+		}
+		if (gen !== focusGen) return;
+		if (err !== null) {
+			/* Cleared rather than kept: a camera that stopped answering should
+			 * not leave the last good heatmap on screen looking current. */
+			focusSum = null;
+			focusErr = err;
+		} else {
+			focusSum = sum;
+			focusErr = null;
+			if (!focusHold) focusHold = peakHold();
+			focusBest = focusHold.push(sum);
+		}
+		renderFocus();
+		drawFocusMarks();
+	}
+
+	/* One read at a time, the next scheduled only once the last has landed.
+	 * On a fixed interval a camera slower than the interval has two reads in
+	 * flight at once, and the answer that arrives second is not necessarily
+	 * the one measured second -- so the grid would step backwards in time. */
+	function startFocusPoll() {
+		stopFocusPoll();
+		const gen = focusGen;
+		const loop = async () => {
+			await focusTick();
+			if (gen !== focusGen) return;
+			focusTimer = setTimeout(loop, (focus && focus.intervalMs) || 700);
+		};
+		loop();
+	}
+
+	function renderFocus() {
+		if (!focusStatus) return;
+		focusStatus.replaceChildren();
+		if (focusErr) {
+			const box = el('div', 're-notice re-warn', ICON.warn);
+			box.append(Object.assign(el('div'), {
+				textContent: 'The camera stopped answering: ' + focusErr,
+			}));
+			focusStatus.append(box);
+			return;
+		}
+		if (!focusSum) {
+			focusStatus.append(Object.assign(el('p', 're-note'), { textContent: 'Reading…' }));
+			return;
+		}
+		const s = focusSum;
+		const at = s.peakAt
+			? `row ${s.peakAt.row + 1}, column ${s.peakAt.col + 1}`
+			: 'nowhere it could measure';
+		const line = el('p', 're-note');
+		line.dataset.act = 'focus-status';
+		/* The held best, not this instant's -- the number a person turning a
+		 * barrel is trying to beat, and the one still on screen after they
+		 * have swept past it. */
+		line.textContent =
+			`Sharpest at ${at}: ${s.peak === null ? '—' : s.peak}` +
+			(focusBest ? `, best seen ${focusBest.bestOverall}` : '') + '. ' +
+			`${s.measured} of ${s.rows * s.cols} zones measured` +
+			(s.unlit ? `, ${s.unlit} too dark` : '') +
+			(s.clipped ? `, ${s.clipped} blown out` : '') + '.';
+		focusStatus.append(line);
+		if (!s.measured) {
+			const box = el('div', 're-notice re-warn', ICON.warn);
+			box.append(Object.assign(el('div'), {
+				textContent: 'Nothing in this frame is lit well enough to focus by. ' +
+					'More light on the subject, or a longer exposure.',
+			}));
+			focusStatus.append(box);
+		}
+	}
+
+	function buildFocus() {
+		insp.replaceChildren();
+		const panel = el('div', 're-panel');
+		panel.append(Object.assign(el('div', 're-shead'), {
+			innerHTML: '<h3 class="re-cap">Focus</h3><span class="re-rule"></span>',
+		}));
+		panel.append(Object.assign(el('p', 're-note'), {
+			textContent: 'Each square is one of the camera\'s focus zones, brightest where ' +
+				'the picture has the most detail. Turn the lens until the bright patch is ' +
+				'where you want it sharp. The picture behind is the frame you captured — ' +
+				'the squares are live.',
+		}));
+		focusStatus = el('div');
+		panel.append(focusStatus);
+
+		const row = el('div');
+		row.style.cssText = 'display:flex;gap:8px;margin-top:9px;flex-wrap:wrap';
+		const reset = el('button', 're-btn', '');
+		reset.dataset.act = 'focus-reset';
+		reset.textContent = 'Reset the best';
+		/* A held peak from before the lens moved, or from another scene, is a
+		 * target that can never be beaten and reads as "you are getting worse". */
+		reset.addEventListener('click', () => {
+			/* Restarted, not merely cleared and re-read: a read still in flight
+			 * would otherwise land afterwards and push the very peak that was
+			 * just discarded back into a fresh hold. */
+			focusHold = null; focusBest = null;
+			renderFocus();
+			startFocusPoll();
+		});
+		row.append(reset);
+		panel.append(row);
+		insp.append(panel);
+
+		renderFocus();
+		startFocusPoll();
+	}
+
+	/* Zones are drawn as a fraction of the frame, not from pixel coordinates:
+	 * the camera divides the whole frame evenly and reports only the shape, so
+	 * the mapping is arithmetic. A camera that cropped its AF window would need
+	 * the grid's own boundaries, and this would be wrong -- but it would be
+	 * wrong visibly, the grid sitting over part of the picture. */
+	function drawFocusMarks() {
+		focusMarks.replaceChildren();
+		if (mode !== 'focus' || !focusSum || !state.info) return;
+		const W = state.info.width, H = state.info.height;
+		const s = focusSum;
+		const shade = normalise(s, focusBest ? focusBest.bestOverall : null);
+		const NS = 'http://www.w3.org/2000/svg';
+		const svg = document.createElementNS(NS, 'svg');
+		svg.setAttribute('class', 're-chart-svg');
+		for (let i = 0; i < s.fv.length; i++) {
+			const r = (i / s.cols) | 0, c = i % s.cols;
+			const a = stageCoords((c * W) / s.cols, (r * H) / s.rows);
+			const b = stageCoords(((c + 1) * W) / s.cols, ((r + 1) * H) / s.rows);
+			if (!a || !b) continue;
+			const cell = document.createElementNS(NS, 'rect');
+			cell.setAttribute('x', a.x);
+			cell.setAttribute('y', a.y);
+			cell.setAttribute('width', Math.max(0, b.x - a.x));
+			cell.setAttribute('height', Math.max(0, b.y - a.y));
+			/* A zone that measured nothing is outlined and left unfilled. Any
+			 * fill would put it on the same scale as the zones that did, which
+			 * is the one thing the three states must never look like. */
+			if (shade[i] === null) {
+				cell.setAttribute('class', 're-fz re-fz-none');
+			} else {
+				cell.setAttribute('class', 're-fz');
+				cell.setAttribute('fill-opacity', (0.08 + 0.62 * shade[i]).toFixed(3));
+			}
+			svg.append(cell);
+		}
+		if (s.peakAt) {
+			const r = s.peakAt.row, c = s.peakAt.col;
+			const a = stageCoords((c * W) / s.cols, (r * H) / s.rows);
+			const b = stageCoords(((c + 1) * W) / s.cols, ((r + 1) * H) / s.rows);
+			if (a && b) {
+				const pk = document.createElementNS(NS, 'rect');
+				pk.setAttribute('x', a.x);
+				pk.setAttribute('y', a.y);
+				pk.setAttribute('width', Math.max(0, b.x - a.x));
+				pk.setAttribute('height', Math.max(0, b.y - a.y));
+				pk.setAttribute('class', 're-fz-peak');
+				svg.append(pk);
+			}
+		}
+		focusMarks.append(svg);
+	}
+
 	function setMode(m) {
 		mode = m;
 		chart.hidden = m !== 'calibrate';
 		marks.hidden = m !== 'diagnose';
 		plateMarks.hidden = m !== 'plates';
+		focusMarks.hidden = m !== 'focus';
 		if (m !== 'calibrate') abandonHold();
+		/* A poll that outlived its tab would keep a camera answering for a
+		 * panel nobody is looking at. */
+		if (m !== 'focus') { stopFocusPoll(); focusStatus = null; }
 		if (m === 'plates') {
 			buildPlates();
 		} else if (m === 'calibrate') {
 			if (!corners) { corners = defaultCorners(); solved = null; }
 			buildCalibrate();
+		} else if (m === 'focus') {
+			buildFocus();
 		} else if (m === 'diagnose') {
 			buildDiagnose();
 		} else if (state.info) {
@@ -2932,6 +3160,7 @@ export function mountEditor(root, {
 		drawChart();
 		drawMarks();
 		drawPlateMarks();
+		drawFocusMarks();
 	}
 
 	/* ---- inspector ---- */
@@ -3088,6 +3317,11 @@ export function mountEditor(root, {
 			chartTried = false;
 			solved = null;
 			diag = null;
+			// The focus grid belonged to it too. Left alone, the previous
+			// scene's zones would be drawn over this frame -- at this frame's
+			// dimensions, so not even where they were measured -- and shaded
+			// against a peak held from a lens position that no longer exists.
+			resetFocusState();
 			saveBtn.disabled = false;
 			nameEl.textContent = label;
 			sensorChip.hidden = false;
@@ -3182,6 +3416,7 @@ export function mountEditor(root, {
 			// A countdown that outlived its editor would revert a camera whose
 			// operator had closed the page and moved on.
 			stopHold();
+			stopFocusPoll();
 			abandonAll('the editor was closed');
 			worker?.terminate();
 			worker = null;
