@@ -84,6 +84,13 @@ export class Engine {
 		const f32 = new Float32Array(x.memory.buffer);
 		const neutral = Array.from(f32.subarray(x.dng_neutral_ptr() >> 2, (x.dng_neutral_ptr() >> 2) + 3));
 		const forward = Array.from(f32.subarray(x.dng_forward_ptr() >> 2, (x.dng_forward_ptr() >> 2) + 9));
+		// The camera's own characterisation at up to two illuminants, which is
+		// what a colour temperature can be read off a neutral with.
+		const cmAt = x.dng_cm_ptr() >> 2, cmMask = x.dng_cm_mask();
+		const colorMatrices = [0, 1].filter((k) => cmMask & (1 << k)).map((k) => ({
+			matrix: Array.from(f32.subarray(cmAt + k * 9, cmAt + k * 9 + 9)),
+			illuminant: x.dng_illuminant(k),
+		}));
 
 		const m = this.mem, mp = x.dng_model_ptr();
 		let model = '';
@@ -94,7 +101,7 @@ export class Engine {
 			cfa: x.dng_cfa(), cfaName: CFA_NAMES[x.dng_cfa()],
 			black: x.dng_black(), white: x.dng_white(),
 			iso: x.dng_iso(), exposure: x.dng_exposure(),
-			neutral, forward, hasForward: !!x.dng_has_forward(), model,
+			neutral, forward, hasForward: !!x.dng_has_forward(), model, colorMatrices,
 		};
 		this.rgbaPtr = 0;
 		return this.info;
@@ -156,7 +163,7 @@ export class Engine {
 		const x = this.x, i = this.info;
 		const black = opts.black === undefined ? i.black : opts.black;
 		const cfa = opts.cfa === undefined ? i.cfa : opts.cfa;
-		if (!this.samplePtr) this.samplePtr = x.alloc(3 * 4);
+		if (!this.samplePtr) this.samplePtr = x.alloc(4 * 4);
 		const rc = x.sample_patch(Math.round(cx), Math.round(cy), Math.round(radius),
 			black, cfa, this.samplePtr);
 		// Not the generic size error: the only way this fails is a box that
@@ -164,12 +171,12 @@ export class Engine {
 		// and "implausible image dimensions" would send a reader looking at
 		// the file instead of at where they clicked.
 		if (rc !== 0) throw new Error('that spot is outside the frame');
-		const m = new Float32Array(x.memory.buffer, this.samplePtr, 3);
-		const [r, g, b] = [m[0], m[1], m[2]];
+		const m = new Float32Array(x.memory.buffer, this.samplePtr, 4);
+		const [r, g, b, clipped] = [m[0], m[1], m[2], m[3]];
 		// A patch with no green has no scale to divide by, and one at the black
 		// point is noise: both are refused rather than answered with infinity.
 		if (!(g > 0)) throw new Error('that patch is too dark to read a colour from');
-		return { raw: [r, g, b], neutral: [r / g, 1, b / g] };
+		return { raw: [r, g, b], neutral: [r / g, 1, b / g], clipped };
 	}
 
 	/*

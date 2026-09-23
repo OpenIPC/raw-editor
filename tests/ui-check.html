@@ -530,6 +530,17 @@ try {
 		await new Promise((r) => setTimeout(r, 100));
 	const send = host.querySelector('[data-act="apply-to-camera"]');
 	t('measuring solves and offers to write it', !!send);
+	{
+		// What the fit is scored in, said in the unit it was minimised in.
+		const txt = host.querySelector('.re-note')?.parentElement?.textContent || '';
+		const res = [...host.querySelectorAll('p.re-note')].map((p) => p.textContent).join(' | ');
+		t('the result reports ΔE2000', /Mean ΔE2000 \d+\.\d\d, worst \d+\.\d\d/.test(res), res.slice(0, 160) || txt.slice(0, 80));
+		// fixture.dng is off a real camera and carries its ColorMatrix1/2, so
+		// the light can be named.
+		const light = host.querySelector('[data-role="light"]');
+		t('and names the light off the camera\'s own matrices',
+			!!light && /about \d{4,5} K/.test(light.textContent), light?.textContent || '(no light line)');
+	}
 
 	send.click();
 	for (let i = 0; i < 40 && !host.querySelector('[data-act="hold"]'); i++)

@@ -169,6 +169,49 @@ console.log('\npicking a neutral');
 		/outside the frame/.test(refused), refused || '(no error)');
 }
 
+console.log('\nsampling a chart patch: its own pedestals, and not the ADC ceiling');
+{
+	const { makeDng } = await import('./make-dng.mjs');
+	const W = 32, H = 32;
+	const e = await instantiate(readFileSync(new URL('../dist/engine.wasm', import.meta.url)));
+	// Four pedestals, one per 2x2 position, and exactly 100 codes of signal
+	// above each. Read with one black level for the whole frame, the four
+	// planes would come back 100, 90, 80, 70 (and green averaged); read per
+	// position they are all 100.
+	const BL = [200, 210, 220, 230];
+	const px = new Array(W * H);
+	for (let y = 0; y < H; y++)
+		for (let x = 0; x < W; x++) px[y * W + x] = BL[((y & 1) << 1) | (x & 1)] + 100;
+	e.open(makeDng({ width: W, height: H, pixels: px, black: BL, white: 4095 }));
+	const flat = e.samplePatch(16, 16, 6);
+	assert('each CFA position loses its own pedestal, not the first one\'s',
+		flat.raw.every((v) => Math.abs(v - 100) < 1e-3), JSON.stringify(flat.raw));
+	check('and nothing there is clipped', flat.clipped, 0);
+
+	// The same frame with a third of the red sites at the white level: the
+	// mean is of the rest, and the fraction says how much was set aside.
+	const hot = px.slice();
+	let n = 0;
+	for (let y = 0; y < H; y += 2)
+		for (let x = 0; x < W; x += 2) if (((x + y) >> 1) % 3 === 0) { hot[y * W + x] = 4095; n++; }
+	e.open(makeDng({ width: W, height: H, pixels: hot, black: BL, white: 4095 }));
+	const got = e.samplePatch(16, 16, 6);
+	assert('a clipped photosite is left out of the patch\'s mean',
+		Math.abs(got.raw[0] - 100) < 1e-3, 'red ' + got.raw[0].toFixed(2));
+	assert('and counted', got.clipped > 0.05 && got.clipped < 0.15, got.clipped.toFixed(3));
+
+	// The camera's own characterisation reaches the page, to the precision a
+	// rational over 10000 carries.
+	const CM = [0.6, -0.1, -0.05, -0.4, 1.3, 0.1, -0.1, 0.25, 0.55];
+	e.open(makeDng({ width: W, height: H, pixels: px, black: 0, white: 4095,
+		colorMatrices: [{ matrix: CM, illuminant: 17 }, { matrix: CM.map((v) => v * 0.9), illuminant: 21 }] }));
+	const cms = e.info.colorMatrices;
+	assert('ColorMatrix1/2 and their illuminants are read',
+		cms.length === 2 && cms[0].illuminant === 17 && cms[1].illuminant === 21 &&
+		cms[0].matrix.every((v, i) => Math.abs(v - CM[i]) < 1e-4),
+		JSON.stringify(cms.map((c) => c.illuminant)));
+}
+
 console.log('\na blown highlight develops to white, not to the white balance gains');
 /*
  * A neutral that has clipped is still a neutral. The sensor stops counting at
@@ -492,28 +535,89 @@ console.log('\ncalibration recovers a matrix it was not given');
 		Math.abs(Math.max(...wp.map(Math.abs)) - 1) < 1e-9,
 		'peak ' + Math.max(...wp.map(Math.abs)).toFixed(6));
 
-	// The white balance is not fitted; it is read off the neutral row, so it is
-	// an independent check on the same data. Close but not equal on purpose:
-	// the chart's neutral patches are not exactly neutral -- white is published
-	// as 243,243,242 and the 5 step as 122,122,121 -- so their mean ratio
-	// cannot land exactly on the response to D50 white, and a tolerance that
-	// demanded it would be testing the chart rather than the code.
+	// The white balance is read off the neutral row, with each grey's own
+	// published tint taken out -- the chart's white is b* +2.9, and a balance
+	// that made it grey used to land 0.7% off the planted gains. Now it has to
+	// land on the planted response to a true white.
 	const wb = apply3(PLANTED, [0.9642, 1.0, 0.8249]);
-	assert('and the white balance matches the planted response to D50 white',
-		Math.abs(got.neutral[0] - wb[0] / wb[1]) < 5e-3 &&
-		Math.abs(got.neutral[2] - wb[2] / wb[1]) < 5e-3,
-		`${got.neutral.map((v) => v.toFixed(4))} vs ${[wb[0] / wb[1], 1, wb[2] / wb[1]].map((v) => v.toFixed(4))}`);
+	assert('and the white balance is the planted response to a true white',
+		Math.abs(got.neutral[0] - wb[0] / wb[1]) < 1e-6 &&
+		Math.abs(got.neutral[2] - wb[2] / wb[1]) < 1e-6,
+		`${got.neutral.map((v) => v.toFixed(6))} vs ${[wb[0] / wb[1], 1, wb[2] / wb[1]].map((v) => v.toFixed(6))}`);
 
 	assert('the live matrix keeps a neutral neutral', [0, 1, 2].every((r) => {
 		const sum = got.ccm[r * 3] + got.ccm[r * 3 + 1] + got.ccm[r * 3 + 2];
 		return Math.abs(sum - 1) < 1e-9;
 	}), JSON.stringify(got.ccm.map((v) => +v.toFixed(4))));
 
-	// Noiseless input through an exactly-recovered matrix: the residual is the
-	// chart's own non-linearity against a 3x3, not the solver's error.
-	assert('and the fit it reports is the fit it achieved',
-		got.fit.meanDeltaE < 3 && got.fit.maxDeltaE < 12,
-		`mean dE ${got.fit.meanDeltaE.toFixed(2)}, max ${got.fit.maxDeltaE.toFixed(2)}`);
+	// A camera that IS a 3x3 away from the reference, noiselessly, has an exact
+	// answer. The previous solver missed it -- 1.16 mean and 2.51 worst ΔE2000
+	// on this same plant -- and not because of how it fitted: its balance was
+	// read off greys that are not grey, and its reference was the chart's
+	// 8-bit, gamut-clipped sRGB. This one scores 0.008 and 0.021.
+	assert('and a noiseless chart fits to nothing',
+		got.fit.meanDeltaE < 0.05 && got.fit.maxDeltaE < 0.15,
+		`mean ΔE2000 ${got.fit.meanDeltaE.toFixed(3)}, max ${got.fit.maxDeltaE.toFixed(3)}`);
+
+	// What the live matrix undoes is the planted camera, balanced: identity
+	// through both, up to the one exposure scale.
+	const XYZ50_TO_SRGB = [3.1338561, -1.6168667, -0.4906146, -0.9787684, 1.9161415,
+		0.0334540, 0.0719453, -0.2289914, 1.4052427];
+	const bal = patches.map((p) => [p[0] / got.neutral[0], p[1], p[2] / got.neutral[2]]);
+	const worstRel = Math.max(...bal.map((b, i) => {
+		const out = apply3(got.ccm, b).map((v) => v * got.fit.exposure);
+		const want = apply3(XYZ50_TO_SRGB, CHART_XYZ50[i]);
+		return Math.max(...out.map((v, c) => Math.abs(v - want[c])));
+	}));
+	assert('so the live matrix maps every balanced patch onto its reference',
+		worstRel < 2e-3, 'worst linear error ' + worstRel.toExponential(2));
+
+	// Where the fit itself matters is a camera that is NOT a 3x3 away: here
+	// each patch is off by up to 3% per channel. Held at rows of one while it
+	// minimises ΔE2000, the matrix must do at least as well on the mean as
+	// fitting in linear RGB and normalising afterwards -- 0.926 against 0.985
+	// on this seed. It minimises the squares, so its worst patch may be the
+	// worse of the two (2.82 against 2.62 here), which is why only the mean is
+	// asserted.
+	{
+		const { scoreCcm, inv3 } = await import('../src/calibrate.js');
+		let seed = 7;
+		const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff - 0.5; };
+		const noisy = CHART_XYZ50.map((x) => apply3(PLANTED, x).map((v) => v * (1 + 0.06 * rnd())));
+		const fitN = solveFromPatches(noisy);
+		const balN = noisy.map((p) => [p[0] / fitN.neutral[0], p[1], p[2] / fitN.neutral[2]]);
+		const S = [3.1338561, -1.6168667, -0.4906146, -0.9787684, 1.9161415, 0.0334540,
+			0.0719453, -0.2289914, 1.4052427];
+		const tg = CHART_XYZ50.map((x) => apply3(S, x));
+		const YXt = new Array(9).fill(0), XXt = new Array(9).fill(0);
+		for (let n = 0; n < 24; n++) for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
+			YXt[r * 3 + c] += tg[n][r] * balN[n][c]; XXt[r * 3 + c] += balN[n][r] * balN[n][c];
+		}
+		const I = inv3(XXt), L = [];
+		for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
+			let v = 0;
+			for (let k = 0; k < 3; k++) v += YXt[r * 3 + k] * I[k * 3 + c];
+			L.push(v);
+		}
+		for (let r = 0; r < 3; r++) {
+			const sum = L[r * 3] + L[r * 3 + 1] + L[r * 3 + 2];
+			for (let c = 0; c < 3; c++) L[r * 3 + c] /= sum;
+		}
+		const other = scoreCcm(L, balN);
+		assert('on a camera that is not a 3x3, the ΔE2000 fit beats fit-then-normalise on the mean',
+			fitN.fit.meanDeltaE < other.meanDeltaE,
+			`${fitN.fit.meanDeltaE.toFixed(3)} vs ${other.meanDeltaE.toFixed(3)}`);
+	}
+
+	// A white that clipped is a measurement of the ADC. Clip it hard in one
+	// channel and say so: the balance must not move.
+	const clippedPatches = patches.map((p, i) => (i === 18 ? [p[0], p[1], p[1] * 0.2] : p));
+	const clipFrac = patches.map((_, i) => (i === 18 ? 0.4 : 0));
+	const withClip = solveFromPatches(clippedPatches, { clipped: clipFrac });
+	assert('a clipped white is left out of the balance, not averaged in',
+		Math.abs(withClip.neutral[2] - got.neutral[2]) < 1e-3,
+		`${withClip.neutral[2].toFixed(4)} vs ${got.neutral[2].toFixed(4)}`);
+	check('and out of the fit', withClip.fit.patches, 23);
 
 	let refused = '';
 	try { solveFromPatches(patches.slice(0, 23)); } catch (e) { refused = e.message; }
@@ -525,6 +629,59 @@ console.log('\ncalibration recovers a matrix it was not given');
 		/three finite numbers/.test(refused), refused);
 
 	check('the chart is 24 patches', CHART_SRGB.length, 24);
+
+	// CIEDE2000 against the 34 pairs Sharma, Wu and Dalal published with their
+	// implementation notes, to their four decimals. Pairs 7-16 are the ones
+	// that catch the hue-mean and zero-chroma special cases.
+	const { deltaE2000, cctFromXy, illuminantFromNeutral } = await import('../src/calibrate.js');
+	const SHARMA = [
+		[50, 2.6772, -79.7751, 50, 0, -82.7485, 2.0425], [50, 3.1571, -77.2803, 50, 0, -82.7485, 2.8615],
+		[50, 2.8361, -74.02, 50, 0, -82.7485, 3.4412], [50, -1.3802, -84.2814, 50, 0, -82.7485, 1],
+		[50, -1.1848, -84.8006, 50, 0, -82.7485, 1], [50, -0.9009, -85.5211, 50, 0, -82.7485, 1],
+		[50, 0, 0, 50, -1, 2, 2.3669], [50, -1, 2, 50, 0, 0, 2.3669],
+		[50, 2.49, -0.001, 50, -2.49, 0.0009, 7.1792], [50, 2.49, -0.001, 50, -2.49, 0.001, 7.1792],
+		[50, 2.49, -0.001, 50, -2.49, 0.0011, 7.2195], [50, 2.49, -0.001, 50, -2.49, 0.0012, 7.2195],
+		[50, -0.001, 2.49, 50, 0.0009, -2.49, 4.8045], [50, -0.001, 2.49, 50, 0.001, -2.49, 4.8045],
+		[50, -0.001, 2.49, 50, 0.0011, -2.49, 4.7461], [50, 2.5, 0, 50, 0, -2.5, 4.3065],
+		[50, 2.5, 0, 73, 25, -18, 27.1492], [50, 2.5, 0, 61, -5, 29, 22.8977],
+		[50, 2.5, 0, 56, -27, -3, 31.903], [50, 2.5, 0, 58, 24, 15, 19.4535],
+		[50, 2.5, 0, 50, 3.1736, 0.5854, 1], [50, 2.5, 0, 50, 3.2972, 0, 1],
+		[50, 2.5, 0, 50, 1.8634, 0.5757, 1], [50, 2.5, 0, 50, 3.2592, 0.335, 1],
+		[60.2574, -34.0099, 36.2677, 60.4626, -34.1751, 39.4387, 1.2644],
+		[63.0109, -31.0961, -5.8663, 62.8187, -29.7946, -4.0864, 1.263],
+		[61.2901, 3.7196, -5.3901, 61.4292, 2.248, -4.962, 1.8731],
+		[35.0831, -44.1164, 3.7933, 35.0232, -40.0716, 1.5901, 1.8645],
+		[22.7233, 20.0904, -46.694, 23.0331, 14.973, -42.5619, 2.0373],
+		[36.4612, 47.858, 18.3852, 36.2715, 50.5065, 21.2231, 1.4146],
+		[90.8027, -2.0831, 1.441, 91.1528, -1.6435, 0.0447, 1.4441],
+		[90.9257, -0.5406, -0.9208, 88.6381, -0.8985, -0.7239, 1.5381],
+		[6.7747, -0.2908, -2.4247, 5.8714, -0.0985, -2.2286, 0.6377],
+		[2.0776, 0.0795, -1.135, 0.9033, -0.0636, -0.5514, 0.9082],
+	];
+	const sharmaWorst = Math.max(...SHARMA.map((r) =>
+		Math.abs(deltaE2000(r.slice(0, 3), r.slice(3, 6)) - r[6])));
+	assert('ΔE2000 reproduces all 34 of Sharma\'s test pairs',
+		sharmaWorst < 1e-4, 'worst ' + sharmaWorst.toExponential(2));
+
+	// Named illuminants, whose CCTs are known: D65 6504 K, D50 5003 K,
+	// illuminant A 2856 K. D65 and D50 sit above the locus, A on it.
+	const d65 = cctFromXy(0.31271, 0.32902), d50 = cctFromXy(0.34567, 0.35850);
+	const illA = cctFromXy(0.44757, 0.40745);
+	assert('CCT names D65, D50 and A to within 0.5%',
+		Math.abs(d65.cct / 6504 - 1) < 5e-3 && Math.abs(d50.cct / 5003 - 1) < 5e-3 &&
+		Math.abs(illA.cct / 2856 - 1) < 5e-3,
+		`${d65.cct.toFixed(0)} / ${d50.cct.toFixed(0)} / ${illA.cct.toFixed(0)}`);
+	assert('and says which side of the locus', d65.duv > 0.002 && Math.abs(illA.duv) < 1e-3,
+		`Duv ${d65.duv.toFixed(4)} / ${illA.duv.toFixed(4)}`);
+
+	// The DNG procedure, with a camera whose two matrices are the same one:
+	// the light a neutral names is then that matrix's inverse, directly.
+	const neutralD65 = apply3(PLANTED, [0.95047, 1, 1.08883]);
+	const named = illuminantFromNeutral(neutralD65,
+		[{ matrix: PLANTED, illuminant: 17 }, { matrix: PLANTED, illuminant: 21 }]);
+	assert('a neutral seen under D65 is named D65 by the camera\'s own matrices',
+		named && Math.abs(named.cct / 6504 - 1) < 5e-3,
+		named ? named.cct.toFixed(0) + ' K' : 'nothing');
 
 	// Corners on an axis-aligned rectangle: the grid is then arithmetic anyone
 	// can check by hand.

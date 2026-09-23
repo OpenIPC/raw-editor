@@ -37,7 +37,7 @@ onmessage = async (ev) => {
 			postMessage({ id, type: 'opened', info, probe });
 		} else if (type === 'sample') {
 			const got = engine.samplePatch(payload.x, payload.y, payload.radius, payload);
-			postMessage({ id, type: 'sampled', raw: got.raw, neutral: got.neutral });
+			postMessage({ id, type: 'sampled', raw: got.raw, neutral: got.neutral, clipped: got.clipped });
 		} else if (type === 'detect') {
 			postMessage({ id, type: 'detected', chart: engine.detectChart(payload) });
 		} else if (type === 'diagnose') {

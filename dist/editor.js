@@ -1796,15 +1796,19 @@ export function mountEditor(root, {
 	async function measureChart() {
 		if (!corners) return;
 		const cells = patchCentres(corners);
-		const patches = [];
+		const patches = [], clipped = [];
 		for (const c of cells) {
 			const got = await call('sample', {
 				x: c.x, y: c.y, radius: Math.max(4, Math.round(c.radius)),
 				black: state.black, cfa: state.cfa,
 			});
 			patches.push(got.raw);
+			clipped.push(got.clipped || 0);
 		}
-		return solveFromPatches(patches);
+		return solveFromPatches(patches, {
+			clipped,
+			colorMatrices: state.info && state.info.colorMatrices,
+		});
 	}
 
 	/* The panel, and the way back.
@@ -1949,10 +1953,26 @@ export function mountEditor(root, {
 		}));
 		const fit = el('p', 're-note');
 		fit.style.margin = '0 0 6px';
-		fit.textContent = `Mean ΔE ${solved.fit.meanDeltaE.toFixed(1)}, worst ` +
-			`${solved.fit.maxDeltaE.toFixed(1)}. Under 3 is a good fit for a 3×3; ` +
-			'a spiky light — most LEDs — will not do better, whatever the chart.';
+		// ΔE2000, which is what the fit minimises; ΔE76 alongside because it
+		// is the number most published figures quote.
+		const left = 24 - solved.fit.patches;
+		fit.textContent = `Mean ΔE2000 ${solved.fit.meanDeltaE.toFixed(2)}, worst ` +
+			`${solved.fit.maxDeltaE.toFixed(2)} (ΔE76 mean ${solved.fit.meanDeltaE76.toFixed(1)}). ` +
+			'Under 2 is a good fit for a 3×3; a spiky light — most LEDs — will not do ' +
+			'better, whatever the chart.' +
+			(left ? ` ${left} patch${left > 1 ? 'es were' : ' was'} left out as clipped or unlit.` : '');
 		out.append(fit);
+		if (solved.light) {
+			const lt = el('p', 're-note');
+			lt.style.margin = '0 0 6px';
+			lt.dataset.role = 'light';
+			const duv = solved.light.duv;
+			lt.textContent = `Light: about ${Math.round(solved.light.cct / 10) * 10} K` +
+				(duv === null || duv === undefined ? '' : duv > 0.006 ? ', greenish — well off daylight' :
+					duv < -0.006 ? ', magenta — well off daylight' : '') +
+				', read off the camera\'s own colour matrices.';
+			out.append(lt);
+		}
 
 		out.append(Object.assign(el('h3', 're-cap'), { textContent: 'Live matrix, camera to display' }));
 		out.append(matrixTable(solved.ccm));
