@@ -2941,36 +2941,67 @@ export function mountEditor(root, {
 	 */
 	let focusSum = null, focusBest = null, focusErr = null;
 	let focusHold = null, focusTimer = null, focusStatus = null;
+	/* Bumped whenever polling stops or restarts. A read already in flight
+	 * carries the number it started under, and an answer whose number has
+	 * moved on is dropped: it was measured of a poll that no longer exists --
+	 * a closed tab, a cleared peak, another frame -- and writing it back would
+	 * resurrect exactly the state that was just discarded. */
+	let focusGen = 0;
 
 	function stopFocusPoll() {
-		if (focusTimer) { clearInterval(focusTimer); focusTimer = null; }
+		if (focusTimer) { clearTimeout(focusTimer); focusTimer = null; }
+		focusGen++;
+	}
+
+	/* Clears what belonged to one scene. The held peak is the reason: it is a
+	 * target to beat, and one carried over from a different frame or a moved
+	 * lens can never be beaten, so it reads as "you are getting worse". */
+	function resetFocusState() {
+		focusSum = null; focusBest = null; focusErr = null; focusHold = null;
 	}
 
 	async function focusTick() {
 		if (!focus) return;
+		const gen = focusGen;
+		let sum = null, err = null;
 		try {
 			const g = await focus.zones();
 			const zones = g.zones.map((z) => (Array.isArray(z)
 				? { h1: z[0], h2: z[1], v1: z[2], v2: z[3], y: z[4], hlcnt: z[5] }
 				: z));
-			focusSum = summarise(zones, g.rows, g.cols);
-			if (!focusHold) focusHold = peakHold();
-			focusBest = focusHold.push(focusSum);
-			focusErr = null;
+			sum = summarise(zones, g.rows, g.cols);
 		} catch (e) {
-			/* Kept rather than cleared: a camera that stopped answering should
+			err = e && e.message ? e.message : String(e);
+		}
+		if (gen !== focusGen) return;
+		if (err !== null) {
+			/* Cleared rather than kept: a camera that stopped answering should
 			 * not leave the last good heatmap on screen looking current. */
 			focusSum = null;
-			focusErr = e && e.message ? e.message : String(e);
+			focusErr = err;
+		} else {
+			focusSum = sum;
+			focusErr = null;
+			if (!focusHold) focusHold = peakHold();
+			focusBest = focusHold.push(sum);
 		}
 		renderFocus();
 		drawFocusMarks();
 	}
 
+	/* One read at a time, the next scheduled only once the last has landed.
+	 * On a fixed interval a camera slower than the interval has two reads in
+	 * flight at once, and the answer that arrives second is not necessarily
+	 * the one measured second -- so the grid would step backwards in time. */
 	function startFocusPoll() {
 		stopFocusPoll();
-		focusTick();
-		focusTimer = setInterval(focusTick, (focus && focus.intervalMs) || 700);
+		const gen = focusGen;
+		const loop = async () => {
+			await focusTick();
+			if (gen !== focusGen) return;
+			focusTimer = setTimeout(loop, (focus && focus.intervalMs) || 700);
+		};
+		loop();
 	}
 
 	function renderFocus() {
@@ -3037,7 +3068,12 @@ export function mountEditor(root, {
 		/* A held peak from before the lens moved, or from another scene, is a
 		 * target that can never be beaten and reads as "you are getting worse". */
 		reset.addEventListener('click', () => {
-			focusHold = null; focusBest = null; focusTick();
+			/* Restarted, not merely cleared and re-read: a read still in flight
+			 * would otherwise land afterwards and push the very peak that was
+			 * just discarded back into a fresh hold. */
+			focusHold = null; focusBest = null;
+			renderFocus();
+			startFocusPoll();
 		});
 		row.append(reset);
 		panel.append(row);
@@ -3281,6 +3317,11 @@ export function mountEditor(root, {
 			chartTried = false;
 			solved = null;
 			diag = null;
+			// The focus grid belonged to it too. Left alone, the previous
+			// scene's zones would be drawn over this frame -- at this frame's
+			// dimensions, so not even where they were measured -- and shaded
+			// against a peak held from a lens position that no longer exists.
+			resetFocusState();
 			saveBtn.disabled = false;
 			nameEl.textContent = label;
 			sensorChip.hidden = false;

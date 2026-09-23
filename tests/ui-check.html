@@ -1530,6 +1530,142 @@ try {
 	t('the focus heatmap is handled', false, e.message);
 }
 
+/* The poll reads a camera over a network, so every one of these is a question
+ * about time: two reads in flight at once, an answer that outlives the thing
+ * that asked for it, and a frame replaced under a grid measured of another. */
+try {
+	const GZ = (h2) => ({ rows: 1, cols: 2,
+		zones: [[0, h2, 0, h2 / 10, 1000, 0], [0, 10, 0, 1, 1000, 0]] });
+	const HIGH = 773, MED = 429, LOW = 85;   // blend() of h2 = 900 / 500 / 100
+	const best = (el) => {
+		const s = el.querySelector('[data-act="focus-status"]');
+		const m = s && s.textContent.match(/best seen (\d+)/);
+		return m ? +m[1] : null;
+	};
+	const toFocus = (el) => [...el.querySelectorAll('.re-seg button')]
+		.find((b) => b.textContent.trim() === 'Focus').click();
+	const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+	// A camera slower than the polling interval. On a fixed interval the reads
+	// pile up, and the answer that arrives second is not the one measured
+	// second -- so the grid steps backwards in time.
+	{
+		let live = 0, most = 0;
+		const host = document.createElement('div');
+		document.body.append(host);
+		const ed = mountEditor(host, {
+			base: '../dist/', styles: false, autoCapture: false,
+			focus: { intervalMs: 10, zones: () => {
+				live++; most = Math.max(most, live);
+				return new Promise((r) => setTimeout(() => { live--; r(GZ(500)); }, 70));
+			} },
+		});
+		toFocus(host);
+		await pause(300);
+		t('a slow camera is never asked twice at once', most === 1, `${most} in flight`);
+		ed.destroy();
+	}
+
+	// An answer can outlive what asked for it: the tab it was read for, or the
+	// peak the operator cleared. Both would put a discarded measurement back.
+	{
+		const waiting = [];
+		const host = document.createElement('div');
+		document.body.append(host);
+		const ed = mountEditor(host, {
+			base: '../dist/', styles: false, autoCapture: false,
+			focus: { intervalMs: 5, zones: () => new Promise((r) => waiting.push(r)) },
+		});
+		toFocus(host);
+		await pause(60);
+		waiting.shift()(GZ(500));                       // MED, the honest reading
+		await pause(60);
+		t('the held best starts at the reading taken', best(host) === MED, `best=${best(host)}`);
+
+		// Leave with a read outstanding, answer it, come back.
+		[...host.querySelectorAll('.re-seg button')]
+			.find((b) => b.textContent.trim() === 'Develop').click();
+		await pause(30);
+		const orphan = waiting.shift();
+		if (orphan) orphan(GZ(900));                    // HIGH, for a tab that is gone
+		await pause(30);
+		toFocus(host);
+		await pause(30);
+		waiting.shift()(GZ(100));                       // LOW, this tab's own
+		await pause(60);
+		t('an answer read for a closed tab does not enter the peak history',
+			best(host) === MED, `best=${best(host)} (HIGH would be ${HIGH})`);
+
+		// Clear the best with a read outstanding, then answer it.
+		const reset = host.querySelector('[data-act="focus-reset"]');
+		const stale = waiting.shift();
+		reset.click();
+		await pause(20);
+		if (stale) stale(GZ(900));                      // HIGH, from before the clear
+		await pause(30);
+		waiting.shift()(GZ(100));                       // LOW, after it
+		await pause(60);
+		t('nor does one read before the best was cleared',
+			best(host) === LOW, `best=${best(host)} (HIGH would be ${HIGH})`);
+		ed.destroy();
+	}
+
+	// A shape that is not a shape. `rows * cols === zones.length` holds, so the
+	// count check passes and the frame would be divided into no cells at all.
+	{
+		const host = document.createElement('div');
+		document.body.append(host);
+		const ed = mountEditor(host, {
+			base: '../dist/', styles: false, autoCapture: false,
+			focus: { intervalMs: 20, zones: () => Promise.resolve({ rows: 0, cols: 0, zones: [] }) },
+		});
+		toFocus(host);
+		await pause(120);
+		const warn = host.querySelector('.re-insp .re-notice.re-warn');
+		t('a grid with no shape is reported, not drawn',
+			!!warn && /stopped answering/.test(warn.textContent),
+			warn ? warn.textContent.slice(0, 60) : '(no notice)');
+		t('and no cells are drawn for it', host.querySelectorAll('.re-fz, .re-fz-none').length === 0);
+		ed.destroy();
+	}
+
+	// Opening another frame is opening another scene: the zones were measured
+	// of the old one, at its dimensions, against a peak held from a lens
+	// position that no longer exists.
+	{
+		let n = 0;
+		const host = document.createElement('div');
+		document.body.append(host);
+		const ed = mountEditor(host, {
+			base: '../dist/', styles: false, autoCapture: false,
+			focus: { intervalMs: 20, zones: () => (++n === 1
+				? Promise.resolve(GZ(900)) : new Promise(() => {})) },
+		});
+		const bytes = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
+		await ed.open(bytes, 'fixture.dng');
+		await pause(300);
+		toFocus(host);
+		await pause(150);
+		t('a reading is on screen before the frame changes',
+			best(host) === HIGH, `best=${best(host)}`);
+		t('and its cells are drawn', host.querySelectorAll('.re-fz, .re-fz-none').length === 2);
+
+		await ed.open(bytes, 'again.dng');
+		await pause(150);
+		const notes = [...host.querySelectorAll('.re-insp .re-note')]
+			.map((n) => n.textContent);
+		t('a new frame starts from nothing rather than the last scene',
+			best(host) === null && notes.some((s) => /Reading/.test(s)),
+			`best=${best(host)} notes=${notes.length}`);
+		t('and the previous scene’s cells are gone',
+			host.querySelectorAll('.re-fz, .re-fz-none').length === 0,
+			`${host.querySelectorAll('.re-fz, .re-fz-none').length} left`);
+		ed.destroy();
+	}
+} catch (e) {
+	t('the focus timing paths are handled', false, e.message);
+}
+
 // Reported over HTTP rather than through the title: the harness then runs on
 // a real clock. A virtual-time budget fires every timer as fast as it can,
 // which loses the race against the module's own fetches every time.

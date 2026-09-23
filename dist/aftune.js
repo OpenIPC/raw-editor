@@ -64,6 +64,13 @@ export function zoneState(z, { yFloor = 0, hlCeil = 0 } = {}) {
  * usable reading rather than being declared entirely unlit.
  */
 export function summarise(zones, rows, cols, opts = {}) {
+	/* The shape, before the count. `rows * cols === zones.length` alone admits
+	 * 0 x 0, 1.5 x 2 and -1 x -3, and every one of those divides a frame into
+	 * cells that are empty, fractional or off-screen -- a grid drawn wrong
+	 * rather than a grid refused. */
+	for (const [name, v] of [['rows', rows], ['cols', cols]])
+		if (!Number.isSafeInteger(v) || v <= 0)
+			throw new Error(`${name} is not a positive whole number: ${v}`);
 	if (!Array.isArray(zones) || zones.length !== rows * cols)
 		throw new Error(`expected ${rows * cols} zones, got ${zones && zones.length}`);
 	/* Refuse a grid that is not numbers rather than drawing one. Everything

@@ -1141,6 +1141,15 @@ console.log('\nfocus statistics: the grid a person focuses a lens by');
 	try { A.summarise(grid(2, 3, () => zone()), 3, 3); } catch { threw = true; }
 	assert('a grid that disagrees with its shape is refused', threw);
 
+	// And the count alone does not establish the shape: each of these satisfies
+	// `rows * cols === zones.length` and then divides the frame into cells that
+	// are empty, fractional or off-screen.
+	for (const [r, c, n] of [[0, 0, 0], [1.5, 2, 3], [-1, -3, 3], [NaN, 1, 0]]) {
+		let refused = false;
+		try { A.summarise(grid(1, n, () => zone()), r, c); } catch { refused = true; }
+		assert(`a ${r} x ${c} grid is refused`, refused);
+	}
+
 	// Dark, blown and simply-soft all report a small focus value, and drawing
 	// them alike tells the operator to chase focus that was never the problem.
 	{
