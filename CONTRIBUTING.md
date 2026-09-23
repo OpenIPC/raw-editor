@@ -20,7 +20,7 @@ CI runs five steps and you can run all of them locally in about a minute:
 ```sh
 for f in src/*.js tools/*.mjs; do node --check "$f"; done
 ./tools/build.sh
-for f in engine.js worker.js editor.js calibrate.js editor.css demo.html test.html; do
+for f in engine.js worker.js editor.js calibrate.js iqprofile.js editor.css demo.html test.html; do
   diff -q "src/$f" "dist/$f" || echo "OUT OF SYNC: $f"
 done
 node tools/smoke.mjs

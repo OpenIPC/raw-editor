@@ -778,6 +778,115 @@ console.log('\na chart on a textured wall is still a chart');
 	assert('where it actually is', err < 6, err.toFixed(1) + ' px from the hand-placed corners');
 }
 
+console.log('\nthe camera profile: its AWB curve, its matrices, and a new set built from lights');
+{
+	const P = await import('../src/iqprofile.js');
+	// imx335's own calibration, as its sensor driver hands it to the ISP and as
+	// a Hi3516EV300 exported it back.
+	const SWB = [0x1E3, 0x100, 0x100, 0x1D1];
+	const CURVE = [-0x12, 0x10B, -0x7, 0x2711F, 0x80, -0x1A5C1];
+	// What that chip's CalGainByTemp answered at shift 0 (CT, R, G, B), read
+	// over the vendor tuning protocol. The low end is the gain normalisation
+	// (R held at 256, G raised); the high end is the library's hard clamp.
+	const ORACLE = [[1500, 256, 415, 1024], [2000, 256, 294, 1024], [2250, 256, 261, 989],
+		[2500, 277, 256, 859], [3000, 330, 256, 705], [4000, 417, 256, 543],
+		[4750, 472, 256, 476], [5000, 487, 256, 460], [6500, 568, 256, 387],
+		[8000, 630, 256, 347], [9000, 640, 256, 325], [12000, 640, 256, 291],
+		[15000, 640, 256, 269]];
+	const miss = ORACLE.filter(([ct, R, G, B]) => {
+		const g = P.gainsForCt(ct, SWB, CURVE);
+		return g[0] !== R || g[1] !== G || g[3] !== B;
+	});
+	assert('the AWB curve answers exactly what the chip answered, clamps and all',
+		!miss.length, miss.map((m) => m[0] + ' K').join(', ') || 'all 13');
+	assert('and the reference temperature is where it passes through the static WB',
+		Math.abs(P.refCtOf(CURVE) - 4917) < 1, P.refCtOf(CURVE).toFixed(1));
+
+	// The sign-magnitude matrix encoding, including a row whose rounding would
+	// leave it off 256 and a zero that must not come out as negative zero.
+	check('sign-magnitude: -168/256 is 32936', P.encodeCcmValue(-168 / 256), 32936);
+	check('and back', P.decodeCcmValue(32936), -168 / 256);
+	check('a negative zero is written as plain zero', P.encodeCcmValue(-0.0001), 0);
+	// Row 0 rounds to 333 - 38 - 38 = 257 if each value is rounded alone.
+	const enc = P.encodeCcm([1.3, -0.15, -0.15, -0.3011, 1.3907, -0.0896,
+		-0.0042, -0.7703, 1.7745]);
+	const rowSums = [0, 1, 2].map((r) => enc.slice(r * 3, r * 3 + 3)
+		.reduce((a, v) => a + (v & 0x8000 ? -(v & 0x7fff) : v), 0));
+	check('every encoded row sums to exactly 256', rowSums, [256, 256, 256]);
+
+	// Reading a profile the camera exported: the whole colour half comes back.
+	const exported = [
+		'[static_awb]', 'AutoStaticWb              = "483, 256, 256, 465"',
+		'AutoCurvePara             = "-18, 267, -7, 160031, 128, -107969"',
+		'[static_ccm]', 'TotalNum                  = "3"',
+		'AutoColorTemp             = "4900, 3850, 2650, 2100, 1600, 1400, 1000"',
+		'AutoCCMTable_0            = "452, 32952, 32780, 32845, 356, 32791, 32769, 32965, 454"',
+		'AutoCCMTable_1            = "448, 32939, 32789, 32833, 356, 32803, 32769, 32986, 475"',
+		'AutoCCMTable_2            = "408, 32890, 32798, 32854, 381, 32807, 32769, 33112, 600"',
+	].join('\n');
+	const v = P.readColour(P.parseIni(exported));
+	assert('an exported profile reads back as the camera\'s calibration',
+		v.staticWb.join() === SWB.join() && v.curve.join() === CURVE.join() &&
+		v.ccm.length === 3 && v.ccm[2].ct === 2650 && Math.abs(v.ccm[0].matrix[1] + 184 / 256) < 1e-9,
+		JSON.stringify({ wb: v.staticWb, tables: v.ccm && v.ccm.map((t) => t.ct) }));
+
+	// A curve fitted to lights measured on a camera that is NOT the one whose
+	// curve it starts from. The lights here are an imx307's (its shipped
+	// profile's curve), the starting point imx335's. The chip's own integer
+	// arithmetic is itself up to 3.7 LSB off the continuous curve, so a fit is
+	// held to 6 LSB -- two of those steps -- at the lights and across 2500 to
+	// 8000 K.
+	const TRUE = { staticWb: [451, 256, 256, 468], curve: [-37, 293, 0, 179537, 128, -123691] };
+	const seen = (ct) => {
+		const [p1, p2, q1, a1, , c1] = TRUE.curve;
+		const x = 256 * (256e6 / ct - c1) / a1, X = x * x;
+		const Y = (p1 * X + p2 * 65536) / (q1 + X / 256);
+		return { ct, r: 2 ** 24 / X * TRUE.staticWb[0] / 65536, b: 2 ** 24 / Y * TRUE.staticWb[3] / 65536 };
+	};
+	for (const cts of [[6500, 2800], [7500, 6500, 5000, 4000, 3000, 2600]]) {
+		const f = P.fitAwbCurve(cts.map(seen), { staticWb: SWB, curve: CURVE });
+		const atLights = Math.max(...f.at.map((q) => Math.max(Math.abs(q.r - q.wantR),
+			Math.abs(q.b - q.wantB)) * 256));
+		let across = 0;
+		for (let ct = 2500; ct <= 8000; ct += 250) {
+			const a = P.gainsForCt(ct, f.staticWb, f.curve, { normalise: false });
+			const b = P.gainsForCt(ct, TRUE.staticWb, TRUE.curve, { normalise: false });
+			across = Math.max(across, Math.abs(a[0] - b[0]), Math.abs(a[3] - b[3]));
+		}
+		assert(`${cts.length} lights fit the other camera's curve`,
+			atLights <= 6 && across <= 6 && f.curve[4] === 128 &&
+			f.curve[0] + f.curve[1] === f.curve[2] + 256,
+			`${atLights.toFixed(1)} LSB at the lights, ${across} across; ${f.curve}`);
+	}
+	// And a camera measured against its own curve gets its own curve back.
+	const own = (ct) => {
+		const [p1, p2, q1, a1, , c1] = CURVE;
+		const x = 256 * (256e6 / ct - c1) / a1, X = x * x;
+		const Y = (p1 * X + p2 * 65536) / (q1 + X / 256);
+		return { ct, r: 2 ** 24 / X * SWB[0] / 65536, b: 2 ** 24 / Y * SWB[3] / 65536 };
+	};
+	const back = P.fitAwbCurve([6500, 2800].map(own), { staticWb: SWB, curve: CURVE });
+	check('two lights on the camera\'s own curve give that curve back',
+		[back.staticWb, back.curve].join('|'), [SWB, CURVE].join('|'));
+
+	// The profile: measured matrices, the vendor's where nothing was measured,
+	// never two within 600 K of each other, hottest first.
+	const tables = P.mergeCcmTables([{ ct: 6400, matrix: [1, 0, 0, 0, 1, 0, 0, 0, 1] },
+		{ ct: 2750, matrix: [1, 0, 0, 0, 1, 0, 0, 0, 1] }], v.ccm);
+	check('measured lights and the vendor\'s in between',
+		tables.map((t) => `${t.ct}:${t.source}`).join(' '),
+		'6400:measured 4900:vendor 3850:vendor 2750:measured');
+	const frag = P.colourFragment({ staticWb: SWB, curve: CURVE, tables });
+	const again = P.readColour(P.parseIni(frag));
+	assert('and the fragment it writes reads back as what went in',
+		again.ccm.length === 4 && again.ccm[1].ct === 4900 && again.curve.join() === CURVE.join(),
+		frag.split('\n').slice(4, 12).join(' / '));
+	let few = '';
+	try { P.mergeCcmTables([{ ct: 5000, matrix: [1, 0, 0, 0, 1, 0, 0, 0, 1] }], v.ccm.slice(0, 1)); }
+	catch (e) { few = e.message; }
+	assert('fewer than three matrices is refused, as the camera would', /at least three/.test(few), few);
+}
+
 console.log('\n16-bit raw opens, which a whole class of camera emits');
 {
 	/*
