@@ -12,7 +12,8 @@
  * temperature/tint pair it has no model for yet.
  */
 
-import { solveFromPatches, patchCentres, CHART_COLS, CHART_ROWS } from './calibrate.js';
+import { solveFromPatches, patchCentres, scoreCcm, CHART_COLS, CHART_ROWS } from './calibrate.js';
+import { parseIni, readColour, fitAwbCurve, gainsForCt, mergeCcmTables, colourFragment } from './iqprofile.js';
 
 const CFA_NAMES = ['RGGB', 'GRBG', 'GBRG', 'BGGR'];
 const DEMOSAIC = [
@@ -239,7 +240,13 @@ export function mountEditor(root, {
 	 * keep() is how the host learns the operator confirmed, and it is not
 	 * optional politeness: a host that arms anything to undo the change -- a
 	 * timer, an unload handler -- has no other way to know it must stand down,
-	 * and would take back a calibration that was deliberately kept. */
+	 * and would take back a calibration that was deliberately kept.
+	 *
+	 * Two more make a calibration a camera keeps across lights rather than a
+	 * matrix for one: baseline() resolves to the camera's own profile text
+	 * (the colour sections it runs today), and persist(ini) writes the colour
+	 * sections given into the camera's profile. revert() and keep() then
+	 * answer for whichever was written last. */
 	calibrate,
 	/* How long to wait for the module to arrive and answer. The camera's own
 	 * loader gives the CDN eight seconds; a test harness under a virtual clock
@@ -1688,6 +1695,10 @@ export function mountEditor(root, {
 	 * dragged, and a new frame gets its own look. */
 	let chartTried = false;
 	let solved = null;
+	/* The lights measured so far, one entry per chart shot someone chose to
+	 * keep. Survives opening another frame, because the next light is the
+	 * next frame. */
+	const session = [];
 	const chart = el('div', 're-chart');
 	chart.hidden = true;
 	stage.append(chart);
@@ -1821,13 +1832,39 @@ export function mountEditor(root, {
 	 * reverting; the clock and the question live here, where the picture is.
 	 */
 	let holdTimer = null, holdTick = null;
+	/* How the countdown in progress ends, while there is one. One at a time:
+	 * revert() and keep() answer for whatever was written LAST, so a second
+	 * write under a running countdown would have the first one's timer put
+	 * the second one back. */
+	let holdEnd = null;
 
 	function stopHold() {
 		if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
 		if (holdTick) { clearInterval(holdTick); holdTick = null; }
+		holdEnd = null;
+	}
+
+	/* The panel holding the countdown is going away -- another mode, a fresh
+	 * Calibrate panel. Nobody can confirm a change they can no longer see, so
+	 * it ends the way the clock would have ended it: put back. */
+	function abandonHold() {
+		if (holdEnd) holdEnd(true);
+	}
+
+	/* Refuse a second write while one is waiting to be confirmed or put back,
+	 * and say so where the button was pressed. */
+	function busyHolding(where) {
+		if (!holdEnd) return false;
+		const box = el('div', 're-notice re-warn', ICON.warn);
+		box.append(Object.assign(el('div'), {
+			textContent: 'The last change is still waiting — keep it or put it back first.',
+		}));
+		where.append(box);
+		return true;
 	}
 
 	function buildCalibrate() {
+		abandonHold();
 		insp.replaceChildren();
 		const panel = el('div', 're-panel');
 		panel.append(Object.assign(el('div', 're-shead'), {
@@ -1859,6 +1896,9 @@ export function mountEditor(root, {
 		panel.append(row);
 		insp.append(panel);
 		insp.append(out);
+		sessionBox = el('div', 're-panel');
+		insp.append(sessionBox);
+		renderSession();
 
 		/*
 		 * The corners, without the dragging.
@@ -1998,9 +2038,11 @@ export function mountEditor(root, {
 			acts.append(send);
 		}
 		out.append(acts);
+		recordRow(out);
 	}
 
 	async function applyToCamera(out, send) {
+		if (busyHolding(out)) return;
 		const hold = Math.max(5, calibrate.holdSeconds || 30);
 		send.disabled = true;
 		try {
@@ -2017,10 +2059,16 @@ export function mountEditor(root, {
 			return;
 		}
 
-		/* From here the camera is carrying the new matrix and something must
-		 * take it back. The countdown is the default; confirming is the
-		 * exception, which is the right way round for a change that can make
-		 * the picture unwatchable. */
+		armHold(out, send, hold, 'Applied to the camera.');
+	}
+
+	/*
+	 * From here the camera is carrying something new and something must take
+	 * it back. The countdown is the default; confirming is the exception,
+	 * which is the right way round for a change that can make the picture
+	 * unwatchable.
+	 */
+	function armHold(out, send, hold, applied) {
 		const bar = el('div', 're-notice re-warn', ICON.warn);
 		bar.dataset.act = 'hold';
 		const text = el('div');
@@ -2028,7 +2076,7 @@ export function mountEditor(root, {
 		out.append(bar);
 		let left = hold;
 		const paint = () => {
-			text.textContent = `Applied to the camera. Putting it back in ${left}s ` +
+			text.textContent = `${applied} Putting it back in ${left}s ` +
 				'unless you confirm the picture still looks right.';
 		};
 		paint();
@@ -2084,10 +2132,196 @@ export function mountEditor(root, {
 		};
 		keep.addEventListener('click', () => finish(false));
 		back.addEventListener('click', () => finish(true));
+		holdEnd = finish;
 		holdTick = setInterval(() => { left--; if (left > 0) paint(); }, 1000);
 		holdTimer = setTimeout(() => finish(true), hold * 1000);
 	}
 
+	/* ---- a calibration across lights --------------------------------------
+	 *
+	 * One chart shot gives a matrix for one light. The camera runs on a set:
+	 * white balance at a reference temperature, the curve auto white balance
+	 * follows away from it, and a matrix per temperature that it blends
+	 * between. So each measured light can be kept, and once there are enough
+	 * the set is built -- fitted to the lights measured, and falling back on
+	 * the camera's own values for anything nobody measured -- and compared,
+	 * light by light, with what the camera does now.
+	 */
+	function recordRow(out) {
+		const row = el('div');
+		row.style.cssText = 'display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center';
+		const ct = el('input', 're-in');
+		ct.type = 'number'; ct.min = '1500'; ct.max = '15000'; ct.step = '10';
+		ct.style.width = '7em';
+		ct.dataset.role = 'record-ct';
+		ct.title = 'The light\'s colour temperature, in kelvin';
+		if (solved.light) ct.value = String(Math.round(solved.light.cct / 10) * 10);
+		const add = el('button', 're-btn', '');
+		add.dataset.act = 'record';
+		add.textContent = 'Keep this light';
+		add.addEventListener('click', () => {
+			const k = Number(ct.value);
+			if (!(k >= 1500 && k <= 15000)) {
+				ct.focus();
+				ct.setCustomValidity('between 1500 and 15000 K');
+				ct.reportValidity();
+				return;
+			}
+			/* Two lights at one temperature are one light measured twice: the
+			 * curve cannot be fitted through them, and the camera would be
+			 * handed two matrices to blend at the same point. */
+			const near = session.find((r) => Math.abs(r.ct - k) < 300);
+			if (near) {
+				ct.setCustomValidity(`a light at ${near.ct} K is already kept — drop it first`);
+				ct.reportValidity();
+				return;
+			}
+			ct.setCustomValidity('');
+			session.push({
+				ct: k, neutral: solved.neutral.slice(), ccm: solved.ccm.slice(),
+				balanced: solved.balanced, weights: solved.weights, fit: solved.fit,
+			});
+			add.disabled = true;
+			add.textContent = 'Kept';
+			renderSession();
+		});
+		row.append(Object.assign(el('span', 're-note'), { textContent: 'Light at' }), ct,
+			Object.assign(el('span', 're-note'), { textContent: 'K' }), add);
+		out.append(row);
+	}
+
+	let sessionBox = null;
+
+	function renderSession() {
+		if (!sessionBox) return;
+		sessionBox.replaceChildren();
+		sessionBox.hidden = !session.length;
+		if (!session.length) return;
+		sessionBox.append(Object.assign(el('div', 're-shead'), {
+			innerHTML: '<h3 class="re-cap">Lights kept</h3><span class="re-rule"></span>',
+		}));
+		session.forEach((r, i) => {
+			const line = el('div', 're-mono');
+			line.style.cssText = 'display:flex;gap:8px;align-items:center;font-size:11px;margin:3px 0';
+			line.dataset.role = 'kept-light';
+			line.append(Object.assign(el('span'), {
+				textContent: `${r.ct} K · ΔE2000 ${r.fit.meanDeltaE.toFixed(2)}`,
+			}));
+			const drop = el('button', 're-btn re-sm', '');
+			drop.textContent = 'Drop';
+			drop.addEventListener('click', () => { session.splice(i, 1); renderSession(); });
+			line.append(drop);
+			sessionBox.append(line);
+		});
+		const note = el('p', 're-note');
+		note.textContent = session.length < 2
+			? 'One light fixes the white balance there and its matrix; the curve between ' +
+				'lights stays the camera\'s own. Keep a second, as far away in temperature ' +
+				'as you can — daylight and a warm lamp — and the curve is fitted too.'
+			: `${session.length} lights. Lights far apart in temperature pin the curve best.`;
+		sessionBox.append(note);
+		if (!(calibrate && calibrate.baseline)) {
+			sessionBox.append(Object.assign(el('p', 're-note'), {
+				textContent: 'Building a profile needs the camera\'s own colour calibration, ' +
+					'which this page was not given a way to read.',
+			}));
+			return;
+		}
+		const build = el('button', 're-btn re-pri', '');
+		build.dataset.act = 'build-profile';
+		build.textContent = 'Build the camera profile';
+		const result = el('div');
+		build.addEventListener('click', async () => {
+			build.disabled = true;
+			try {
+				buildProfile(result, readColour(parseIni(await calibrate.baseline())));
+			} catch (e) {
+				result.replaceChildren(Object.assign(el('div', 're-notice re-warn', ICON.warn), {}));
+				result.firstChild.append(Object.assign(el('div'), { textContent: e.message }));
+			} finally {
+				build.disabled = false;
+			}
+		});
+		sessionBox.append(build, result);
+	}
+
+	/* A vendor table set, blended at a temperature the way the camera blends
+	 * it: linearly between the two tables either side, the end ones held. */
+	function vendorCcmAt(tables, ct) {
+		const t = tables.slice().sort((a, b) => b.ct - a.ct);
+		if (ct >= t[0].ct) return t[0].matrix;
+		if (ct <= t[t.length - 1].ct) return t[t.length - 1].matrix;
+		for (let i = 0; i + 1 < t.length; i++)
+			if (ct <= t[i].ct && ct >= t[i + 1].ct) {
+				const w = (ct - t[i + 1].ct) / (t[i].ct - t[i + 1].ct);
+				return t[i].matrix.map((v, k) => w * v + (1 - w) * t[i + 1].matrix[k]);
+			}
+		return t[0].matrix;
+	}
+
+	function buildProfile(result, vendor) {
+		if (!vendor.staticWb || !vendor.curve || !vendor.ccm)
+			throw new Error('The camera did not hand back its colour calibration — its ' +
+				'firmware predates exporting [static_awb] and [static_ccm].');
+		const awb = fitAwbCurve(session.map((r) => ({
+			ct: r.ct, r: 1 / r.neutral[0], b: 1 / r.neutral[2],
+		})), vendor);
+		const tables = mergeCcmTables(session.map((r) => ({ ct: r.ct, matrix: r.ccm })), vendor.ccm);
+		const ini = colourFragment({ staticWb: awb.staticWb, curve: awb.curve, tables });
+
+		/* Light by light: what the camera does there today, and what this
+		 * would do. Colour on the same balanced patches by the same rule; white
+		 * balance as how far the gains the curve gives are from the gains that
+		 * made that chart's grey grey. */
+		result.replaceChildren();
+		const tbl = el('div', 're-mono');
+		tbl.dataset.role = 'profile-compare';
+		tbl.style.cssText = 'font-size:11px;line-height:1.7;margin-top:8px;color:#b6b9c2';
+		tbl.append(Object.assign(el('div'), {
+			textContent: 'light     ΔE2000 now → new    white balance off now → new',
+		}));
+		const pct = (got, want) => Math.max(...got.map((g, k) => Math.abs(g / want[k] - 1))) * 100;
+		for (const r of session) {
+			const before = scoreCcm(vendorCcmAt(vendor.ccm, r.ct), r.balanced, r.weights).meanDeltaE;
+			const want = [1 / r.neutral[0], 1 / r.neutral[2]];
+			const gv = gainsForCt(Math.round(r.ct), vendor.staticWb, vendor.curve, { normalise: false });
+			const gn = gainsForCt(Math.round(r.ct), awb.staticWb, awb.curve, { normalise: false });
+			tbl.append(Object.assign(el('div'), {
+				textContent: `${String(r.ct).padEnd(6)} K  ${before.toFixed(2).padStart(6)} → ` +
+					`${r.fit.meanDeltaE.toFixed(2).padEnd(6)}      ` +
+					`${pct([gv[0] / 256, gv[3] / 256], want).toFixed(1).padStart(5)}% → ` +
+					`${pct([gn[0] / 256, gn[3] / 256], want).toFixed(1)}%`,
+			}));
+		}
+		result.append(tbl);
+		const pre = el('pre', 're-mono');
+		pre.dataset.role = 'profile-ini';
+		pre.style.cssText = 'font-size:10.5px;white-space:pre-wrap;margin-top:8px;color:#b6b9c2';
+		pre.textContent = ini;
+		result.append(pre);
+
+		if (calibrate.persist) {
+			const save = el('button', 're-btn re-pri', '');
+			save.dataset.act = 'persist-profile';
+			save.textContent = 'Save to the camera profile';
+			save.addEventListener('click', async () => {
+				if (busyHolding(result)) return;
+				save.disabled = true;
+				try {
+					await calibrate.persist(ini);
+				} catch (e) {
+					save.disabled = false;
+					const box = el('div', 're-notice re-warn', ICON.warn);
+					box.append(Object.assign(el('div'), { textContent: e.message }));
+					result.append(box);
+					return;
+				}
+				armHold(result, save, Math.max(5, calibrate.holdSeconds || 30),
+					'Saved into the camera profile.');
+			});
+			result.append(save);
+		}
+	}
 
 	/* ---- plates ----------------------------------------------------------
 	 *
@@ -2684,7 +2918,7 @@ export function mountEditor(root, {
 		chart.hidden = m !== 'calibrate';
 		marks.hidden = m !== 'diagnose';
 		plateMarks.hidden = m !== 'plates';
-		if (m !== 'calibrate') stopHold();
+		if (m !== 'calibrate') abandonHold();
 		if (m === 'plates') {
 			buildPlates();
 		} else if (m === 'calibrate') {

@@ -409,6 +409,17 @@ try {
 			apply: async (m) => { calls.push(['apply', m]); },
 			revert: async () => { calls.push(['revert']); },
 			keep: async () => { calls.push(['keep']); },
+			// The camera's own colour calibration, as a Hi3516EV300 + IMX335
+			// exported it.
+			baseline: async () => [
+				'[static_awb]', 'AutoStaticWb = "483, 256, 256, 465"',
+				'AutoCurvePara = "-18, 267, -7, 160031, 128, -107969"',
+				'[static_ccm]', 'TotalNum = "3"', 'AutoColorTemp = "4900, 3850, 2650"',
+				'AutoCCMTable_0 = "452, 32952, 32780, 32845, 356, 32791, 32769, 32965, 454"',
+				'AutoCCMTable_1 = "448, 32939, 32789, 32833, 356, 32803, 32769, 32986, 475"',
+				'AutoCCMTable_2 = "408, 32890, 32798, 32854, 381, 32807, 32769, 33112, 600"',
+			].join('\n'),
+			persist: async (ini) => { calls.push(['persist', ini]); },
 		},
 	});
 	await ed.open(new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer()), 'fixture.dng');
@@ -581,16 +592,85 @@ try {
 	t('and the host is told it was confirmed, so it can stand down',
 		calls.some((c) => c[0] === 'keep'), JSON.stringify(calls.map((c) => c[0])));
 
+	// A light kept, a profile built from it against the camera's own, and the
+	// profile saved -- through the same countdown, because a bad white balance
+	// curve makes a picture as unwatchable as a bad matrix does.
+	{
+		const until = async (sel) => {
+			for (let i = 0; i < 60; i++) {
+				const n = host.querySelector(sel);
+				if (n) return n;
+				await new Promise((r) => setTimeout(r, 100));
+			}
+			return null;
+		};
+		host.querySelector('[data-act="record"]').click();
+		t('keeping a light lists it', host.querySelectorAll('[data-role="kept-light"]').length === 1,
+			String(host.querySelectorAll('[data-role="kept-light"]').length));
+		(await until('[data-act="build-profile"]')).click();
+		const ini = await until('[data-role="profile-ini"]');
+		t('building writes the colour sections the camera reads',
+			!!ini && /\[static_awb\]/.test(ini.textContent) && /AutoCurvePara/.test(ini.textContent) &&
+			/TotalNum\s+= "\d"/.test(ini.textContent), ini ? ini.textContent.slice(0, 120) : '(none)');
+		const cmp = host.querySelector('[data-role="profile-compare"]');
+		t('and says, per light, what the camera does now against what this would',
+			!!cmp && /→/.test(cmp.textContent), cmp ? cmp.textContent.slice(0, 120) : '(none)');
+		const before = calls.length;
+		host.querySelector('[data-act="persist-profile"]').click();
+		const k = await until('[data-act="hold"] [data-act="keep"]');
+		t('saving hands the host exactly that text',
+			calls.length === before + 1 && calls[before][0] === 'persist' &&
+			calls[before][1] === ini.textContent, JSON.stringify(calls.slice(before).map((c) => c[0])));
+		// A second save under a running countdown would be put back by the
+		// first one's timer: revert() answers for whatever was written last.
+		host.querySelector('[data-act="persist-profile"]').click();
+		await new Promise((r) => setTimeout(r, 200));
+		t('a second save is refused while the first is still waiting',
+			calls.length === before + 1, JSON.stringify(calls.slice(before).map((c) => c[0])));
+		k.click();
+		for (let i = 0; i < 20 && calls[calls.length - 1][0] !== 'keep'; i++)
+			await new Promise((r) => setTimeout(r, 100));
+		t('and confirming it tells the host', calls[calls.length - 1][0] === 'keep',
+			JSON.stringify(calls.slice(before).map((c) => c[0])));
+	}
+
 	// And closing the editor must not leave a timer that reverts a camera
 	// whose operator has gone.
+	// Leaving Calibrate with a change still waiting ends it the way the clock
+	// would have: put back. Nobody can confirm what they can no longer see,
+	// and silently dropping the countdown left the host never told either way.
 	send.click();
 	await untilKeep();
+	const revertsBefore = calls.filter((c) => c[0] === 'revert').length;
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+	for (let i = 0; i < 20 && calls.filter((c) => c[0] === 'revert').length === revertsBefore; i++)
+		await new Promise((r) => setTimeout(r, 100));
+	t('leaving Calibrate mid-countdown puts the change back',
+		calls.filter((c) => c[0] === 'revert').length === revertsBefore + 1,
+		JSON.stringify(calls.map((c) => c[0])));
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Calibrate').click();
+	await new Promise((r) => setTimeout(r, 300));
+	host.querySelector('[data-act="measure"]').click();
+	const send2 = await (async () => {
+		for (let i = 0; i < 100; i++) {
+			const b = host.querySelector('[data-act="apply-to-camera"]');
+			if (b) return b;
+			await new Promise((r) => setTimeout(r, 100));
+		}
+		return null;
+	})();
+
+	// And closing the editor must not leave a timer that reverts a camera
+	// whose operator has gone.
+	send2.click();
+	await untilKeep();
+	const revertsAtClose = calls.filter((c) => c[0] === 'revert').length;
 	ed.destroy();
 	await new Promise((r) => setTimeout(r, 6500));
 	// Counting calls would break every time the contract gains one; what this
 	// means is that destroy() added no revert of its own.
 	t('closing the editor cancels the countdown rather than firing it',
-		calls.filter((c) => c[0] === 'revert').length === 1 &&
+		calls.filter((c) => c[0] === 'revert').length === revertsAtClose &&
 		calls[calls.length - 1][0] === 'apply',
 		JSON.stringify(calls.map((c) => c[0])));
 	host.remove();
