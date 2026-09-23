@@ -86,6 +86,12 @@ static struct {
     float neutral[3];
     float forward[9];
     i32 has_forward;
+    i32 black4[4];  /* BlackLevel per 2x2 position, row-major, when given */
+    i32 nblack;     /* how many BlackLevel values the file carried */
+    i32 rep_rows, rep_cols; /* BlackLevelRepeatDim; 1x1 when absent */
+    float cm[2][9]; /* ColorMatrix1/2, XYZ -> camera */
+    i32 illum[2];   /* CalibrationIlluminant1/2, EXIF LightSource codes */
+    i32 ncm;        /* bit per ColorMatrix present */
     i32 strip_off, strip_len;
     char model[64];
     u16 *raw;       /* width*height, unpacked */
@@ -129,12 +135,29 @@ static float ratio_at(const u8 *d, u32 i, int is_signed) {
     return den ? (float)n / (float)den : 0.f;
 }
 
+/* Value k of an integer-valued tag, in whichever of the TIFF types a writer
+ * chose for it: BlackLevel may be SHORT, LONG or RATIONAL, and a RATIONAL is
+ * an eight-byte pair, not a four-byte word. */
+static i32 value_at(const u8 *d, u32 type, u32 k) {
+    switch (type) {
+    case 3: case 8: return (i32)rd16(d + k * 2);
+    case 4: case 9: return (i32)rd32(d + k * 4);
+    case 5: case 10: {
+        float v = ratio_at(d, k, type == 10);
+        return (i32)(v + (v < 0.f ? -0.5f : 0.5f));
+    }
+    }
+    return 0;
+}
+
 EXPORT(dng_open) i32 dng_open(const u8 *buf, u32 len) {
     F.buf = buf; F.len = len;
     F.width = F.height = 0; F.bits = 0; F.cfa = CFA_RGGB;
     F.black = 0; F.white = 0; F.has_forward = 0; F.strip_off = 0;
     F.strip_len = 0; F.iso = 0; F.exposure_time = 0.f; F.model[0] = 0;
     F.neutral[0] = F.neutral[1] = F.neutral[2] = 1.f;
+    F.nblack = 0; F.ncm = 0; F.illum[0] = F.illum[1] = 0;
+    F.rep_rows = F.rep_cols = 1;
 
     if (len < 16) return ERR_TRUNCATED;
     /* Little-endian only. Every DNG majestic writes is 'II', and a
@@ -176,8 +199,40 @@ EXPORT(dng_open) i32 dng_open(const u8 *buf, u32 len) {
             break;
         case 50714: /* BlackLevel — one value or one per CFA position */
             d = entry_data(e, type, count);
-            if (d) F.black = (i32)((type == 3 || type == 8) ? rd16(d) : rd32(d));
+            if (d) {
+                F.black = value_at(d, type, 0);
+                /* Four, under a 2x2 BlackLevelRepeatDim, is what majestic
+                 * writes: the sensor's per-channel pedestals, which on an
+                 * IMX335 at high gain differ by up to 16 codes in 4096
+                 * (330/338/339/323 in its driver's top-gain row). Any other
+                 * layout of four -- a row or a column of them -- is not
+                 * per CFA position and is not read as one. */
+                if (count == 4) {
+                    for (u32 k = 0; k < 4; k++) F.black4[k] = value_at(d, type, k);
+                    F.nblack = 4;
+                } else {
+                    F.nblack = 1;
+                }
+            }
             break;
+        case 50713: /* BlackLevelRepeatDim: rows, columns */
+            d = entry_data(e, type, count);
+            if (d && count >= 2) {
+                F.rep_rows = value_at(d, type, 0);
+                F.rep_cols = value_at(d, type, 1);
+            }
+            break;
+        case 50721: /* ColorMatrix1 */
+        case 50722: /* ColorMatrix2 */
+            d = entry_data(e, type, count);
+            if (d && count >= 9) {
+                int which = tag == 50722;
+                for (u32 k = 0; k < 9; k++) F.cm[which][k] = ratio_at(d, k, 1);
+                F.ncm |= 1 << which;
+            }
+            break;
+        case 50778: F.illum[0] = (i32)scalar(e, type, count); break;
+        case 50779: F.illum[1] = (i32)scalar(e, type, count); break;
         case 50717:
             d = entry_data(e, type, count);
             if (d) F.white = (i32)((type == 3 || type == 8) ? rd16(d) : rd32(d));
@@ -234,6 +289,9 @@ EXPORT(dng_exposure) float dng_exposure(void) { return F.exposure_time; }
 EXPORT(dng_has_forward) i32 dng_has_forward(void) { return F.has_forward; }
 EXPORT(dng_neutral_ptr) const float *dng_neutral_ptr(void) { return F.neutral; }
 EXPORT(dng_forward_ptr) const float *dng_forward_ptr(void) { return F.forward; }
+EXPORT(dng_cm_ptr) const float *dng_cm_ptr(void) { return &F.cm[0][0]; }
+EXPORT(dng_cm_mask) i32 dng_cm_mask(void) { return F.ncm; }
+EXPORT(dng_illuminant) i32 dng_illuminant(i32 which) { return F.illum[which & 1]; }
 EXPORT(dng_model_ptr) const char *dng_model_ptr(void) { return F.model; }
 EXPORT(dng_raw_ptr) const u16 *dng_raw_ptr(void) { return F.raw; }
 
@@ -708,29 +766,55 @@ EXPORT(develop) i32 develop(u8 *out, i32 cfa, i32 demosaic, i32 black, i32 white
  * Samples the mosaic directly rather than the developed frame, which is the
  * whole point -- the developed frame has already had a white balance applied
  * and reading it back would measure that, not the scene.
+ *
+ * out4[3] is the fraction of the box that was set aside as clipped, so a
+ * patch that is mostly ADC ceiling can be weighed accordingly rather than
+ * trusted.
  */
 EXPORT(sample_patch) i32 sample_patch(i32 cx, i32 cy, i32 radius, i32 black,
-                                      i32 cfa, float *out3) {
+                                      i32 cfa, float *out4) {
     const int w = F.width, h = F.height;
-    if (!F.raw || !out3) return ERR_SIZE;
+    if (!F.raw || !out4) return ERR_SIZE;
     if (radius < 1) radius = 1;
 
-    double sum[3] = {0.0, 0.0, 0.0};
-    u32 cnt[3] = {0, 0, 0};
+    /* The file's own per-position pedestals, but only while the caller is
+     * using the file's black level: a slider someone moved is a decision about
+     * the whole frame, and it wins. */
+    const int per_pos = F.nblack == 4 && F.rep_rows == 2 && F.rep_cols == 2 &&
+                        black == F.black;
+
+    /* A clipped photosite is not a measurement of the patch, it is a
+     * measurement of the ADC. Left in, it pulls the chart's white -- the patch
+     * a white balance leans on hardest -- toward whatever the other channels
+     * clipped at, and the fit is then asked to explain a colour the chart does
+     * not have. Anything within 2% of the white level is set aside. */
+    const i32 white = F.white > 0 ? F.white : (1 << (F.bits > 0 ? F.bits : 16)) - 1;
+
+    double sum[3] = {0.0, 0.0, 0.0}, all[3] = {0.0, 0.0, 0.0};
+    u32 cnt[3] = {0, 0, 0}, tot[3] = {0, 0, 0}, clipped = 0, seen = 0;
     for (int y = cy - radius; y <= cy + radius; y++) {
         if (y < 0 || y >= h) continue;
         for (int x = cx - radius; x <= cx + radius; x++) {
             if (x < 0 || x >= w) continue;
             int p = plane_at(cfa, x, y);
-            double v = (double)F.raw[y * w + x] - black;
-            sum[p] += v < 0.0 ? 0.0 : v;
+            i32 b = per_pos ? F.black4[((y & 1) << 1) | (x & 1)] : black;
+            i32 raw = F.raw[y * w + x];
+            double v = (double)raw - b;
+            if (v < 0.0) v = 0.0;
+            all[p] += v; tot[p]++; seen++;
+            if (raw >= b + (white - b) * 49 / 50) { clipped++; continue; }
+            sum[p] += v;
             cnt[p]++;
         }
     }
     /* A box too small to hold all three planes says nothing; the caller gets a
      * refusal rather than a mean over whatever happened to land in it. */
-    if (!cnt[0] || !cnt[1] || !cnt[2]) return ERR_SIZE;
-    for (int i = 0; i < 3; i++) out3[i] = (float)(sum[i] / cnt[i]);
+    if (!tot[0] || !tot[1] || !tot[2]) return ERR_SIZE;
+    /* A plane with nothing left unclipped is reported from everything, and the
+     * fraction says so -- the caller decides whether to trust it. */
+    for (int i = 0; i < 3; i++)
+        out4[i] = (float)(cnt[i] ? sum[i] / cnt[i] : all[i] / tot[i]);
+    out4[3] = (float)clipped / (float)seen;
     return ERR_OK;
 }
 

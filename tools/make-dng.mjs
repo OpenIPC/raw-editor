@@ -16,7 +16,8 @@
 const T = { BYTE: 1, ASCII: 2, SHORT: 3, LONG: 4, RATIONAL: 5, UNDEFINED: 7, SRATIONAL: 10 };
 
 export function makeDng({ width, height, pixels, cfa = [0, 1, 1, 2], black = 0,
-	white = 4095, model = 'test', bits = 12 } = {}) {
+	white = 4095, model = 'test', bits = 12, colorMatrices = [],
+	blackRepeat = [2, 2], blackRational = false } = {}) {
 	if (!pixels || pixels.length !== width * height)
 		throw new Error('pixels must be width*height');
 	if (bits !== 12 && bits !== 16)
@@ -73,13 +74,37 @@ export function makeDng({ width, height, pixels, cfa = [0, 1, 1, 2], black = 0,
 	add(33422, T.BYTE, 4, Buffer.from(cfa));            // CFAPattern
 	add(50706, T.BYTE, 4, Buffer.from([1, 4, 0, 0]));   // DNGVersion
 	add(50708, T.ASCII, model.length + 1, asciiOf(model));
-	add(50714, T.SHORT, 1, () => black);                // BlackLevel
+	if (Array.isArray(black)) {
+		// One per position under BlackLevelRepeatDim -- 2x2, as majestic
+		// writes it, unless the test says otherwise -- as SHORTs, or as the
+		// RATIONAL pairs the specification also allows.
+		add(50713, T.SHORT, 2, Buffer.from([blackRepeat[0], 0, blackRepeat[1], 0]));
+		if (blackRational) {
+			const b = Buffer.alloc(black.length * 8);
+			black.forEach((v, i) => { b.writeUInt32LE(v * 2, i * 8); b.writeUInt32LE(2, i * 8 + 4); });
+			add(50714, T.RATIONAL, black.length, b);
+		} else {
+			const b = Buffer.alloc(black.length * 2);
+			black.forEach((v, i) => b.writeUInt16LE(v, i * 2));
+			add(50714, T.SHORT, black.length, b);       // BlackLevel
+		}
+	} else {
+		add(50714, T.SHORT, 1, () => black);            // BlackLevel
+	}
 	add(50717, T.LONG, 1, () => white);                 // WhiteLevel
 	{
 		const b = Buffer.alloc(3 * 8);
 		[1, 1, 1].forEach((v, i) => { b.writeUInt32LE(Math.round(v * 10000), i * 8); b.writeUInt32LE(10000, i * 8 + 4); });
 		add(50728, T.RATIONAL, 3, b);                   // AsShotNeutral
 	}
+	// ColorMatrix1/2 with their CalibrationIlluminants, signed rationals over
+	// 10000 -- the camera's own characterisation a light is named with.
+	colorMatrices.slice(0, 2).forEach((c, k) => {
+		const b = Buffer.alloc(9 * 8);
+		c.matrix.forEach((v, i) => { b.writeInt32LE(Math.round(v * 10000), i * 8); b.writeInt32LE(10000, i * 8 + 4); });
+		add(50721 + k, T.SRATIONAL, 9, b);
+		add(50778 + k, T.SHORT, 1, () => c.illuminant);
+	});
 	entries.sort((a, b) => a.tag - b.tag);
 
 	const sizeOf = { [T.BYTE]: 1, [T.ASCII]: 1, [T.SHORT]: 2, [T.LONG]: 4, [T.RATIONAL]: 8, [T.SRATIONAL]: 8 };
