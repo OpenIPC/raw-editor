@@ -423,6 +423,9 @@ function solveN(A, b) {
 /* How much of a patch may be clipped before it stops counting. */
 const CLIP_LIMIT = 0.02;
 
+/* How many patches a fit needs before its answer means anything. */
+const MIN_PATCHES = 12;
+
 /*
  * Score a camera-to-display matrix on the chart, the way solveFromPatches
  * scores its own: white-balanced camera values through the matrix, one
@@ -474,6 +477,17 @@ export function solveFromPatches(measured, opts = {}) {
 
 	const clipped = opts.clipped || measured.map(() => 0);
 	const weights = measured.map((p, i) => (clipped[i] > CLIP_LIMIT || !(p[1] > 0) ? 0 : 1));
+	/* Seven unknowns and one residual per patch. With too few patches left
+	 * the fit is not determined -- it can land anywhere with an error of
+	 * nothing, and a matrix that fits nothing because it was asked nothing is
+	 * the one result that must never reach a camera. Twelve keeps the problem
+	 * well over-determined and still survives a clipped white and a few
+	 * saturated primaries. */
+	const usable = weights.reduce((a, w) => a + w, 0);
+	if (usable < MIN_PATCHES)
+		throw new Error(`only ${usable} of the chart's patches are both lit and unclipped, ` +
+			`and a fit needs at least ${MIN_PATCHES} — lower the exposure or light the chart ` +
+			'more evenly');
 
 	/*
 	 * White balance first, from the greys that are neither clipped nor down
@@ -507,9 +521,14 @@ export function solveFromPatches(measured, opts = {}) {
 		'expose so the chart\'s white is below clipping and its greys are clear of black');
 	const neutral = [acc[0] / used, 1, acc[2] / used];
 
-	/* The light, when the camera can say, or when someone told us. */
-	const light = illuminantFromNeutral(neutral, opts.colorMatrices);
-	const cct = opts.cct || (light && light.cct) || null;
+	/* The light: what someone told us, or failing that what the camera's own
+	 * matrices say. A temperature given is the answer, for the matrix as much
+	 * as for the report -- adapting to the camera's guess while labelling it
+	 * with the given temperature would describe two different lights. */
+	const estimated = illuminantFromNeutral(neutral, opts.colorMatrices);
+	const light = opts.cct
+		? { cct: opts.cct, duv: null, xy: planckXy(opts.cct) }
+		: estimated;
 
 	/* The live one starts from white-balanced camera values and lands in linear
 	 * sRGB, fitted in ΔE2000 with its rows held at one. */
@@ -549,7 +568,7 @@ export function solveFromPatches(measured, opts = {}) {
 	/* With nothing to say what the light was, D50 exactly -- the reference's
 	 * own white, which makes the adaptation an identity rather than a
 	 * rounding error away from one. */
-	const whiteXy = light ? light.xy : (cct ? planckXy(cct) : null);
+	const whiteXy = light ? light.xy : null;
 	const white = whiteXy
 		? [whiteXy[0] / whiteXy[1], 1, (1 - whiteXy[0] - whiteXy[1]) / whiteXy[1]]
 		: D50.slice();
@@ -576,7 +595,7 @@ export function solveFromPatches(measured, opts = {}) {
 
 	return {
 		neutral, colorMatrix, ccm, balanced, weights,
-		light: light ? { ...light, cct: cct } : (cct ? { cct, duv: null, xy: planckXy(cct) } : null),
+		light, estimated,
 		fit,
 	};
 }

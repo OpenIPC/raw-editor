@@ -188,6 +188,21 @@ console.log('\nsampling a chart patch: its own pedestals, and not the ADC ceilin
 		flat.raw.every((v) => Math.abs(v - 100) < 1e-3), JSON.stringify(flat.raw));
 	check('and nothing there is clipped', flat.clipped, 0);
 
+	// The same four pedestals written as RATIONAL pairs, which the
+	// specification allows: read as 32-bit words they came back as alternating
+	// numerators and denominators.
+	e.open(makeDng({ width: W, height: H, pixels: px, black: BL, white: 4095, blackRational: true }));
+	const rat = e.samplePatch(16, 16, 6);
+	assert('rational pedestals are read as the values they are',
+		rat.raw.every((v) => Math.abs(v - 100) < 1e-3), JSON.stringify(rat.raw));
+
+	// Four values in a row are not four CFA positions. Under a 1x4 repeat
+	// they are not subtracted per 2x2 site; the first is used for the frame.
+	e.open(makeDng({ width: W, height: H, pixels: px, black: BL, white: 4095, blackRepeat: [1, 4] }));
+	const row = e.samplePatch(16, 16, 6);
+	check('four pedestals in a row are not read as a 2x2',
+		row.raw.map((v) => Math.round(v)), [100, 115, 130]);
+
 	// The same frame with a third of the red sites at the white level: the
 	// mean is of the rest, and the fraction says how much was set aside.
 	const hot = px.slice();
@@ -618,6 +633,27 @@ console.log('\ncalibration recovers a matrix it was not given');
 		Math.abs(withClip.neutral[2] - got.neutral[2]) < 1e-3,
 		`${withClip.neutral[2].toFixed(4)} vs ${got.neutral[2].toFixed(4)}`);
 	check('and out of the fit', withClip.fit.patches, 23);
+
+	// Seven unknowns need more than seven patches. With most of the chart
+	// clipped the fit is not determined -- it can report nothing wrong about a
+	// matrix it was asked nothing about -- and that is refused, not answered.
+	let under = '';
+	try {
+		solveFromPatches(patches, { clipped: patches.map((_, i) => ([0, 1, 2, 3, 18, 19, 20].includes(i) ? 0 : 1)) });
+	} catch (e) { under = e.message; }
+	assert('a chart with too few usable patches is refused', /only 7 of the chart/.test(under), under);
+
+	// A temperature given is the light, for the matrix as well as the label:
+	// the camera's own matrices say D65 here, and 3000 K was given.
+	const told = solveFromPatches(patches, {
+		cct: 3000, colorMatrices: [{ matrix: PLANTED, illuminant: 17 }, { matrix: PLANTED, illuminant: 21 }],
+	});
+	const { planckXy } = await import('../src/calibrate.js');
+	const [lx, ly] = planckXy(3000);
+	const resp = apply3(told.colorMatrix, [lx / ly, 1, (1 - lx - ly) / ly]);
+	assert('a given temperature is the one the matrix is fitted to',
+		told.light.cct === 3000 && Math.abs(Math.max(...resp.map(Math.abs)) - 1) < 1e-9,
+		`light ${told.light.cct} K, response to its white ${resp.map((v) => v.toFixed(3))}`);
 
 	let refused = '';
 	try { solveFromPatches(patches.slice(0, 23)); } catch (e) { refused = e.message; }

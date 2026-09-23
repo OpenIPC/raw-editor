@@ -88,6 +88,7 @@ static struct {
     i32 has_forward;
     i32 black4[4];  /* BlackLevel per 2x2 position, row-major, when given */
     i32 nblack;     /* how many BlackLevel values the file carried */
+    i32 rep_rows, rep_cols; /* BlackLevelRepeatDim; 1x1 when absent */
     float cm[2][9]; /* ColorMatrix1/2, XYZ -> camera */
     i32 illum[2];   /* CalibrationIlluminant1/2, EXIF LightSource codes */
     i32 ncm;        /* bit per ColorMatrix present */
@@ -134,6 +135,21 @@ static float ratio_at(const u8 *d, u32 i, int is_signed) {
     return den ? (float)n / (float)den : 0.f;
 }
 
+/* Value k of an integer-valued tag, in whichever of the TIFF types a writer
+ * chose for it: BlackLevel may be SHORT, LONG or RATIONAL, and a RATIONAL is
+ * an eight-byte pair, not a four-byte word. */
+static i32 value_at(const u8 *d, u32 type, u32 k) {
+    switch (type) {
+    case 3: case 8: return (i32)rd16(d + k * 2);
+    case 4: case 9: return (i32)rd32(d + k * 4);
+    case 5: case 10: {
+        float v = ratio_at(d, k, type == 10);
+        return (i32)(v + (v < 0.f ? -0.5f : 0.5f));
+    }
+    }
+    return 0;
+}
+
 EXPORT(dng_open) i32 dng_open(const u8 *buf, u32 len) {
     F.buf = buf; F.len = len;
     F.width = F.height = 0; F.bits = 0; F.cfa = CFA_RGGB;
@@ -141,6 +157,7 @@ EXPORT(dng_open) i32 dng_open(const u8 *buf, u32 len) {
     F.strip_len = 0; F.iso = 0; F.exposure_time = 0.f; F.model[0] = 0;
     F.neutral[0] = F.neutral[1] = F.neutral[2] = 1.f;
     F.nblack = 0; F.ncm = 0; F.illum[0] = F.illum[1] = 0;
+    F.rep_rows = F.rep_cols = 1;
 
     if (len < 16) return ERR_TRUNCATED;
     /* Little-endian only. Every DNG majestic writes is 'II', and a
@@ -183,19 +200,26 @@ EXPORT(dng_open) i32 dng_open(const u8 *buf, u32 len) {
         case 50714: /* BlackLevel — one value or one per CFA position */
             d = entry_data(e, type, count);
             if (d) {
-                u32 sz = (type == 3 || type == 8) ? 2 : 4;
-                F.black = (i32)(sz == 2 ? rd16(d) : rd32(d));
-                /* Four is a 2x2 BlackLevelRepeatDim, which is what majestic
+                F.black = value_at(d, type, 0);
+                /* Four, under a 2x2 BlackLevelRepeatDim, is what majestic
                  * writes: the sensor's per-channel pedestals, which on an
                  * IMX335 at high gain differ by up to 16 codes in 4096
-                 * (330/338/339/323 in its driver's top-gain row). */
+                 * (330/338/339/323 in its driver's top-gain row). Any other
+                 * layout of four -- a row or a column of them -- is not
+                 * per CFA position and is not read as one. */
                 if (count == 4) {
-                    for (u32 k = 0; k < 4; k++)
-                        F.black4[k] = (i32)(sz == 2 ? rd16(d + k * 2) : rd32(d + k * 4));
+                    for (u32 k = 0; k < 4; k++) F.black4[k] = value_at(d, type, k);
                     F.nblack = 4;
                 } else {
                     F.nblack = 1;
                 }
+            }
+            break;
+        case 50713: /* BlackLevelRepeatDim: rows, columns */
+            d = entry_data(e, type, count);
+            if (d && count >= 2) {
+                F.rep_rows = value_at(d, type, 0);
+                F.rep_cols = value_at(d, type, 1);
             }
             break;
         case 50721: /* ColorMatrix1 */
@@ -756,7 +780,8 @@ EXPORT(sample_patch) i32 sample_patch(i32 cx, i32 cy, i32 radius, i32 black,
     /* The file's own per-position pedestals, but only while the caller is
      * using the file's black level: a slider someone moved is a decision about
      * the whole frame, and it wins. */
-    const int per_pos = F.nblack == 4 && black == F.black;
+    const int per_pos = F.nblack == 4 && F.rep_rows == 2 && F.rep_cols == 2 &&
+                        black == F.black;
 
     /* A clipped photosite is not a measurement of the patch, it is a
      * measurement of the ADC. Left in, it pulls the chart's white -- the patch
