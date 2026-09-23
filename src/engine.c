@@ -977,9 +977,10 @@ EXPORT(detect_chart) i32 detect_chart(i32 cfa, float *out8) {
     if (chart_downscale(cfa, &dw, &dh, &sc) != ERR_OK) return 0;
     const int n = dw * dh;
 
-    /* How flat is flat? Taken from the picture rather than picked: the median
-     * of the local ranges, so a noisy frame and a clean one both get a
-     * threshold that means the same thing. */
+    /* How flat is flat? Taken from the picture rather than picked -- a
+     * multiple of the noise, measured as a low percentile of the local ranges
+     * (see below for which, and why), so a noisy frame and a clean one both
+     * get a threshold that means the same thing. */
     float thr;
     {
         static u32 hist[1024];
@@ -1006,6 +1007,12 @@ EXPORT(detect_chart) i32 detect_chart(i32 cfa, float *out8) {
                         if (v < lo) lo = v;
                         if (v > hi) hi = v;
                     }
+                /* A neighbourhood with no range at all is not noise: it is a
+                 * clipped window or a crushed shadow, where the sensor had
+                 * nothing left to vary. Counted, a blown-out tenth of the
+                 * frame put the noise at zero and the threshold at one
+                 * count, below the noise on every patch. */
+                if (hi - lo <= 0.f) continue;
                 int b = (int)((hi - lo) / maxr * 1023.f);
                 if (b > 1023) b = 1023;
                 hist[b]++;
@@ -1024,8 +1031,22 @@ EXPORT(detect_chart) i32 detect_chart(i32 cfa, float *out8) {
          * Three times the noise fills a flat patch completely and still stops
          * dead at the gaps between them, which are hundreds of counts.
          */
+        /*
+         * And the noise is the 10th percentile, not the median. "Most of a
+         * frame is flat" is not true of every frame: on a lab hi3516ev300
+         * looking at a chart on a pine wall, the median local range was the
+         * wood grain -- 91 counts against 21 at the 10th percentile -- and
+         * three times that merged every dark patch into the chart's grey
+         * surround. 17 patches were found and 18 are needed; at the 10th
+         * percentile all 24 are. Any frame with a chart in it has at least a
+         * tenth of flat surface: the chart's own patches and surround.
+         */
         u32 seen = 0; int med = 0;
-        for (int i = 0; i < 1024; i++) { seen += hist[i]; if (seen * 2 >= total) { med = i; break; } }
+        for (int i = 0; i < 1024; i++) { seen += hist[i]; if (seen * 10 >= total) { med = i; break; } }
+        /* And never the first bucket: that is "smaller than the histogram can
+         * resolve", not zero, and a noise of zero is a threshold nothing real
+         * passes. One bucket is the least this can honestly say. */
+        if (med < 1) med = 1;
         thr = (float)med / 1023.f * maxr * 3.f;
         if (thr < 1.f) thr = 1.f;
     }

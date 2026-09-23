@@ -47,7 +47,8 @@ function invert3(h) {
 }
 
 export function makeChartFrame({ width = 640, height = 480, corners,
-	background = [700, 900, 600], gap = 0.12, surround = 120, noise = 6, seed = 7 } = {}) {
+	background = [700, 900, 600], gap = 0.12, surround = 120, noise = 6, seed = 7,
+	saturated = null } = {}) {
 	if (!corners) throw new Error('corners are the point of this');
 	const H = homography(corners), Hi = invert3(H);
 	const rgb = new Float64Array(width * height * 3);
@@ -75,6 +76,14 @@ export function makeChartFrame({ width = 640, height = 480, corners,
 			// are flat and the gaps are not.
 			for (let k = 0; k < 3; k++) rgb[o + k] = 200 + p[k] * 13;
 		}
+	}
+	// A region driven past the ADC's range -- a window, a lamp -- which reads
+	// as the white level exactly, with no noise left in it at all.
+	if (saturated) {
+		const [sx, sy, sw, sh] = saturated;
+		for (let y = sy; y < sy + sh && y < height; y++)
+			for (let x = sx; x < sx + sw && x < width; x++)
+				rgb[(y * width + x) * 3] = rgb[(y * width + x) * 3 + 1] = rgb[(y * width + x) * 3 + 2] = 1e6;
 	}
 	let s = seed;
 	const rnd = () => ((s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff - 0.5);
