@@ -8,6 +8,58 @@ import { mountEditor } from '../dist/editor.js';
 const results = [];
 const t = (name, ok, detail = '') => results.push({ name, ok, detail });
 
+/*
+ * The phone pass.
+ *
+ * Launched in its own browser at 400px because the rules under test are media
+ * queries and a media query asks the viewport, not an element. It runs alone
+ * and reports to its own endpoint, so it stays short.
+ */
+if (new URLSearchParams(location.search).get('narrow') === '1') {
+	const host = document.createElement('div');
+	document.body.append(host);
+	const ed = mountEditor(host, { base: '../dist/', autoCapture: false,
+		plates: { readerSupported: false, reader: () => Promise.reject(new Error('none')) } });
+	const bytes = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
+	await ed.open(bytes, 'phone.dng');
+	await new Promise((r) => setTimeout(r, 400));
+
+	const stage = host.querySelector('.re-stage').getBoundingClientRect();
+	const insp = host.querySelector('.re-insp').getBoundingClientRect();
+	t('at 400px the picture still gets most of the width',
+		stage.width > window.innerWidth * 0.8,
+		`stage ${stage.width.toFixed(0)}px of ${window.innerWidth}px`);
+	t('and it is stacked above the panel, not beside it',
+		insp.top >= stage.bottom - 2,
+		`stage bottom ${stage.bottom.toFixed(0)}, panel top ${insp.top.toFixed(0)}`);
+	t('and the picture keeps a usable height',
+		stage.height > 200, `${stage.height.toFixed(0)}px tall`);
+
+	const tabs = [...host.querySelectorAll('.re-top .re-seg button')];
+	t('every tab is reachable rather than off the edge',
+		tabs.length > 0 && tabs.every((b) => {
+			const r = b.getBoundingClientRect();
+			return r.left >= -1 && r.right <= host.querySelector('.re-top').scrollWidth + 1;
+		}), tabs.map((b) => b.textContent).join('|'));
+	const top = host.querySelector('.re-top');
+	t('and the bar can be scrolled to them when it overflows',
+		top.scrollWidth <= top.clientWidth + 1 || getComputedStyle(top).overflowX === 'auto',
+		`scrollWidth ${top.scrollWidth}, clientWidth ${top.clientWidth}`);
+
+	const small = [...host.querySelectorAll('.re-top button, .re-insp button')]
+		.filter((b) => b.offsetParent !== null)
+		.filter((b) => b.getBoundingClientRect().height < 40);
+	t('controls are close to a finger-sized target',
+		small.length === 0,
+		small.slice(0, 4).map((b) => `${b.textContent.trim().slice(0, 14) || b.dataset.act}` +
+			`=${b.getBoundingClientRect().height.toFixed(0)}px`).join(' '));
+
+	ed.destroy();
+	host.remove();
+	await fetch('/__results?narrow=1', { method: 'POST', body: JSON.stringify(results) });
+	document.title = 'done';
+} else {
+
 const editor = mountEditor(document.getElementById('root'),
 	{ base: '../dist/' });
 try {
@@ -2862,4 +2914,5 @@ try {
 // which loses the race against the module's own fetches every time.
 await fetch('/__results', { method: 'POST', body: JSON.stringify(results) });
 document.title = 'done';
+}
 </script>

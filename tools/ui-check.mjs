@@ -24,13 +24,15 @@ function browser() {
 
 let reportResults;
 const reported = new Promise((r) => { reportResults = r; });
+let reportNarrow;
+const narrowReported = new Promise((r) => { reportNarrow = r; });
 
 const server = createServer(async (req, res) => {
-	if (req.method === 'POST' && req.url === '/__results') {
+	if (req.method === 'POST' && (req.url === '/__results' || req.url === '/__results?narrow=1')) {
 		let body = '';
 		for await (const c of req) body += c;
 		res.writeHead(204).end();
-		reportResults(body);
+		(req.url.includes('narrow') ? reportNarrow : reportResults)(body);
 		return;
 	}
 	/*
@@ -106,10 +108,26 @@ const child = spawn(browser(), [
 	`http://localhost:${port}/tests/ui-check.html`,
 ], { stdio: 'ignore' });
 
+/*
+ * A second browser, at a phone's width.
+ *
+ * The layout rules that matter at 400px are media queries, and a media query
+ * asks the VIEWPORT -- so shrinking the host element inside the wide run
+ * cannot reach them. The page runs a short layout-only pass when it sees
+ * ?narrow=1 and reports separately.
+ */
+const narrowChild = spawn(browser(), [
+	'--headless', '--disable-gpu', '--no-sandbox', '--hide-scrollbars',
+	'--window-size=400,780',
+	`http://localhost:${port}/tests/ui-check.html?narrow=1`,
+], { stdio: 'ignore' });
+
 let results;
 try {
+	const both = Promise.all([reported, narrowReported])
+		.then(([a, b]) => JSON.stringify(JSON.parse(a).concat(JSON.parse(b))));
 	results = JSON.parse(await Promise.race([
-		reported,
+		both,
 		new Promise((_, rej) =>
 			/* 60s once, and the suite reached 58 of them. That is not a budget
 			 * any more, it is a coin toss on a slow machine -- and the failure
@@ -120,10 +138,12 @@ try {
 } catch (e) {
 	console.error(e.message);
 	child.kill('SIGKILL');
+	narrowChild.kill('SIGKILL');
 	server.close();
 	process.exit(1);
 } finally {
 	child.kill('SIGKILL');
+	narrowChild.kill('SIGKILL');
 	server.close();
 }
 
