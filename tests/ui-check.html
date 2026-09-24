@@ -2023,11 +2023,20 @@ try {
 		seen.setGrid = (g) => { grid = g; };
 		if (opts.lens) {
 			seen.moves = [];
+			seen.trail = [];
 			seen.pos = 0;
 			focus.move = (v) => {
 				seen.moves.push(v);
+				// A camera that REJECTS rather than throws, which is the shape
+				// a fetch-backed host actually fails in. The lens does not move
+				// when it does -- that is the whole point of counting only
+				// moves that were accepted.
+				if (opts.moveFails === v || opts.moveFails === true)
+					return Promise.reject(new Error('the lens is jammed'));
 				if (v === 'far') seen.pos++;
 				if (v === 'near') seen.pos--;
+				seen.trail.push(v + '@' + seen.pos);
+				seen.lastMove = Date.now();
 				return Promise.resolve();
 			};
 			focus.moveRepeatMs = 20;
@@ -2376,6 +2385,87 @@ try {
 		/Could not measure/.test(q(g.host, 'af-status') ? q(g.host, 'af-status').textContent : ''),
 		q(g.host, 'af-status') ? q(g.host, 'af-status').textContent.slice(0, 70) : '(none)');
 	t('and the button comes back', q(g.host, 'af-measure').hidden === false);
+	g.ed.destroy();
+
+	// A lens that will not move at all. A rejected move is the shape a
+	// fetch-backed host fails in, and counting a refused step as taken would
+	// hand back a step never taken -- walking the lens PAST where it started.
+	g = await mk({ lens: true, moveFails: 'far' });
+	q(g.host, 'af-measure').click();
+	for (let i = 0; i < 200 && q(g.host, 'af-measure').hidden; i++) await pause(100);
+	t('a lens that will not move is reported, not measured',
+		/Could not measure/.test(q(g.host, 'af-status').textContent),
+		q(g.host, 'af-status').textContent.slice(0, 70));
+	t('and a refused step is never handed back', g.seen.pos === 0, String(g.seen.pos));
+	g.ed.destroy();
+
+	// It went out but will not come back. Claiming the lens is where it started
+	// when the camera refused every step back is worse than saying nothing.
+	g = await mk({ lens: true, moveFails: 'near' });
+	q(g.host, 'af-measure').click();
+	for (let i = 0; i < 300 && q(g.host, 'af-measure').hidden; i++) await pause(100);
+	t('a lens that will not come back says so, instead of claiming it is back',
+		/may not be back/.test(q(g.host, 'af-status').textContent) &&
+		!/is back where it started/.test(q(g.host, 'af-status').textContent),
+		q(g.host, 'af-status').textContent.slice(0, 90));
+	g.ed.destroy();
+
+	// Destroyed mid-sweep. The walk back still has to happen -- the lens is
+	// real -- but nothing may poll a panel that has been removed.
+	g = await mk({ lens: true });
+	q(g.host, 'af-measure').click();
+	await pause(1600);
+	g.ed.destroy();
+	await pause(300);
+	const readsAtKill = g.seen.reads;
+	await pause(2500);
+	t('a destroyed editor does not go on reading the camera',
+		g.seen.reads === readsAtKill, readsAtKill + ' -> ' + g.seen.reads);
+	t('but the lens still comes home', g.seen.pos === 0, String(g.seen.pos));
+
+	// Leave Focus and come straight back. The old sweep is still walking the
+	// lens home; a new one starting now sends `far` against its `near`.
+	g = await mk({ lens: true });
+	q(g.host, 'af-measure').click();
+	await pause(1600);
+	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Develop').click();
+	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+	await pause(50);
+	q(g.host, 'af-measure').click();
+	// Sampling a position mid-walk proves nothing -- 2 on the way home and 2 on
+	// the way out look identical. What distinguishes them is ORDER: once the
+	// old sweep starts walking back, nothing may send `far` until the lens is
+	// home. So let it all settle, then read the trail.
+	for (let i = 0; i < 300; i++) {
+		await pause(100);
+		if (Date.now() - (g.seen.lastMove || 0) > 1500) break;
+	}
+	let home = true, clash = null;
+	g.seen.trail.forEach(function (step) {
+		const v = step.split('@')[0], at = Number(step.split('@')[1]);
+		if (v === 'near') home = false;
+		if (v === 'far' && !home && clash === null) clash = step;
+		if (at === 0) home = true;
+	});
+	t('a new sweep waits for the old one to bring the lens back',
+		clash === null, clash ? 'drove out at ' + clash : g.seen.trail.join(' '));
+	t('and the lens ends where it began', g.seen.pos === 0, String(g.seen.pos));
+	g.ed.destroy();
+
+	// Near and Far drive the same lens the sweep is driving.
+	g = await mk({ lens: true });
+	q(g.host, 'af-measure').click();
+	await pause(900);
+	t('the manual controls are held down for the sweep',
+		q(g.host, 'focus-near').disabled && q(g.host, 'focus-far').disabled,
+		'near ' + q(g.host, 'focus-near').disabled + ', far ' + q(g.host, 'focus-far').disabled);
+	const movesBefore = g.seen.moves.length;
+	q(g.host, 'focus-far').dispatchEvent(new PointerEvent('pointerdown', { button: 0, bubbles: true }));
+	await pause(200);
+	q(g.host, 'focus-far').dispatchEvent(new PointerEvent('pointerup', { button: 0, bubbles: true }));
+	t('and holding one during a sweep moves nothing',
+		g.seen.moves.length === movesBefore,
+		movesBefore + ' -> ' + g.seen.moves.length);
 	g.ed.destroy();
 
 } catch (e) {
