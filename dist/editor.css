@@ -8,7 +8,18 @@
  *
  * Values are the WebUI dark theme's own, lifted rather than re-picked:
  * page #14161c · panel #1c1f27 · raised #232734 · border #2c313d
- * body #e6e8ee · secondary #b6b9c2 · tertiary #878a94 · accent #5c70e8
+ * body #e6e8ee · secondary #b6b9c2 · tertiary #a2a6b2 · accent #5c70e8
+ *
+ * The tertiary used to be #878a94 -- 4.32:1 against the raised #232734 that
+ * panels are drawn in, under the 4.5:1 minimum, on the class carrying every
+ * piece of explanatory prose in the editor. It passed on the #1c1f27 rail at
+ * 4.78:1, which is presumably how it survived.
+ *
+ * #a2a6b2 replaces it: 6.12:1 on #232734, 6.77:1 on #1c1f27. Measured with the
+ * WCAG formula rather than by eye, checked first against known pairs -- white
+ * on black 21.00, #767676 on white 4.54. (The wrong colour was named here at
+ * first: a blanket replace of the old value rewrote the sentence describing
+ * it, leaving a comment that contradicted itself.)
  * stage #0d0f14
  */
 .re-root, .re-root * { box-sizing: border-box; }
@@ -24,10 +35,10 @@
 }
 .re-mono { font-family: 'PT Mono', ui-monospace, Menlo, Consolas, monospace;
 	font-variant-numeric: tabular-nums; }
-.re-cap { color: #878a94; font-size: 11px; font-weight: 600; letter-spacing: .07em;
+.re-cap { color: #a2a6b2; font-size: 11px; font-weight: 600; letter-spacing: .07em;
 	text-transform: uppercase; margin: 0; }
 .re-rule { flex: 1 1 auto; height: 1px; background: #2c313d; min-width: 8px; }
-.re-note { color: #878a94; font-size: 11px; line-height: 1.45; }
+.re-note { color: #a2a6b2; font-size: 11px; line-height: 1.45; }
 
 .re-top { flex: 0 0 52px; display: flex; align-items: center; gap: 12px; padding: 0 14px;
 	background: #1c1f27; border-bottom: 1px solid #2c313d; }
@@ -41,8 +52,12 @@
 	.re-top { gap: 8px; padding: 0 9px; }
 	.re-top > .re-chip { display: none; }
 	.re-btn > span { display: none; }
-	.re-btn { padding: 6px 8px; }
+	/* NOT less padding. This used to shrink to 6px 8px, which took the
+	   buttons further from a finger-sized target exactly on the devices most
+	   likely to be touched. */
+	.re-btn { padding: 9px 11px; }
 }
+
 
 .re-mid { flex: 1 1 auto; display: flex; min-height: 0; }
 .re-stage { flex: 1 1 auto; position: relative; display: flex; align-items: center;
@@ -88,10 +103,15 @@
 .re-insp { flex: 0 0 328px; display: flex; flex-direction: column; gap: 9px; padding: 12px;
 	background: #1c1f27; border-left: 1px solid #2c313d; overflow-y: auto; }
 .re-foot { flex: 0 0 30px; display: flex; align-items: center; gap: 16px; padding: 0 14px;
-	background: #1c1f27; border-top: 1px solid #2c313d; color: #878a94; font-size: 11px; }
+	background: #1c1f27; border-top: 1px solid #2c313d; color: #a2a6b2; font-size: 11px; }
 
 .re-panel { background: #232734; border: 1px solid #2c313d; border-radius: 12px; padding: 9px; }
 .re-shead { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; }
+/* The disclosure marker is drawn by the summary row itself, so the browser's
+   own triangle is taken away on both engines that draw one. */
+.re-root summary::-webkit-details-marker { display: none; }
+.re-root summary { list-style: none; }
+.re-root details[open] > summary .re-note { transform: rotate(180deg); }
 
 .re-seg { display: flex; gap: 2px; padding: 2px; background: #232734;
 	border: 1px solid #2c313d; border-radius: 8px; width: fit-content; }
@@ -128,13 +148,13 @@
  * a bar filling from there, so how far you have moved is readable without
  * doing arithmetic. */
 .re-row { display: flex; align-items: center; gap: 10px; height: 25px; }
-.re-rname { flex: 0 0 70px; color: #878a94; font-size: 11px; font-weight: 600;
+.re-rname { flex: 0 0 70px; color: #a2a6b2; font-size: 11px; font-weight: 600;
 	letter-spacing: .07em; text-transform: uppercase; }
 .re-track { position: relative; flex: 1 1 auto; height: 25px; }
 .re-tbg, .re-fill { position: absolute; top: 10px; height: 4px; border-radius: 2px; }
 .re-tbg { left: 0; right: 0; background: rgba(230,232,238,.10); }
 .re-fill { background: #5c70e8; }
-.re-tick { position: absolute; top: 6px; width: 1px; height: 12px; background: #878a94; }
+.re-tick { position: absolute; top: 6px; width: 1px; height: 12px; background: #a2a6b2; }
 .re-track input { position: relative; z-index: 2; appearance: none; width: 100%; height: 25px;
 	margin: 0; padding: 0; background: transparent; border: 0; cursor: ew-resize; }
 .re-track input::-webkit-slider-thumb { appearance: none; width: 14px; height: 14px;
@@ -143,7 +163,7 @@
 	background: #e6e8ee; box-shadow: 0 1px 3px rgba(0,0,0,.45); }
 .re-rnum { flex: 0 0 46px; color: #b6b9c2; font-size: 12px; text-align: right;
 	font-family: 'PT Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
-.re-rst { flex: 0 0 16px; border: 0; background: none; padding: 0; color: #878a94;
+.re-rst { flex: 0 0 16px; border: 0; background: none; padding: 0; color: #a2a6b2;
 	cursor: pointer; line-height: 0; }
 .re-rst:hover { color: #5c70e8; }
 .re-rst:disabled { opacity: .18; cursor: default; }
@@ -182,3 +202,41 @@
 /* The deviation histogram. currentColor so the bars and rules follow the
  * panel's text colour rather than needing their own palette. */
 .re-devplot { display: block; width: 100%; height: auto; color: #b9bec9; }
+
+/*
+ * A phone.
+ *
+ * The rail is a fixed 328px column that never shrank, so at 400px the picture
+ * was left about 71px of a 400px screen -- a strip, beside a panel. And the
+ * tab bar is nowrap inside a row whose children may not shrink, with no
+ * overflow anywhere, so a fifth tab and the Capture and Download buttons
+ * simply left the screen with no way to reach them.
+ *
+ * So: stack, and let the bar scroll. DOM order is already picture-then-rail,
+ * so nothing has to move.
+ */
+@media (max-width: 560px) {
+	.re-mid { flex-direction: column; }
+	.re-stage {
+		flex: 0 0 auto;
+		/* Something to look at, and a width for fitStep() to divide by: the
+		   zoom step is worked out from stage.clientWidth, and a stage flexed
+		   to nothing yields a degenerate step. */
+		min-height: 42vh;
+	}
+	.re-insp {
+		flex: 1 1 auto; width: 100%;
+		border-left: 0; border-top: 1px solid #2c313d;
+	}
+	/* The bar gets somewhere to go rather than off the edge. */
+	.re-top { overflow-x: auto; scrollbar-width: none; }
+	.re-top::-webkit-scrollbar { display: none; }
+	/* A finger, not a mouse: 44px is the guideline and the main tab bar was
+	   25. 12px text is 18px on a 1.5 line, so 13px of padding makes 44 with no
+	   border and 12px makes 44 with one. */
+	.re-seg button, .re-seg.re-tight button { padding: 13px; font-size: 12px; }
+	.re-btn, .re-btn.re-sm { padding: 12px 13px; font-size: 12px; }
+	.re-rst { flex-basis: 44px; height: 44px; }
+	.re-row { height: 44px; }
+	summary { padding: 8px 0; }
+}
