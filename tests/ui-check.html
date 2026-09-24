@@ -81,12 +81,24 @@ try {
 		!!insp.querySelector('[data-act="find-plates"]'));
 	t('which says nothing has been found yet rather than nothing at all',
 		/Candidates are listed best read first/i.test(insp.textContent));
+	/*
+	 * The plate card belongs on Plates, not on Diagnose.
+	 *
+	 * It asks whether the plate you picked can be read, which is a question
+	 * about the picture; Diagnose is about the sensor's own health. It sat in
+	 * Diagnose until the guided defect run went in above it and left it
+	 * between the steps of that run and their result.
+	 */
+	t('the plate card sits on Plates, under the list it asks about',
+		/Reading a plate here/i.test(insp.textContent));
+	t('and asks for one of those to be picked before it measures',
+		/Pick one of the plates above/i.test(insp.textContent),
+		insp.textContent.replace(/\s+/g, ' ').slice(0, 110));
 	const diag = [...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Diagnose');
 	diag.click();
-	t('Diagnose gains the plate card when a provider is there',
-		/Reading a plate here/i.test(host.querySelector('.re-insp').textContent));
-	t('and asks for a plate to be picked before it measures one',
-		/Pick a plate on the Plates tab/i.test(host.querySelector('.re-insp').textContent));
+	t('and Diagnose is left to the sensor, with no plate card in it',
+		!/Reading a plate here/i.test(host.querySelector('.re-insp').textContent),
+		host.querySelector('.re-insp').textContent.replace(/\s+/g, ' ').slice(0, 110));
 } catch (e) {
 	t('the Plates tab follows the host', false, e.message);
 }
@@ -1096,6 +1108,266 @@ try {
 	host.remove();
 } catch (e) {
 	t('diagnose works end to end', false, e.message);
+}
+
+/*
+ * The rings are a picture of where the defects are, not of where the list
+ * starts.
+ *
+ * The overlay caps what it draws, and it used to draw the first 600 of a list
+ * the engine fills in raster order -- so on any frame with more than that, the
+ * rings were the top of the picture and nothing else. A camera frame carrying
+ * 4054 of them put every ring inside the top 15% of the rows and was read as
+ * the defects being clustered at the top of the sensor, while the panel's own
+ * spread index beside it said 1.01, scattered.
+ *
+ * 1500 asked for yields 1342 found, which is well past the cap.
+ */
+try {
+	const host = document.createElement('div');
+	document.body.append(host);
+	const ed = mountEditor(host, { base: '../dist/', styles: false, autoCapture: false });
+	const bytes = new Uint8Array(
+		await (await fetch('/__defects.dng?n=1500&seed=3')).arrayBuffer());
+	await ed.open(bytes, 'many.dng');
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose').click();
+	await new Promise((r) => setTimeout(r, 120));
+	host.querySelector('[data-act="scan"]').click();
+	for (let i = 0; i < 120 && !host.querySelector('.re-devplot'); i++)
+		await new Promise((r) => setTimeout(r, 100));
+
+	const marks = [...host.querySelectorAll('.re-mark')];
+	t('a frame with thousands of defects still only draws a few hundred rings',
+		marks.length > 0 && marks.length <= 600, String(marks.length));
+	/*
+	 * Against the PICTURE, not against the rings' own extent.
+	 *
+	 * The first version of this check took the midpoint of the drawn marks and
+	 * asked how many fell below it -- and a prefix is evenly spread inside its
+	 * own band, so about half of them always do. It passed with the bug put
+	 * back, which is the only reason it was caught. The question is where the
+	 * rings sit on the frame, so the frame has to be what they are measured
+	 * against.
+	 */
+	const cys = marks.map((m) => Number(m.getAttribute('cy')));
+	const sRect = host.querySelector('.re-stage').getBoundingClientRect();
+	const cRect = host.querySelector('canvas').getBoundingClientRect();
+	const picTop = cRect.top - sRect.top, picH = cRect.height;
+	const deepest = (Math.max(...cys) - picTop) / picH;
+	// 1342 defects drawn 600 at a time as a prefix reach 600/1342 of the rows
+	// and stop -- measured, the lowest ring sits at 44% of the picture. Sampled,
+	// they reach the bottom of it.
+	t('and spreads them over the whole frame rather than the top of it',
+		picH > 0 && deepest > 0.7,
+		`lowest ring at ${(deepest * 100).toFixed(0)}% of the picture, ` +
+			`${marks.length} rings over ${picH.toFixed(0)} px`);
+	t('the panel says how many of how many are ringed',
+		/Rings mark \d+ of them/.test(host.querySelector('.re-insp').textContent),
+		host.querySelector('.re-insp').textContent.replace(/\s+/g, ' ').slice(0, 150));
+	ed.destroy();
+	host.remove();
+} catch (e) {
+	t('the rings sample the frame', false, e.message);
+}
+
+/*
+ * The guided run, which is the whole feature for anyone who does not already
+ * know how to drive the panels underneath it.
+ *
+ * Each capture is a different seed, so its scattered false positives differ --
+ * the shape of noise -- while `shared` plants twelve sites in the same places
+ * every time, which is the shape of silicon. That is what the tally is for.
+ */
+async function huntSettle(host) {
+	for (let i = 0; i < 150; i++) {
+		const b = host.querySelector('[data-act="hunt-step"]');
+		if ((!b || !b.disabled) && !/Working/.test(host.textContent)) return;
+		await new Promise((r) => setTimeout(r, 100));
+	}
+}
+
+for (const [what, query, wantDark] of [
+	['a covered lens', 'level=20&n=40&shared=12', true],
+	['a lit scene', 'level=300&n=40&shared=12', false],
+]) {
+	try {
+		const host = document.createElement('div');
+		document.body.append(host);
+		let shot = 0;
+		const ed = mountEditor(host, {
+			base: '../dist/', styles: false, autoCapture: false,
+			capture: async () => {
+				shot++;
+				const b = new Uint8Array(await (await fetch(
+					`/__defects.dng?${query}&seed=${100 + shot}`)).arrayBuffer());
+				return { bytes: b, name: 'shot-' + shot + '.dng' };
+			},
+		});
+		const first = new Uint8Array(
+			await (await fetch(`/__defects.dng?${query}&seed=99`)).arrayBuffer());
+		await ed.open(first, 'first.dng');
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose').click();
+		await new Promise((r) => setTimeout(r, 120));
+
+		const start = host.querySelector('[data-act="hunt-start"]');
+		t(`${what}: the tab offers to find the bad pixels without being driven`, !!start);
+		start.click();
+		await new Promise((r) => setTimeout(r, 80));
+		t(`${what}: and says how to make the frame dark before it takes one`,
+			/opaque over the lens/i.test(host.querySelector('.re-insp').textContent));
+
+		host.querySelector('[data-act="hunt-step"]').click();
+		await huntSettle(host);
+		const verdict = host.querySelector('[data-act="hunt-verdict"]');
+		t(`${what}: the first capture is graded from the frame, not from what it was told`,
+			!!verdict, host.querySelector('.re-insp').textContent.replace(/\s+/g, ' ').slice(0, 120));
+		t(`${what}: and reads it as ${wantDark ? 'covered' : 'a picture'}`,
+			wantDark === /Covered/.test(verdict?.textContent || ''),
+			(verdict?.textContent || '(nothing)').slice(0, 110));
+		// A scene needs the camera moved between captures; a covered lens does
+		// not, and telling someone to move a camera that is under a box is how
+		// advice stops being believed.
+		t(`${what}: says ${wantDark ? 'to leave the camera alone' : 'to move the camera'}`,
+			wantDark === !/move the camera/i.test(verdict?.textContent || ''),
+			(verdict?.textContent || '').slice(0, 110));
+		t(`${what}: and counts what it has so far`,
+			/So far: \d+ sites?/.test(host.textContent),
+			host.querySelector('[data-act="hunt-progress"]')?.textContent || '(nothing)');
+
+		for (let i = 0; i < 4; i++) {
+			const b = host.querySelector('[data-act="hunt-step"]');
+			if (!b) break;
+			b.click();
+			await huntSettle(host);
+		}
+		t(`${what}: five captures in, it offers the answer rather than a sixth`,
+			!!host.querySelector('[data-act="hunt-finish"]') &&
+			!host.querySelector('[data-act="hunt-step"]'));
+		host.querySelector('[data-act="hunt-finish"]').click();
+		await new Promise((r) => setTimeout(r, 200));
+		t(`${what}: and says which rule produced the list`,
+			/turned up in at least 4 of 5 captures/i.test(host.textContent),
+			host.textContent.match(/turned up in at least[^.]*\./)?.[0] || '(none)');
+		/*
+		 * A list to keep, or a straight answer that there is nothing to keep.
+		 *
+		 * Both are right, and which one turns up depends on the frame. These
+		 * fixtures are a flat field with spikes on it, so on the lit arm the
+		 * brightness gate has no texture to discriminate against and gates the
+		 * planted sites out along with everything else -- measured, 52 sites
+		 * per capture become 0. That is the gate behaving as designed on a
+		 * frame no camera produces, and the thing worth pinning is that the
+		 * run still ends somewhere rather than offering an empty file.
+		 */
+		const save = host.querySelector('[data-act="hunt-export"]');
+		t(`${what}: ending in a list to keep, or in saying there is none`,
+			(!!save && !save.disabled) ||
+			/Nothing appeared in enough captures/i.test(host.textContent),
+			save ? `export ${save.disabled ? 'disabled' : 'enabled'}` : '(no export button)');
+		ed.destroy();
+		host.remove();
+	} catch (e) {
+		t(`the guided run on ${what}`, false, e.message);
+	}
+}
+
+/*
+ * A host that names every capture the same must not lose four of five.
+ *
+ * The mount contract says `capture` returns { bytes, name }, and nothing in it
+ * requires the name to vary; the camera's own WebUI happens to timestamp them,
+ * but a host that does not would have had five captures collapse into one
+ * kept scan, and a run that confirmed nothing at all.
+ */
+try {
+	const host = document.createElement('div');
+	document.body.append(host);
+	let shot = 0;
+	const ed = mountEditor(host, {
+		base: '../dist/', styles: false, autoCapture: false,
+		capture: async () => {
+			shot++;
+			const b = new Uint8Array(await (await fetch(
+				`/__defects.dng?level=20&n=40&shared=12&seed=${200 + shot}`)).arrayBuffer());
+			// The same name every time, on purpose.
+			return { bytes: b, name: 'frame.dng' };
+		},
+	});
+	await ed.open(new Uint8Array(await (await fetch(
+		'/__defects.dng?level=20&n=40&shared=12&seed=199')).arrayBuffer()), 'frame.dng');
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose').click();
+	await new Promise((r) => setTimeout(r, 120));
+	host.querySelector('[data-act="hunt-start"]').click();
+	await new Promise((r) => setTimeout(r, 80));
+	for (let i = 0; i < 5; i++) {
+		const b = host.querySelector('[data-act="hunt-step"]');
+		if (!b) break;
+		b.click();
+		await huntSettle(host);
+	}
+	host.querySelector('[data-act="hunt-finish"]')?.click();
+	await new Promise((r) => setTimeout(r, 200));
+	t('five captures under one name are still five captures',
+		/turned up in at least 4 of 5 captures/i.test(host.textContent),
+		host.textContent.match(/turned up in at least[^.]*\./)?.[0] || '(none)');
+	const save = host.querySelector('[data-act="hunt-export"]');
+	t('and they confirm something between them', !!save && !save.disabled);
+	ed.destroy();
+	host.remove();
+} catch (e) {
+	t('a host that reuses one capture name', false, e.message);
+}
+
+/*
+ * A run that could not see the whole frame says so.
+ *
+ * The engine stores at most 4096 defects and fills them in raster order, so a
+ * capture that overflows has looked at the top of its frame and nothing below.
+ * The tally can only ever see what was stored, so the list that comes out is
+ * short in a known place -- and the run used to hand it over with truncated
+ * cleared, as though it were the whole answer.
+ *
+ * 1024x1024 with 20000 asked for yields about 4800 found against 4096 stored.
+ * 512x512 cannot be made to overflow: the spikes land on each other first.
+ */
+try {
+	const host = document.createElement('div');
+	document.body.append(host);
+	let shot = 0;
+	const q = 'w=1024&h=1024&level=20&n=20000&shared=12';
+	const ed = mountEditor(host, {
+		base: '../dist/', styles: false, autoCapture: false,
+		capture: async () => {
+			shot++;
+			const b = new Uint8Array(await (await fetch(
+				`/__defects.dng?${q}&seed=${300 + shot}`)).arrayBuffer());
+			return { bytes: b, name: 'big-' + shot + '.dng' };
+		},
+	});
+	await ed.open(new Uint8Array(await (await fetch(
+		`/__defects.dng?${q}&seed=299`)).arrayBuffer()), 'big.dng');
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose').click();
+	await new Promise((r) => setTimeout(r, 120));
+	host.querySelector('[data-act="hunt-start"]').click();
+	await new Promise((r) => setTimeout(r, 80));
+	for (let i = 0; i < 5; i++) {
+		const b = host.querySelector('[data-act="hunt-step"]');
+		if (!b) break;
+		b.click();
+		await huntSettle(host);
+	}
+	host.querySelector('[data-act="hunt-finish"]')?.click();
+	await new Promise((r) => setTimeout(r, 300));
+	const warn = host.querySelector('[data-act="hunt-partial"]');
+	t('a run whose captures overflowed the scan says the map is short',
+		!!warn, host.querySelector('.re-insp').textContent.replace(/\s+/g, ' ').slice(0, 140));
+	t('and says where the missing ones are',
+		/never looked at|bottom of the frame/i.test(warn?.textContent || ''),
+		(warn?.textContent || '(nothing)').slice(0, 120));
+	ed.destroy();
+	host.remove();
+} catch (e) {
+	t('a truncated guided run', false, e.message);
 }
 
 /* Confirming is only real once the host has been told. A keep() that fails

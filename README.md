@@ -86,6 +86,25 @@ of it off the mosaic — a demosaiced frame has smeared every one of those into
 its neighbours, so the same measurements taken after interpolation would be
 measurements of the interpolation.
 
+**Find the bad pixels** is the same machinery with a way in. Five captures,
+each scanned and kept, and then the sites that turned up in four of them: a
+pixel that is genuinely bad is bad in every capture, while noise and scene
+detail come and go. It grades the first capture rather than trusting what it
+was told — on a lab gk7205v300 + imx335 a frame taken inside a black box sits
+0.000 to 0.001 of the way from black to saturation, against 0.105 for a lit
+scene — and a covered lens and an uncovered one then get opposite advice: leave
+the camera alone, or move it between captures so that detail in the scene
+cannot line up with itself. It ends in a list of coordinates you can save.
+
+Narrowing the search to the darkest part of the frame helps a frame with a
+picture in it and ruins one without. The cut is a percentile of the local
+background, so on a frame that is dark all over it sits just under the level
+nearly every pixel is at, and a hot pixel lifts its own neighbourhood above it
+— so the gate removes the defects first. On that camera's 7 s dark frame, 3921
+sites arranged at a Clark-Evans index of 1.00 become 104 at 0.68, which reads
+as "following the picture" about a frame with no picture in it. The guided run
+never narrows a dark frame and the panel says why.
+
 The noise figure is a median of local differences rather than a mean square,
 because a frame is mostly flat and occasionally an edge and squaring gives the
 edges all the say: on a synthetic frame with one hard boundary, a mean-square

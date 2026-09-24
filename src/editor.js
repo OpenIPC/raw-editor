@@ -925,16 +925,47 @@ export function mountEditor(root, {
 		plateMarks.append(svg);
 	}
 
+	/*
+	 * How many rings the picture will carry at most, and how many of a given
+	 * list actually get one. The panel quotes this number, so it is worked out
+	 * in one place -- a cap the copy had to guess at is how the old wording
+	 * came to name a count that was never on screen.
+	 */
+	const MARKS_CAP = 600;
+	const markStep = (n) => Math.max(1, Math.ceil(n / MARKS_CAP));
+	const markedCount = (n) => (n <= 0 ? 0 : Math.ceil(n / markStep(n)));
+
 	function drawMarks() {
 		marks.replaceChildren();
 		if (mode !== 'diagnose' || !diag || !state.info) return;
 		const NS = 'http://www.w3.org/2000/svg';
 		const svg = document.createElementNS(NS, 'svg');
 		svg.setAttribute('class', 're-chart-svg');
-		// A cap on what is drawn, not on what is counted: a sensor with ten
-		// thousand bad pixels would otherwise spend a second building circles
-		// nobody can tell apart.
-		for (const d of diag.defects.slice(0, 600)) {
+		/*
+		 * A cap on what is drawn, not on what is counted. This used to say ten
+		 * thousand rings would cost a second to build, which does not survive
+		 * being measured: in headless Chromium, building and laying out that
+		 * many circles is 89.9 ms, against 47.0 ms for 4096 and 6.2 ms for
+		 * 600 -- median of seven, on this desktop x86. So the cap is not
+		 * really about the clock. It is that a frame cannot show ten thousand
+		 * rings as ten thousand things; past a few hundred they merge into a
+		 * wash that hides the picture underneath and says nothing the count
+		 * beside it does not say better.
+		 *
+		 * Every k-th, and NOT the first six hundred. The list arrives in the
+		 * order the scan walks the frame, which is row by row, so a prefix of
+		 * it is the top of the picture and nothing else. On a camera frame
+		 * carrying 4054 defects that put every ring inside the top 600/4054 =
+		 * 15% of the rows, in a band with a ragged edge along the bottom of
+		 * it, and it was read -- reasonably -- as the defects being clustered
+		 * at the top of the sensor. They were not: the same scan's own spread
+		 * index said 1.01, scattered. A stride samples the whole frame at the
+		 * same cost, and being deterministic it survives the redraws that a
+		 * resize or a tab switch bring.
+		 */
+		const step = markStep(diag.defects.length);
+		for (let i = 0; i < diag.defects.length; i += step) {
+			const d = diag.defects[i];
 			const at = stageCoords(d.x, d.y);
 			if (!at) continue;
 			const c = document.createElementNS(NS, 'circle');
@@ -1054,12 +1085,27 @@ export function mountEditor(root, {
 
 	function pct(v) { return (v * 100).toFixed(v >= 0.01 ? 1 : 3) + '%'; }
 
-	/* The second card in Diagnose: the picture's fitness for reading a plate,
-	 * as opposed to the sensor's own health. Built only when the host gave us
-	 * somewhere to read from. */
+	/*
+	 * Whether the plate you picked can be read: how many pixels across it is,
+	 * and how much blur it survives before it stops reading.
+	 *
+	 * It lives on the Plates tab, under the list the plate is chosen from. It
+	 * used to sit in Diagnose, which is about the sensor's own health and not
+	 * about the picture -- and every one of these questions is about one
+	 * plate, so the answer differed across a frame while the card sat on a tab
+	 * with nothing to pick a plate on. Diagnose grew a guided run afterwards
+	 * and this card landed in the middle of it, between the steps and their
+	 * result, which is what finally made the misfiling obvious.
+	 *
+	 * Refilled rather than rebuilt, so choosing a different plate refreshes it
+	 * where it stands instead of stacking a second copy underneath.
+	 */
+	let plateFitPanel = null;
 	function buildPlateFitness() {
 		if (!plates) return;
-		const panel = el('div', 're-panel');
+		if (!plateFitPanel) plateFitPanel = el('div', 're-panel');
+		const panel = plateFitPanel;
+		panel.replaceChildren();
 		panel.append(Object.assign(el('div', 're-shead'), {
 			innerHTML: '<h3 class="re-cap">Reading a plate here</h3><span class="re-rule"></span>',
 		}));
@@ -1068,11 +1114,11 @@ export function mountEditor(root, {
 		const rows = el('div');
 		rows.style.cssText = 'display:flex;flex-direction:column;gap:7px;margin-top:9px';
 		panel.append(rows);
-		insp.append(panel);
+		if (panel.parentNode !== insp) insp.append(panel);
 
 		if (!plateCands || plateSel < 0) {
-			note.textContent = 'Pick a plate on the Plates tab first — these are questions ' +
-				'about one plate, and the answers differ across a frame.';
+			note.textContent = 'Pick one of the plates above — these are questions about ' +
+				'a single plate, and the answers differ across a frame.';
 			return;
 		}
 		const c = plateCands[plateSel];
@@ -1182,8 +1228,341 @@ export function mountEditor(root, {
 		});
 	}
 
+	/*
+	 * The guided run: find this sensor's bad pixels without having to know how.
+	 *
+	 * Everything underneath this was already here -- the brightness gate, the
+	 * tally across captures, the arrangement index -- and all of it was behind
+	 * knowing to press Scan, knowing to choose Darkest, knowing to press Keep
+	 * five times and knowing what "4 of 5" buys. This drives those, and owns
+	 * no judgement of its own.
+	 *
+	 * Five captures, because one cannot tell a bad pixel from a noisy one: the
+	 * tally wants a site to keep coming back, and the suggested rule works out
+	 * at 4 of 5.
+	 *
+	 * It does NOT use the camera's own burst. `/image.dng?frames=N` averages
+	 * consecutive frames in the sensor, and an average is the one thing that
+	 * cannot answer this question -- a pixel that was wrong in every frame and
+	 * a pixel that was wrong in one of sixteen come out of it looking alike.
+	 * The same reasoning is written out where the Plates tab picks between the
+	 * two paths.
+	 */
+	const HUNT_WANT = 5;
+
+	function startHunt() {
+		// A run starts from nothing kept, or the first tally would count
+		// captures the operator has forgotten about.
+		scanSet = [];
+		needTouched = false;
+		/* And from looking everywhere, whatever the last run or the operator
+		 * left the gate on. The first capture decides whether to narrow it,
+		 * and narrowing a frame that is dark all over destroys the answer
+		 * rather than sharpening it -- see the note beside the gate. */
+		bgPercent = 100;
+		hunt = { taken: 0, dark: null, level: null, busy: false, failed: '', done: false, seen: opened };
+		buildDiagnose();
+		drawMarks();
+	}
+
+	/*
+	 * One step: get a frame, read it, keep it.
+	 *
+	 * The first capture is also the one that decides which kind of run this
+	 * is, and it decides it from the frame rather than from what it was told.
+	 */
+	async function huntStep() {
+		if (!hunt || hunt.busy) return;
+		hunt.busy = true;
+		hunt.failed = '';
+		buildDiagnose();
+		try {
+			if (capture) {
+				const was = opened;
+				await takeFrame();
+				if (opened === was)
+					throw new Error('That capture did not arrive. The message above says why.');
+			} else if (!state.info) {
+				throw new Error('Drop a frame on the picture first.');
+			} else if (hunt.seen === opened) {
+				/*
+				 * With nowhere to capture from, the frames are brought in by
+				 * hand -- and the same frame read twice would agree with
+				 * itself perfectly, which is the one answer the tally must
+				 * never be allowed to give. Every step needs a frame that has
+				 * actually been opened since the last one.
+				 */
+				throw new Error('That is the frame this run has already read. ' +
+					'Drop the next one on the picture, then read it.');
+			}
+			hunt.seen = opened;
+			diag = await scanFrame();
+
+			if (hunt.taken === 0) {
+				hunt.level = frameLevel(diag);
+				hunt.dark = hunt.level !== null && hunt.level < COVERED;
+				/*
+				 * A frame with a picture in it needs the brightness gate, and
+				 * this is the moment to set it: the shadows of a scene are the
+				 * nearest thing to a capped lens, and leaving the scan looking
+				 * everywhere would fill the tally with scenery for four more
+				 * captures before anyone found out.
+				 */
+				if (!hunt.dark && bgPercent === 100) {
+					bgPercent = 25;
+					diag = await scanFrame();
+				}
+			}
+			keepCurrentScan();
+			hunt.taken++;
+		} catch (e) {
+			hunt.failed = e && e.message ? e.message : 'That step did not finish.';
+		} finally {
+			hunt.busy = false;
+			buildDiagnose();
+			drawMarks();
+		}
+	}
+
+	/* The end of a run: apply the rule the compare panel would have suggested,
+	 * and put the survivors on the picture through the same path the Mark
+	 * button uses. */
+	function finishHunt() {
+		const tally = tallyOf(scanSet);
+		const M = scanSet.length;
+		const need = Math.max(2, Math.ceil(M * 0.8));
+		needN = need;
+		const pts = [...tally].filter(([, c]) => c >= need)
+			.map(([k]) => { const [x, y] = k.split(','); return { x: +x, y: +y }; });
+		/*
+		 * Whether any capture in this run hit the engine's store cap.
+		 *
+		 * It matters, and it is not visible in the result: a capture that
+		 * overflowed kept a census of the top of its frame only, so every
+		 * candidate below the row it stopped on was never a candidate for the
+		 * tally either. The list that comes out is then short by an unknown
+		 * amount in a known place, and the old code set truncated to false and
+		 * presented it as the whole answer. It is still worth having -- the
+		 * sites it did confirm are confirmed -- so the run finishes and says
+		 * what it could not see rather than refusing.
+		 */
+		const clipped = scanSet.filter((v) => v.truncated);
+		hunt.clipped = clipped.length;
+		hunt.mostFound = clipped.reduce((m, v) => Math.max(m, v.found || 0), 0);
+		diag = { ...diag, defects: pts, defectCount: pts.length, truncated: false,
+			fromTally: { need, of: M, partial: clipped.length > 0 } };
+		hunt.done = true;
+		buildDiagnose();
+		drawMarks();
+	}
+
+	/*
+	 * The confirmed list, as a file.
+	 *
+	 * Plain text and one site per line, because nothing on the camera consumes
+	 * a defect map yet and a list of coordinates is the one shape every other
+	 * tool can read. The header carries what the list is only meaningful
+	 * against: which sensor, at what exposure and gain, and under what rule --
+	 * a map taken at seven seconds describes a sensor that is not the one
+	 * running at a thirtieth.
+	 */
+	function exportDefects() {
+		if (!diag || !diag.defects || !diag.defects.length) return;
+		const i = state.info || {};
+		const head = [
+			'# sensor defect list, raw-editor',
+			'# camera      ' + (i.model || 'unknown'),
+			'# frame       ' + (i.width || '?') + 'x' + (i.height || '?') +
+				' ' + (i.cfaName || ''),
+			'# exposure    ' + (i.exposure ? (i.exposure * 1000).toFixed(1) + ' ms' : 'unknown'),
+			'# iso         ' + (i.iso || 'unknown'),
+			'# rule        ' + (diag.fromTally
+				? 'seen in at least ' + diag.fromTally.need + ' of ' +
+					diag.fromTally.of + ' captures'
+				: 'a single capture, unconfirmed'),
+			'# taken       ' + new Date().toISOString(),
+			'# complete    ' + (diag.fromTally && diag.fromTally.partial
+				? 'NO - a capture filled the scan\'s store, so sites near the bottom ' +
+					'of the frame were never examined'
+				: 'yes, as far as the scan could see'),
+			'# ' + diag.defects.length + ' sites, x,y in sensor pixels',
+		].join('\n');
+		const body = diag.defects.map((p) => p.x + ',' + p.y).join('\n');
+		const url = URL.createObjectURL(
+			new Blob([head + '\n' + body + '\n'], { type: 'text/plain' }));
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = 'defects.txt';
+		a.click();
+		// Same reasoning as saving the frame: revoking at once races the
+		// browser in Firefox.
+		setTimeout(() => URL.revokeObjectURL(url), 10000);
+	}
+
+	function buildHunt() {
+		const panel = el('div', 're-panel');
+		panel.append(Object.assign(el('div', 're-shead'), {
+			innerHTML: '<h3 class="re-cap">Find the bad pixels</h3><span class="re-rule"></span>',
+		}));
+
+		if (!hunt) {
+			panel.append(Object.assign(el('p', 're-note'), {
+				style: 'margin:0 0 9px',
+				textContent: 'Five captures, compared. A pixel that is genuinely bad is bad ' +
+					'in every one of them; whatever comes and goes was noise, or something ' +
+					'in the picture.',
+			}));
+			const go = el('button', 're-btn re-pri', '');
+			go.dataset.act = 'hunt-start';
+			go.textContent = 'Start';
+			go.addEventListener('click', startHunt);
+			panel.append(go);
+			return panel;
+		}
+
+		const done = hunt.taken >= HUNT_WANT;
+		panel.append(Object.assign(el('div', 're-rname'), {
+			style: 'margin:0 0 7px',
+			textContent: done ? 'done' : 'step ' + (hunt.taken + 1) + ' of ' + HUNT_WANT,
+		}));
+
+		if (hunt.taken === 0) {
+			/*
+			 * How to make it dark, not merely that dark is better.
+			 *
+			 * The panel underneath has always said a dark frame gives the only
+			 * reliable answer, which is true and of no use at all on a fixed
+			 * lens in a dome that cannot be capped.
+			 */
+			panel.append(Object.assign(el('p', 're-note'), {
+				style: 'margin:0 0 9px',
+				textContent: 'Make it dark first, if you can: at night with the infrared ' +
+					'light switched off, and something opaque over the lens — black tape, ' +
+					'or a box over the camera. Not a hand: with the infrared filter swung ' +
+					'out, the sensor sees straight through skin. If you cannot, carry on ' +
+					'anyway — it will take longer and say so.',
+			}));
+		} else {
+			const tally = tallyOf(scanSet);
+			let every = 0;
+			for (const [, c] of tally) if (c === hunt.taken) every++;
+			panel.append(Object.assign(el('p', 're-note'), {
+				style: 'margin:0 0 7px',
+				textContent: 'So far: ' + tally.size + ' site' + (tally.size === 1 ? '' : 's') +
+					', ' + every + ' of which ' + (every === 1 ? 'has' : 'have') +
+					' turned up every time.',
+			}));
+			panel.lastChild.dataset.act = 'hunt-progress';
+
+			if (hunt.dark !== null) {
+				const box = el('div', 're-notice ' + (hunt.dark ? 're-ok' : 're-warn'));
+				box.style.cssText = 'margin:0 0 9px';
+				box.dataset.act = 'hunt-verdict';
+				box.append(Object.assign(el('div'), {
+					textContent: hunt.dark
+						? 'Covered — there is nothing in this frame but the sensor\u2019s own ' +
+							'dark current, which is the best kind of frame for this. Leave the ' +
+							'camera where it is and take the rest.'
+						: 'There is still a picture in this frame: the middle of it sits ' +
+							(hunt.level === null ? '' : (hunt.level * 100).toFixed(1) + '% ') +
+							'of the way to saturation. Carrying on, looking only where the ' +
+							'picture is dark — move the camera a little between captures, so ' +
+							'that detail in the scene cannot line up with itself.',
+				}));
+				panel.append(box);
+			}
+
+			/*
+			 * What the exposure buys, said where it can still be acted on.
+			 *
+			 * A defect's signal is dark current, which accumulates with time,
+			 * so a warm pixel that is invisible in a short frame is plain in a
+			 * long one. Measured on this camera in a black box, the same
+			 * sensor reported 882 sites at 0.5 s, 1329 at 1 s, 1782 at 2 s and
+			 * 3921 at 7 s. Which is also the warning: a map taken at seven
+			 * seconds is not a map of the camera that runs at a thirtieth.
+			 */
+			if (state.info && state.info.exposure)
+				panel.append(Object.assign(el('p', 're-note'), {
+					style: 'margin:0 0 9px',
+					textContent: 'Taken at ' + (state.info.exposure * 1000).toFixed(1) +
+						' ms. Dark current builds up with time, so a longer exposure finds ' +
+						'more of them — take these at the exposure the camera will really ' +
+						'run at, or the list will describe a sensor you are not using. ' +
+						(hunt.dark ? 'Dark current also climbs steeply with temperature, so a ' +
+							'map taken on a cold camera understates a warm one — take it in ' +
+							'the place the camera actually lives.' : ''),
+				}));
+		}
+
+		if (hunt.failed) {
+			const box = el('div', 're-notice re-warn');
+			box.style.cssText = 'margin:0 0 9px';
+			box.dataset.act = 'hunt-failed';
+			box.append(Object.assign(el('div'), { textContent: hunt.failed }));
+			panel.append(box);
+		}
+
+		const row = el('div');
+		row.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap';
+		if (!done) {
+			const go = el('button', 're-btn re-pri', '');
+			go.dataset.act = 'hunt-step';
+			go.textContent = hunt.busy ? 'Working…'
+				: capture ? (hunt.taken === 0 ? 'Capture' : 'Capture ' + (hunt.taken + 1) +
+					' of ' + HUNT_WANT)
+					: 'Read the frame on screen';
+			go.disabled = hunt.busy;
+			go.addEventListener('click', huntStep);
+			row.append(go);
+			/* No capture provider: the frames have to be brought in by hand,
+			 * and saying so is better than a button that cannot work. The
+			 * Plates tab and Calibrate degrade the same way. */
+			if (!capture)
+				panel.append(Object.assign(el('p', 're-note'), {
+					style: 'margin:0 0 9px',
+					textContent: 'Drop the next frame on the picture, then read it.',
+				}));
+		} else if (!hunt.done) {
+			const fin = el('button', 're-btn re-pri', '');
+			fin.dataset.act = 'hunt-finish';
+			fin.textContent = 'See what kept coming back';
+			fin.addEventListener('click', finishHunt);
+			row.append(fin);
+		} else {
+			if (hunt.clipped) {
+				const box = el('div', 're-notice re-warn');
+				box.style.cssText = 'margin:0 0 9px';
+				box.dataset.act = 'hunt-partial';
+				box.append(Object.assign(el('div'), {
+					textContent: `${hunt.clipped} of these captures found more defects than ` +
+						`the scan can hold — one reached ${hunt.mostFound}. Everything below ` +
+						'the row it filled up on was never looked at, so this list is short ' +
+						'by an unknown number of sites near the bottom of the frame. The ' +
+						'ones it does name were seen every time and are real. A shorter ' +
+						'exposure finds fewer, if you need the whole map.',
+				}));
+				panel.append(box);
+			}
+			const save = el('button', 're-btn re-pri', '');
+			save.dataset.act = 'hunt-export';
+			save.textContent = 'Save the list';
+			save.disabled = !diag || !diag.defects || !diag.defects.length;
+			save.addEventListener('click', exportDefects);
+			row.append(save);
+		}
+		const stop = el('button', 're-btn', '');
+		stop.dataset.act = 'hunt-stop';
+		stop.textContent = hunt.done ? 'Done' : 'Do this by hand';
+		stop.addEventListener('click', () => { hunt = null; buildDiagnose(); drawMarks(); });
+		row.append(stop);
+		panel.append(row);
+		return panel;
+	}
+
 	function buildDiagnose() {
 		insp.replaceChildren();
+		insp.append(buildHunt());
 		const panel = el('div', 're-panel');
 		panel.append(Object.assign(el('div', 're-shead'), {
 			innerHTML: '<h3 class="re-cap">Sensor</h3><span class="re-rule"></span>',
@@ -1233,9 +1612,31 @@ export function mountEditor(root, {
 			gateSeg.append(b);
 		}
 		gate.append(gateSeg);
+		/*
+		 * The gate helps a frame that has a picture in it and hurts one that
+		 * does not.
+		 *
+		 * Its cut is a percentile of the local background, so on a frame that
+		 * is dark all over it lands just under the level nearly every pixel
+		 * sits at -- and a hot pixel lifts its own 7x7 background a couple of
+		 * counts above that, which is enough to be gated out. It therefore
+		 * throws away the defects in preference to everything else, on exactly
+		 * the frames where the defects are all there is. Measured on this
+		 * camera's 7 s dark frame: 3921 sites arranged at R = 1.00, textbook
+		 * scattered, become 104 at R = 0.68 -- which the panel below reports
+		 * as "these are following the picture", about a frame with no picture
+		 * in it.
+		 */
+		if (diag && (() => { const l = frameLevel(diag); return l !== null && l < COVERED; })())
+			gate.append(Object.assign(el('p', 're-note'), {
+				style: 'margin:7px 0 0',
+				textContent: 'This frame is already dark all over, so narrowing the search ' +
+					'will only throw away real defects — the gate is for separating a ' +
+					'sensor from a scene, and there is no scene here. Everywhere is the ' +
+					'right answer for a frame like this one.',
+			}));
 		panel.append(gate);
 		insp.append(panel);
-		buildPlateFitness();
 
 		const out = el('div', 're-panel');
 		out.hidden = true;
@@ -1250,22 +1651,7 @@ export function mountEditor(root, {
 			run.disabled = true;
 			run.textContent = 'Scanning…';
 			try {
-				// call() resolves with the worker's whole message; the reading
-				// is in `result`. Taking the envelope for the result produced
-				// "Cannot read properties of undefined (reading 'map')" from
-				// deep inside the renderer, which said nothing about why.
-				// The FILE's white level, not the slider's. state.white is a
-				// rendering choice -- pull it down to brighten the picture and
-				// every bright pixel would count as clipped, which would take
-				// the real hot pixels out of the report along with the
-				// highlights. Saturation is a property of the sensor and does
-				// not move when someone drags a control.
-				const reply = await call('diagnose',
-					{ cfa: state.cfa, white: state.info.white, sigmas: 8,
-						backgroundPercentile: bgPercent });
-				diag = reply && reply.result;
-				if (!diag || !diag.blackFloor)
-					throw new Error('the frame was scanned but the reading came back empty');
+				diag = await scanFrame();
 				renderDiagnose(out);
 				drawMarks();
 			} catch (e) {
@@ -1278,6 +1664,95 @@ export function mountEditor(root, {
 				run.textContent = 'Scan the frame';
 			}
 		});
+	}
+
+	/*
+	 * One reading of the frame on screen, for whoever asked.
+	 *
+	 * Extracted so the Scan button and the guided run cannot drift apart: they
+	 * have to ask the same question of the same frame or their answers are not
+	 * comparable, and the tally across captures assumes they are.
+	 *
+	 * call() resolves with the worker's whole message; the reading is in
+	 * `result`. Taking the envelope for the result produced "Cannot read
+	 * properties of undefined (reading 'map')" from deep inside the renderer,
+	 * which said nothing about why.
+	 *
+	 * The FILE's white level, not the slider's. state.white is a rendering
+	 * choice -- pull it down to brighten the picture and every bright pixel
+	 * would count as clipped, which would take the real hot pixels out of the
+	 * report along with the highlights. Saturation is a property of the sensor
+	 * and does not move when someone drags a control.
+	 */
+	async function scanFrame() {
+		const reply = await call('diagnose',
+			{ cfa: state.cfa, white: state.info.white, sigmas: 8,
+				backgroundPercentile: bgPercent });
+		const d = reply && reply.result;
+		if (!d || !d.blackFloor)
+			throw new Error('the frame was scanned but the reading came back empty');
+		return d;
+	}
+
+	/*
+	 * How far up from black the middle of the frame sits, 0 to 1.
+	 *
+	 * This is what says whether the lens is covered, and it is worth measuring
+	 * rather than asking: an operator who believes the lens is covered and a
+	 * lens that is covered are different things, and only one of them shows up
+	 * in the numbers. Measured on this camera, a frame taken inside a black box
+	 * reads 0.000 to 0.001 across exposures from 0.5 s to 7 s, while an
+	 * ordinary lit scene reads 0.105. The cut below sits an order of magnitude
+	 * clear of both, so nothing turns on where exactly it goes.
+	 *
+	 * The green plane, because it is the one with two sites in every quad and
+	 * so the least noisy of the three.
+	 */
+	const COVERED = 0.01;
+	function frameLevel(d) {
+		if (!d || !d.median || !state.info) return null;
+		const span = state.info.white - state.info.black;
+		if (!(span > 0)) return null;
+		return (d.median[1] - state.info.black) / span;
+	}
+
+	/* How many of the captures each site turned up in. A capture votes once,
+	 * however many times the site appears in its own list. */
+	function tallyOf(sets) {
+		const t = new Map();
+		for (const v of sets)
+			for (const k of new Set(v.keys)) t.set(k, (t.get(k) || 0) + 1);
+		return t;
+	}
+
+	/* Put the reading on screen into the set the tally runs over, replacing
+	 * any earlier reading of the same frame rather than letting one capture
+	 * vote twice. */
+	function keepCurrentScan() {
+		if (!diag) return;
+		const keys = diag.defects.map((p) => p.x + ',' + p.y);
+		/*
+		 * Keyed on the frame that was opened, not on what it was called.
+		 *
+		 * A name is a display label and the contract does not require a host to
+		 * vary it -- and when it does not, five captures collapse into one
+		 * entry, the tally never sees a second vote, and a guided run ends
+		 * having confirmed nothing at all. The case the old key existed for --
+		 * reading one frame twice, which must not count twice -- is an open,
+		 * so the open is what to count.
+		 *
+		 * Deduplicating on the READING rather than the open was tried, on the
+		 * grounds that two captures of a real sensor never give byte-identical
+		 * defect lists. They do not, but two other things do, and both matter:
+		 * a fixture built to repeat the same view exactly, which is how the
+		 * "these are following the picture" verdict is tested, and any pair of
+		 * captures that find nothing at all, whose empty lists are equal. Both
+		 * collapsed into a single capture and took the tally with them.
+		 */
+		scanSet = scanSet.filter((v) => v.id !== state.openId);
+		scanSet.push({ id: state.openId, name: state.name || 'a frame', keys,
+			/* Carried so the end of a run can say whether it saw everything. */
+			truncated: !!diag.truncated, found: diag.defectCount });
 	}
 
 	function statLine(name, value, note) {
@@ -1438,17 +1913,47 @@ export function mountEditor(root, {
 		out.append(Object.assign(el('div', 're-shead'), {
 			innerHTML: '<h3 class="re-cap">Defects</h3><span class="re-rule"></span>',
 		}));
+		/*
+		 * What was found, and then -- separately -- what is on the picture.
+		 *
+		 * These used to be one sentence, and it named the wrong number: it
+		 * quoted the stored list, up to 4096, while the overlay was drawing
+		 * 600, and it only appeared at all when the store had overflowed. So
+		 * the common case, a few thousand defects ringed six hundred at a
+		 * time, said nothing whatsoever.
+		 */
+		const ringed = markedCount(diag.defects.length);
 		out.append(Object.assign(el('p', 're-note'), {
 			style: 'margin:0 0 7px',
-			textContent: diag.fromTally
+			textContent: (diag.fromTally
 				? `${diag.defectCount} site${diag.defectCount === 1 ? '' : 's'} turned up in at ` +
 					`least ${diag.fromTally.need} of ${diag.fromTally.of} captures.`
 				: diag.defectCount === 0
 					? 'None. No pixel disagrees with all four of its neighbours by more than the noise explains.'
 					: `${diag.defectCount} pixel${diag.defectCount === 1 ? '' : 's'} disagree with every ` +
-						'one of their same-colour neighbours by more than the noise explains' +
-						(diag.truncated ? `, of which the first ${diag.defects.length} are marked.` : '.'),
+						'one of their same-colour neighbours by more than the noise explains.')
+				+ (ringed < diag.defects.length
+					? (diag.truncated
+						/*
+						 * Not "through the frame" when the store stopped short.
+						 * The rings sample the list evenly, but the list itself
+						 * ends at the row the scan filled up on, so the bottom
+						 * of the picture carries none -- and saying otherwise
+						 * would be the same overstatement this cap was fixed
+						 * for in the first place.
+						 */
+						? ` Rings mark ${ringed} of the ${diag.defects.length} it kept, ` +
+							'spread through the part of the frame it reached.'
+						: ` Rings mark ${ringed} of them, spread through the frame.`) : ''),
 		}));
+		if (diag.truncated)
+			out.append(Object.assign(el('div', 're-notice re-warn'), {
+				style: 'margin:0 0 8px',
+				textContent: `The scan kept ${diag.defects.length} of them and stopped there, so ` +
+					'the arrangement below was judged over the part of the frame it reached ' +
+					'rather than all of it. Looking only where the picture is dark brings the ' +
+					'count down, and a frame with the lens covered brings it down furthest.',
+			}));
 
 		/*
 		 * How that count is spread over the frame.
@@ -1517,7 +2022,7 @@ export function mountEditor(root, {
 		 * fall is itself the answer -- a population that appears once each and
 		 * never again is the scene, and one that keeps coming back is not.
 		 */
-		const held = scanSet.filter((v) => v.name !== state.name);
+		const held = scanSet.filter((v) => v.id !== state.openId);
 		const all = held.concat([{ name: state.name || 'this frame',
 			keys: diag.defects.map((p) => p.x + ',' + p.y) }]);
 		const M = all.length;
@@ -1529,9 +2034,7 @@ export function mountEditor(root, {
 					'the camera between them if you can.',
 			}));
 		} else {
-			const tally = new Map();
-			for (const v of all)
-				for (const k of new Set(v.keys)) tally.set(k, (tally.get(k) || 0) + 1);
+			const tally = tallyOf(all);
 			const atLeast = (n) => [...tally].filter(([, c]) => c >= n).map(([k]) => k);
 			const suggested = Math.max(2, Math.ceil(M * 0.8));
 			if (needN > M) needN = M;
@@ -1659,13 +2162,11 @@ export function mountEditor(root, {
 		row.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin-top:8px';
 		const keep = el('button', 're-btn', '');
 		keep.dataset.act = 'hold-scan';
-		const already = scanSet.some((v) => v.name === state.name);
+		const already = scanSet.some((v) => v.id === state.openId);
 		keep.textContent = already ? 'Kept' : 'Keep this scan';
 		keep.disabled = already;
 		keep.addEventListener('click', () => {
-			scanSet = scanSet.filter((v) => v.name !== state.name);
-			scanSet.push({ name: state.name || 'a frame',
-				keys: diag.defects.map((p) => p.x + ',' + p.y) });
+			keepCurrentScan();
 			renderDiagnose(out);
 		});
 		row.append(keep);
@@ -1721,6 +2222,9 @@ export function mountEditor(root, {
 	let mode = 'develop';
 	/* Which part of the frame the defect scan is allowed to believe, as a
 	 * percentile of frame brightness. 100 is all of it. */
+	let opened = 0;
+	/* The guided run, or null when nobody asked for one. See buildHunt. */
+	let hunt = null;
 	let bgPercent = 100;
 	/* Scans kept for comparison, each one a capture's defect set. They outlive
 	 * the frames they came from, which is the whole point: a sensor defect is
@@ -2626,6 +3130,8 @@ export function mountEditor(root, {
 		list.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:10px';
 		panel.append(list);
 		insp.append(panel);
+		/* Directly under the list, because that is what it asks about. */
+		buildPlateFitness();
 
 		const meter = el('div', 're-panel');
 		meter.hidden = true;
@@ -2876,7 +3382,10 @@ export function mountEditor(root, {
 				}));
 				r.append(t);
 				r.dataset.act = 'plate-row';
-				r.addEventListener('click', () => { plateSel = i; paintList(); paintMeter(); paintBurst(); drawPlateMarks(); });
+				r.addEventListener('click', () => {
+				plateSel = i;
+				paintList(); paintMeter(); paintBurst(); buildPlateFitness(); drawPlateMarks();
+			});
 				list.append(r);
 			});
 		}
@@ -2968,7 +3477,7 @@ export function mountEditor(root, {
 		find.addEventListener('click', async () => {
 			if (!state.info) { status.textContent = 'Open or capture a frame first.'; return; }
 			find.disabled = true;
-			plateSel = -1; meter.hidden = true; burst.hidden = true;
+			plateSel = -1; meter.hidden = true; burst.hidden = true; buildPlateFitness();
 			try {
 				if (!plateReader) {
 					status.textContent = 'Fetching the reader…';
@@ -4071,6 +4580,13 @@ export function mountEditor(root, {
 			});
 			state.bytes = exactCopy;
 			state.name = label;
+			/* Every frame that actually opens gets a number. A capture that
+			 * fails leaves the previous frame on the stage, so the guided run
+			 * has no other way to tell "a new frame arrived" from "the old one
+			 * is still here" -- and scanning the old one twice would have it
+			 * agreeing with itself. */
+			opened++;
+			state.openId = opened;
 			// The chart and the scan both belonged to the frame that has just
 			// been replaced.
 			corners = null;
