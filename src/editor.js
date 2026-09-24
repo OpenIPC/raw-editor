@@ -925,17 +925,43 @@ export function mountEditor(root, {
 		plateMarks.append(svg);
 	}
 
+	/*
+	 * How many rings the picture will carry at most, and how many of a given
+	 * list actually get one. The panel quotes this number, so it is worked out
+	 * in one place -- a cap the copy had to guess at is how the old wording
+	 * came to name a count that was never on screen.
+	 */
+	const MARKS_CAP = 600;
+	const markStep = (n) => Math.max(1, Math.ceil(n / MARKS_CAP));
+	const markedCount = (n) => (n <= 0 ? 0 : Math.ceil(n / markStep(n)));
+
 	function drawMarks() {
 		marks.replaceChildren();
 		if (mode !== 'diagnose' || !diag || !state.info) return;
 		const NS = 'http://www.w3.org/2000/svg';
 		const svg = document.createElementNS(NS, 'svg');
 		svg.setAttribute('class', 're-chart-svg');
-		// A cap on what is drawn, not on what is counted: a sensor with ten
-		// thousand bad pixels would otherwise spend a second building circles
-		// nobody can tell apart.
-		for (const d of diag.defects.slice(0, 600)) {
+		/*
+		 * A cap on what is drawn, not on what is counted: a sensor with ten
+		 * thousand bad pixels would otherwise spend a second building circles
+		 * nobody can tell apart.
+		 *
+		 * Every k-th, and NOT the first six hundred. The list arrives in the
+		 * order the scan walks the frame, which is row by row, so a prefix of
+		 * it is the top of the picture and nothing else. On a camera frame
+		 * carrying 4054 defects that put every ring inside the top 600/4054 =
+		 * 15% of the rows, in a band with a ragged edge along the bottom of
+		 * it, and it was read -- reasonably -- as the defects being clustered
+		 * at the top of the sensor. They were not: the same scan's own spread
+		 * index said 1.01, scattered. A stride samples the whole frame at the
+		 * same cost, and being deterministic it survives the redraws that a
+		 * resize or a tab switch bring.
+		 */
+		const step = markStep(diag.defects.length);
+		for (let i = 0; i < diag.defects.length; i += step) {
+			const d = diag.defects[i];
 			const at = stageCoords(d.x, d.y);
+			if (!at) continue;
 			if (!at) continue;
 			const c = document.createElementNS(NS, 'circle');
 			c.setAttribute('cx', at.x);
@@ -1438,17 +1464,37 @@ export function mountEditor(root, {
 		out.append(Object.assign(el('div', 're-shead'), {
 			innerHTML: '<h3 class="re-cap">Defects</h3><span class="re-rule"></span>',
 		}));
+		/*
+		 * What was found, and then -- separately -- what is on the picture.
+		 *
+		 * These used to be one sentence, and it named the wrong number: it
+		 * quoted the stored list, up to 4096, while the overlay was drawing
+		 * 600, and it only appeared at all when the store had overflowed. So
+		 * the common case, a few thousand defects ringed six hundred at a
+		 * time, said nothing whatsoever.
+		 */
+		const ringed = markedCount(diag.defects.length);
 		out.append(Object.assign(el('p', 're-note'), {
 			style: 'margin:0 0 7px',
-			textContent: diag.fromTally
+			textContent: (diag.fromTally
 				? `${diag.defectCount} site${diag.defectCount === 1 ? '' : 's'} turned up in at ` +
 					`least ${diag.fromTally.need} of ${diag.fromTally.of} captures.`
 				: diag.defectCount === 0
 					? 'None. No pixel disagrees with all four of its neighbours by more than the noise explains.'
 					: `${diag.defectCount} pixel${diag.defectCount === 1 ? '' : 's'} disagree with every ` +
-						'one of their same-colour neighbours by more than the noise explains' +
-						(diag.truncated ? `, of which the first ${diag.defects.length} are marked.` : '.'),
+						'one of their same-colour neighbours by more than the noise explains.')
+				+ (ringed < diag.defects.length
+					? ` Rings mark ${ringed} of them, spread through the frame.` : ''),
 		}));
+		if (diag.truncated)
+			out.append(Object.assign(el('div', 're-notice re-warn'), {
+				style: 'margin:0 0 8px',
+				textContent: `The scan kept ${diag.defects.length} of them and stopped there, so ` +
+					'the arrangement below was judged over the part of the frame it reached ' +
+					'rather than all of it. Looking only where the picture is dark brings the ' +
+					'count down, and a frame with the lens covered brings it down furthest.',
+			}));
+
 
 		/*
 		 * How that count is spread over the frame.
