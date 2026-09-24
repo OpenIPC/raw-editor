@@ -3082,6 +3082,24 @@ export function mountEditor(root, {
 	const MOVE_MAX_MS = 10000;
 	let moveTimer = null, moveGiveUp = null, moveVerb = null;
 
+	/* A host reports a motor it cannot drive either by throwing or by rejecting,
+	 * and both mean the same thing. Only the first is a synchronous exception,
+	 * so a bare try/catch leaves a rejected move unobserved -- and the repeat
+	 * goes on asking a motor that has already said no for the whole give-up
+	 * window, raising an unhandled rejection each time round. */
+	function moveSend(verb, onFail) {
+		let p;
+		try {
+			p = focus.move(verb);
+		} catch (e) {
+			if (onFail) onFail();
+			return;
+		}
+		if (p && typeof p.catch === 'function') {
+			p.catch(function () { if (onFail) onFail(); });
+		}
+	}
+
 	function moveRelease() {
 		if (moveTimer) { clearInterval(moveTimer); moveTimer = null; }
 		if (moveGiveUp) { clearTimeout(moveGiveUp); moveGiveUp = null; }
@@ -3089,20 +3107,36 @@ export function mountEditor(root, {
 		moveVerb = null;
 		/* Told to stop even though it would time out anyway: the deadline is
 		 * the fallback, not the plan, and a lens that keeps creeping after the
-		 * button came up reads as a broken control. */
-		try { focus.move('stop'); } catch (e) { /* nothing to undo */ }
+		 * button came up reads as a broken control. A stop that itself fails
+		 * has nothing left to try, so it is sent and not chased. */
+		moveSend('stop', null);
+	}
+
+	function moveAsk() {
+		if (!moveVerb) return;
+		moveSend(moveVerb, moveRelease);
 	}
 
 	function holdToRun(btn, verb) {
 		const press = function (ev) {
 			if (ev && ev.button !== undefined && ev.button !== 0) return;
-			if (moveVerb) moveRelease();
+			/* One hold at a time, and a second pointer is ignored rather than
+			 * taking over. Taking over meant releasing EITHER pointer stopped
+			 * whatever was running, so the finger lifted was not necessarily
+			 * the one that chose the direction. Ignoring the newcomer is the
+			 * only resolution to that which cannot end with a lens still
+			 * moving. */
+			if (moveVerb) return;
 			moveVerb = verb;
-			const ask = function () { try { focus.move(verb); } catch (e) { moveRelease(); } };
-			ask();
-			moveTimer = setInterval(ask, (focus && focus.moveRepeatMs) || 250);
+			/* Armed BEFORE the first ask. Arming them after meant a move that
+			 * failed synchronously released a hold whose timers did not exist
+			 * yet -- and then press installed them anyway, so the repeat ran on
+			 * with moveVerb already cleared and the give-up had nothing left to
+			 * stop. That is a lens running with its own brakes disarmed. */
+			moveTimer = setInterval(moveAsk, (focus && focus.moveRepeatMs) || 250);
 			moveGiveUp = setTimeout(moveRelease,
 				(focus && focus.moveMaxMs) || MOVE_MAX_MS);
+			moveAsk();
 			if (ev && ev.preventDefault) ev.preventDefault();
 		};
 		btn.addEventListener('pointerdown', press);
@@ -3114,8 +3148,12 @@ export function mountEditor(root, {
 		 * this control is reachable without a pointer. */
 		btn.addEventListener('keydown', function (ev) {
 			if (ev.key !== 'Enter' && ev.key !== ' ') return;
+			/* An auto-repeat is the operating system's, at whatever rate it was
+			 * configured with, and treating one as a fresh press turns a held
+			 * key into a burst of nudges at a cadence this side never chose. */
+			if (ev.repeat) return;
 			ev.preventDefault();
-			try { focus.move(verb); } catch (e) { /* reported by the host */ }
+			moveSend(verb, null);
 		});
 	}
 

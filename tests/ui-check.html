@@ -1784,6 +1784,117 @@ try {
 		ed.destroy();
 	}
 
+	// A host that reports failure by REJECTING says the same thing as one that
+	// throws, and only the throw is caught by a try/catch. Left unobserved, the
+	// repeat goes on asking a motor that has already refused.
+	{
+		const host = document.createElement('div');
+		document.body.append(host);
+		let calls = 0;
+		const ed = mountEditor(host, { base: '../dist/', styles: false, autoCapture: false,
+			focus: { intervalMs: 5000, moveRepeatMs: 15, moveMaxMs: 4000,
+				zones: () => Promise.resolve({ rows: 1, cols: 2,
+					zones: [[0, 900, 0, 90, 1000, 0], [0, 100, 0, 10, 1000, 0]] }),
+				move: (v) => { calls++; return v === 'stop'
+					? Promise.resolve() : Promise.reject(new Error('motor jammed')); } } });
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+		await pause(120);
+		down(btn(host, 'near'));
+		await pause(200);
+		t('a rejected move stops the repeat rather than running to the cap',
+			calls <= 3, calls + ' calls');
+		ed.destroy();
+	}
+
+	// A move that fails on the very first ask, before the safety timers exist.
+	// Releasing a hold whose timers are installed AFTERWARDS leaves the repeat
+	// running with the hold already cleared -- a lens moving with its own
+	// brakes disarmed, and the give-up with nothing left to stop.
+	{
+		const host = document.createElement('div');
+		document.body.append(host);
+		const seen = [];
+		let n = 0;
+		const ed = mountEditor(host, { base: '../dist/', styles: false, autoCapture: false,
+			focus: { intervalMs: 5000, moveRepeatMs: 15, moveMaxMs: 4000,
+				zones: () => Promise.resolve({ rows: 1, cols: 2,
+					zones: [[0, 900, 0, 90, 1000, 0], [0, 100, 0, 10, 1000, 0]] }),
+				// Fails once, then would happily drive forever.
+				move: (v) => { seen.push(v); if (v !== 'stop' && n++ === 0) throw new Error('first ask failed'); } } });
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+		await pause(120);
+		down(btn(host, 'near'));
+		await pause(250);
+		t('a first ask that throws does not leave a hold running behind it',
+			seen.filter((v) => v === 'near').length <= 2, seen.join(','));
+		t('and it still ends stopped', seen[seen.length - 1] === 'stop', seen.join(','));
+		ed.destroy();
+	}
+
+	// And the orphan it leaves behind. A release whose timers do not exist yet
+	// cannot clear them, so press installs an interval nothing owns; the guard
+	// inside the repeat hides that until the NEXT hold sets a verb, and then
+	// two intervals drive the lens at twice the rate that was asked for.
+	{
+		const host = document.createElement('div');
+		document.body.append(host);
+		const seen = [];
+		let n = 0;
+		const ed = mountEditor(host, { base: '../dist/', styles: false, autoCapture: false,
+			focus: { intervalMs: 5000, moveRepeatMs: 20, moveMaxMs: 4000,
+				zones: () => Promise.resolve({ rows: 1, cols: 2,
+					zones: [[0, 900, 0, 90, 1000, 0], [0, 100, 0, 10, 1000, 0]] }),
+				move: (v) => { seen.push(v); if (v !== 'stop' && n++ === 0) throw new Error('first ask failed'); } } });
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+		await pause(120);
+		// No release between them, deliberately. A release would clear the
+		// orphan by its stale handle and hide exactly what is being tested.
+		down(btn(host, 'near'));             // fails; may orphan an interval
+		await pause(80);
+		seen.length = 0;
+		down(btn(host, 'far'));              // a hold that works
+		await pause(200);
+		btn(host, 'far').dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+		await pause(60);
+		const asks = seen.filter((v) => v === 'far').length;
+		// ~200ms at 20ms is about ten. Two intervals would be about twenty.
+		t('a failed hold leaves no second timer driving the next one',
+			asks < 16, asks + ' asks in 200ms at 20ms apart');
+		ed.destroy();
+	}
+
+	// Two pointers. Taking over meant releasing EITHER stopped whatever was
+	// running, so the finger lifted was not the one that chose the direction.
+	{
+		const g2 = await mk(true);
+		down(btn(g2.host, 'near'));
+		await pause(40);
+		down(btn(g2.host, 'far'));           // a second finger, first still down
+		await pause(40);
+		t('a second pointer does not take the lens over',
+			g2.moves.indexOf('far') < 0, g2.moves.join(','));
+		btn(g2.host, 'near').dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+		await pause(60);
+		const k = g2.moves.length;
+		await pause(80);
+		t('and releasing the one that owns it stops everything',
+			g2.moves[k - 1] === 'stop' && g2.moves.length === k, g2.moves.slice(-3).join(','));
+		g2.ed.destroy();
+	}
+
+	// A held key auto-repeats at whatever rate the OS was configured with.
+	{
+		const g3 = await mk(true);
+		const b = btn(g3.host, 'near');
+		b.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+		for (let i = 0; i < 5; i++)
+			b.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, repeat: true }));
+		await pause(60);
+		t('a held key is one nudge, not a burst at the OS repeat rate',
+			g3.moves.filter((m) => m === 'near').length === 1, g3.moves.join(','));
+		g3.ed.destroy();
+	}
+
 	// A host whose move() throws must not leave the repeat running.
 	{
 		const host = document.createElement('div');
