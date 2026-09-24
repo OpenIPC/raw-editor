@@ -13,7 +13,8 @@
  */
 
 import { solveFromPatches, patchCentres, scoreCcm, CHART_COLS, CHART_ROWS } from './calibrate.js';
-import { parseIni, readColour, fitAwbCurve, gainsForCt, mergeCcmTables, colourFragment } from './iqprofile.js';
+import { parseIni, readColour, fitAwbCurve, gainsForCt, mergeCcmTables, colourFragment,
+	readDefectCorrection, enableDefectCorrection } from './iqprofile.js';
 import { summarise, peakHold, normalise } from './aftune.js';
 
 const CFA_NAMES = ['RGGB', 'GRBG', 'GBRG', 'BGGR'];
@@ -50,6 +51,12 @@ const svg = (d, w = 20) =>
 const ICON = {
 	back: svg('<path d="M12.2 4.5 6.7 10l5.5 5.5"/>', 18),
 	reset: svg('<path d="M4.2 10a5.8 5.8 0 1 0 1.9-4.3"/><path d="M3.4 3.6v3.9h3.9"/>', 13),
+	/* A tick, so a good answer does not arrive wearing a warning triangle.
+	 * re-ok and re-warn were told apart only by an icon colour and a 60%-alpha
+	 * border, and most call sites handed both variants the same triangle. */
+	ok: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" ' +
+		'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+		'<circle cx="12" cy="12" r="9"/><path d="m8 12.3 2.7 2.7L16 9.7"/></svg>',
 	warn: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" ' +
 		'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
 		'<path d="M12 4.6 21.2 19.4H2.8z"/><path d="M12 10.2v4"/><path d="M12 17.1h.01"/></svg>',
@@ -249,6 +256,22 @@ export function mountEditor(root, {
 	 * sections given into the camera's profile. revert() and keep() then
 	 * answer for whichever was written last. */
 	calibrate,
+	/*
+	 * What the camera does about its own bad pixels, and how to change it:
+	 * { profile(), patch(ini), revert(), keep(), holdSeconds }.
+	 *
+	 * profile() resolves to the camera's IQ profile as text; patch() writes
+	 * sections into it; revert() and keep() answer for the last patch, the
+	 * same bargain calibrate strikes. Without one the defect scan still
+	 * measures and still gives its verdict -- it simply cannot say what the
+	 * camera is doing about what it found, and says that instead of guessing.
+	 *
+	 * Worth knowing before wiring one up: a coordinate list cannot be loaded
+	 * into these parts. The static defect table is refused by the chip on a
+	 * gk7205v300 and the profile carries none, so what is on offer is the
+	 * camera's own automatic corrector, not this scan's findings.
+	 */
+	sensor,
 	/* Live focus statistics: { zones(), intervalMs }. zones() resolves to the
 	 * camera's AF grid -- { rows, cols, zones: [[h1,h2,v1,v2,y,hlcnt], ...] },
 	 * row-major. Without one there is no Focus tab at all, because a focus
@@ -1250,6 +1273,168 @@ export function mountEditor(root, {
 	 */
 	const HUNT_WANT = 5;
 
+	/* Assigned by buildDiagnose, which owns the button and the panel it writes
+	 * into; the gate calls it from outside that closure. */
+	let runScan = async () => {};
+
+	/*
+	 * How many stuck pixels is too many.
+	 *
+	 * There is no standard answer -- EMVA 1288 declines to define a defective
+	 * pixel at all, on the grounds that no one definition serves every
+	 * application. So this uses the only published acceptance figure the tree
+	 * already cites: Sony sell an IMX415 as good with up to 800 white pixels
+	 * in the dark, and that part is 3864x2192, so the limit they are willing
+	 * to ship is 9.4e-5 of it. Rounded to a hundredth of a percent, and
+	 * applied as a FRACTION so it carries across sensors of other sizes.
+	 *
+	 * It is a weak yardstick and the copy says so rather than pretending to a
+	 * pass mark. It is also strongly conditional: the same lab camera reports
+	 * 882 sites at 0.5 s and 3921 at 7 s, which is dark current doing exactly
+	 * what it should, so a verdict that ignored exposure would call one
+	 * healthy sensor both fine and faulty within a minute. The exposure and
+	 * the gain go in the sentence for that reason.
+	 */
+	const NORMAL_FRACTION = 1e-4;
+
+	/* The camera's own answer, read once per run and remembered: it is a
+	 * fetch, and the panel rebuilds on every step. */
+	let dpc = null, dpcAsked = false, dpcHold = null;
+
+	async function readDpc() {
+		if (dpcAsked || !sensor || !sensor.profile) return;
+		dpcAsked = true;
+		try { dpc = readDefectCorrection(parseIni(await sensor.profile())); }
+		catch (e) { dpc = { failed: e && e.message ? e.message : 'could not be read' }; }
+		if (mode === 'diagnose') buildDiagnose();
+	}
+
+	/*
+	 * What the camera is doing about them, under the verdict.
+	 *
+	 * This is the half of the owner's question the scan could never answer on
+	 * its own -- a raw capture is taken ahead of the camera's processing, so
+	 * the defects are in it whether or not the camera hides them downstream.
+	 * Only the camera can say, so it is asked.
+	 */
+	function dpcCard(panel) {
+		if (!sensor || !sensor.profile) {
+			panel.append(Object.assign(el('p', 're-note'), {
+				style: 'margin:0 0 9px',
+				textContent: 'Cameras of this kind correct stuck pixels themselves as they ' +
+					'run, and a raw capture is taken before that happens. Opened from the ' +
+					'camera\u2019s own page, this would say whether yours has it switched on.',
+			}));
+			return;
+		}
+		if (!dpc) {
+			panel.append(Object.assign(el('p', 're-note'), {
+				style: 'margin:0 0 9px', textContent: 'Asking the camera\u2026' }));
+			return;
+		}
+		if (dpc.failed) {
+			panel.append(Object.assign(el('p', 're-note'), {
+				style: 'margin:0 0 9px',
+				textContent: 'The camera did not say whether it corrects these: ' + dpc.failed }));
+			return;
+		}
+		const box = el('div', 're-notice ' + (dpc.enabled ? 're-ok' : 're-warn'),
+			dpc.enabled ? ICON.ok : ICON.warn);
+		box.style.cssText = 'margin:0 0 9px';
+		box.dataset.act = 'dpc-state';
+		box.append(Object.assign(el('div'), {
+			/*
+			 * What the camera REPORTS, not what was measured of the result.
+			 *
+			 * Proving the corrector actually removes these from the video
+			 * needs a full-resolution snapshot taken beside the raw frame, and
+			 * the lab camera cannot produce one: at 2592x1944 the JPEG encoder
+			 * has no media memory left beside the H.265 stream, whichever way
+			 * isp.blkCnt is moved -- one block short at 4, none to spare at 5
+			 * and above. So this says the switch is on and what that is for,
+			 * and stops there.
+			 */
+			textContent: dpc.enabled
+				? 'Your camera\u2019s own correction for these is switched on, so they should ' +
+					'not reach the video it sends. This capture is read from the sensor ' +
+					'ahead of that, on purpose — it is the only way to see what the sensor ' +
+					'is really doing.'
+				: 'Your camera can hide these in the video it sends, and that is switched ' +
+					'off. Turning it on costs nothing else in the picture.',
+		}));
+		panel.append(box);
+		if (dpc.enabled || !sensor.patch) return;
+
+		const on = el('button', 're-btn re-pri', '');
+		on.dataset.act = 'dpc-on';
+		on.textContent = dpcHold ? 'Keep it on' : 'Turn it on';
+		on.addEventListener('click', async () => {
+			on.disabled = true;
+			try {
+				if (dpcHold) { await sensor.keep(); dpcHold = null; dpc.enabled = true; }
+				else {
+					await sensor.patch(enableDefectCorrection(dpc));
+					/* Same hold-and-confirm as a calibration: written now, put
+					 * back on its own unless someone says to keep it. */
+					dpcHold = setTimeout(async () => {
+						dpcHold = null;
+						try { await sensor.revert(); } catch (e) { /* going anyway */ }
+						if (mode === 'diagnose') buildDiagnose();
+					}, Math.max(5, sensor.holdSeconds || 30) * 1000);
+				}
+			} catch (e) {
+				dpc = { failed: e && e.message ? e.message : 'the write was refused' };
+			}
+			if (mode === 'diagnose') buildDiagnose();
+		});
+		panel.append(on);
+		if (dpcHold)
+			panel.append(Object.assign(el('p', 're-note'), {
+				style: 'margin:7px 0 0',
+				textContent: 'Switched on. It goes back by itself in ' +
+					Math.max(5, sensor.holdSeconds || 30) + ' seconds unless you keep it.',
+			}));
+	}
+
+	function sensorVerdict(pts) {
+		const i = state.info || {};
+		const total = (i.width || 0) * (i.height || 0);
+		if (!pts || !total) return null;
+		const n = pts.length;
+		const frac = n / total;
+		const share = frac >= 1e-4 ? (frac * 100).toFixed(3) + '%'
+			: (frac * 100).toFixed(4) + '%';
+		const sp = spreadOf(pts, i.width, i.height);
+		const taken = (i.exposure ? 'Measured at ' + (i.exposure * 1000).toFixed(0) + ' ms'
+			: 'Measured') + (i.iso ? ' and ISO ' + i.iso : '') +
+			'. Dark current builds with time and gain, so a longer exposure or ' +
+			'more of either finds more of them.';
+		/* What a raw capture is: the sensor before the camera has done
+		 * anything to the picture. True by construction -- it is the point of
+		 * the format -- and it stops short of claiming the camera's own
+		 * corrector actually hides these, which is a separate measurement. */
+		const raw = ' This is read from the sensor ahead of the camera\u2019s own ' +
+			'processing, so it is not what the video shows.';
+
+		if (n === 0)
+			return ['re-ok', 'Nothing came back in every capture. On a healthy sensor ' +
+				'that is the right answer.' + ' ' + taken];
+		if (sp && sp.index < 0.8)
+			return ['re-warn', `${n} sites kept coming back, but they are clumped rather ` +
+				'than scattered — which is what detail in a picture looks like, and not ' +
+				'what a sensor looks like. Cover the lens, or move the camera between ' +
+				'captures, and run it again.'];
+		if (frac <= NORMAL_FRACTION)
+			return ['re-ok', `${n} stuck pixels — ${share} of this sensor, scattered at ` +
+				'random, which is what a sensor\u2019s own faults look like. That is a ' +
+				'normal number: parts of this class are sold as good with up to about a ' +
+				'hundredth of a percent. ' + taken + raw];
+		return ['re-warn', `${n} stuck pixels — ${share} of this sensor. They are ` +
+			'scattered at random, so they are the sensor rather than the scene, but it ' +
+			'is more than parts of this class are usually sold with (about a hundredth ' +
+			'of a percent). ' + taken + raw];
+	}
+
 	function startHunt() {
 		// A run starts from nothing kept, or the first tally would count
 		// captures the operator has forgotten about.
@@ -1278,10 +1463,22 @@ export function mountEditor(root, {
 		buildDiagnose();
 		try {
 			if (capture) {
+				/*
+				 * Two ways a capture fails to land, and they need different
+				 * sentences. A timeout or a throw puts its own reason on the
+				 * stage, so pointing at it is fair. But takeFrame also returns
+				 * in silence when the editor is already busy -- fetching the
+				 * first frame, most often -- and that path posts nothing, so
+				 * "the message above says why" pointed at blank space.
+				 */
+				if (state.busy)
+					throw new Error('The editor is still busy with the last frame. ' +
+						'Give it a moment and press this again.');
 				const was = opened;
 				await takeFrame();
 				if (opened === was)
-					throw new Error('That capture did not arrive. The message above says why.');
+					throw new Error('That capture did not arrive — the reason is on the ' +
+						'picture, above.');
 			} else if (!state.info) {
 				throw new Error('Drop a frame on the picture first.');
 			} else if (hunt.seen === opened) {
@@ -1448,14 +1645,35 @@ export function mountEditor(root, {
 			for (const [, c] of tally) if (c === hunt.taken) every++;
 			panel.append(Object.assign(el('p', 're-note'), {
 				style: 'margin:0 0 7px',
-				textContent: 'So far: ' + tally.size + ' site' + (tally.size === 1 ? '' : 's') +
+				textContent: (done ? 'Across ' + hunt.taken + ' pictures: ' : 'So far: ') +
+					tally.size + ' site' + (tally.size === 1 ? '' : 's') +
 					', ' + every + ' of which ' + (every === 1 ? 'has' : 'have') +
 					' turned up every time.',
 			}));
 			panel.lastChild.dataset.act = 'hunt-progress';
 
-			if (hunt.dark !== null) {
-				const box = el('div', 're-notice ' + (hunt.dark ? 're-ok' : 're-warn'));
+			/*
+			 * Said once, when it is decided, and then kept as a single line.
+			 *
+			 * All of this -- the covered/not-covered finding and the paragraph
+			 * about exposure below it -- used to be reprinted unchanged after
+			 * every capture, so the panel was nine lines of advice the reader
+			 * had already taken, three captures ago, with the one number that
+			 * had changed buried in it.
+			 */
+			const fresh = hunt.taken === 1 || done;
+			if (hunt.dark !== null && !fresh) {
+				panel.append(Object.assign(el('p', 're-note'), {
+					style: 'margin:0 0 9px',
+					textContent: hunt.dark
+						? 'Lens covered — leave the camera where it is.'
+						: 'Looking only where the picture is dark — move the camera a ' +
+							'little between pictures.',
+				}));
+			}
+			if (hunt.dark !== null && fresh) {
+				const box = el('div', 're-notice ' + (hunt.dark ? 're-ok' : 're-warn'),
+					hunt.dark ? ICON.ok : ICON.warn);
 				box.style.cssText = 'margin:0 0 9px';
 				box.dataset.act = 'hunt-verdict';
 				box.append(Object.assign(el('div'), {
@@ -1482,7 +1700,7 @@ export function mountEditor(root, {
 			 * 3921 at 7 s. Which is also the warning: a map taken at seven
 			 * seconds is not a map of the camera that runs at a thirtieth.
 			 */
-			if (state.info && state.info.exposure)
+			if (fresh && !done && state.info && state.info.exposure)
 				panel.append(Object.assign(el('p', 're-note'), {
 					style: 'margin:0 0 9px',
 					textContent: 'Taken at ' + (state.info.exposure * 1000).toFixed(1) +
@@ -1508,11 +1726,17 @@ export function mountEditor(root, {
 		if (!done) {
 			const go = el('button', 're-btn re-pri', '');
 			go.dataset.act = 'hunt-step';
+			/* "Take picture N of 5" rather than "Capture": there is a Capture
+			 * button in the chrome already, and a tester's script clicked the
+			 * wrong one of the two. */
+			const waiting = state.busy || !state.info;
 			go.textContent = hunt.busy ? 'Working…'
-				: capture ? (hunt.taken === 0 ? 'Capture' : 'Capture ' + (hunt.taken + 1) +
-					' of ' + HUNT_WANT)
-					: 'Read the frame on screen';
-			go.disabled = hunt.busy;
+				: waiting ? 'Waiting for a frame…'
+					: capture ? 'Take picture ' + (hunt.taken + 1) + ' of ' + HUNT_WANT
+						: 'Read the frame on screen';
+			/* Live before the first frame has arrived, this produced a capture
+			 * that could not run and an error about it. */
+			go.disabled = hunt.busy || waiting;
 			go.addEventListener('click', huntStep);
 			row.append(go);
 			/* No capture provider: the frames have to be brought in by hand,
@@ -1530,6 +1754,23 @@ export function mountEditor(root, {
 			fin.addEventListener('click', finishHunt);
 			row.append(fin);
 		} else {
+			/*
+			 * The answer, first and in one sentence.
+			 *
+			 * A run used to end on a download button and a count, which left
+			 * the owner holding a text file and no idea whether the number in
+			 * it was bad news. Everything under this is the working.
+			 */
+			const v = sensorVerdict(diag && diag.fromTally ? diag.defects : null);
+			if (v) {
+				const box = el('div', 're-notice ' + v[0], v[0] === 're-ok' ? ICON.ok : ICON.warn);
+				box.style.cssText = 'margin:0 0 9px';
+				box.dataset.act = 'hunt-verdict-final';
+				box.append(Object.assign(el('div'), { textContent: v[1] }));
+				panel.append(box);
+			}
+			readDpc();
+			dpcCard(panel);
 			if (hunt.clipped) {
 				const box = el('div', 're-notice re-warn');
 				box.style.cssText = 'margin:0 0 9px';
@@ -1563,16 +1804,25 @@ export function mountEditor(root, {
 	function buildDiagnose() {
 		insp.replaceChildren();
 		insp.append(buildHunt());
+		/*
+		 * One frame, by hand -- folded away under the guided run.
+		 *
+		 * These were side by side, which put two five-capture methods and two
+		 * buttons labelled Capture on one tab; a tester's script pressed the
+		 * wrong one of the two on its first attempt. The guided run is the way
+		 * in, and this is the same machinery for someone who already knows
+		 * what they want from it.
+		 */
 		const panel = el('div', 're-panel');
-		panel.append(Object.assign(el('div', 're-shead'), {
-			innerHTML: '<h3 class="re-cap">Sensor</h3><span class="re-rule"></span>',
-		}));
+		/* Everything the manual path needs goes in here, and the whole of it
+		 * is folded away at the bottom of the tab. */
+		const body = el('div');
 		const run = el('button', 're-btn re-pri', '');
 		run.dataset.act = 'scan';
 		run.textContent = 'Scan the frame';
-		panel.append(run);
-		panel.append(Object.assign(el('p', 're-note'), {
-			textContent: 'Read off the mosaic, before any interpolation. A frame of ' +
+		body.append(run);
+		body.append(Object.assign(el('p', 're-note'), {
+			textContent: 'Reads the mosaic exactly as the sensor sent it. A frame of ' +
 				'something flat and out of focus gives the cleanest answer — and a ' +
 				'dark one gives the only reliable one.',
 			style: 'margin:8px 0 0',
@@ -1600,14 +1850,24 @@ export function mountEditor(root, {
 		]) {
 			const b = el('button', pct === bgPercent ? 'on' : '', label);
 			b.title = note;
-			b.addEventListener('click', () => {
+			/*
+			 * Mid-run this would leave scanSet holding captures read under
+			 * different gates, which the tally then counts as if they were
+			 * comparable -- a site can only turn up in the captures whose gate
+			 * admitted it. The run owns the gate while it is open.
+			 */
+			b.disabled = !!hunt && !hunt.done;
+			if (b.disabled) b.title = 'The run sets this while it is going.';
+			b.addEventListener('click', async () => {
 				if (bgPercent === pct) return;
 				bgPercent = pct;
-				// The old reading was taken somewhere else and no longer
-				// describes what is being asked for.
 				diag = null;
 				buildDiagnose();
 				drawMarks();
+				/* Re-read rather than leaving an empty panel where a reading
+				 * was. Choosing where to look is a question about this frame,
+				 * and it used to be answered by removing the answer. */
+				if (state.info) await runScan();
 			});
 			gateSeg.append(b);
 		}
@@ -1635,7 +1895,8 @@ export function mountEditor(root, {
 					'sensor from a scene, and there is no scene here. Everywhere is the ' +
 					'right answer for a frame like this one.',
 			}));
-		panel.append(gate);
+		body.append(gate);
+		panel.append(foldout('Advanced — one frame at a time', (b) => b.append(body)));
 		insp.append(panel);
 
 		const out = el('div', 're-panel');
@@ -1647,7 +1908,10 @@ export function mountEditor(root, {
 		// rings with nothing to explain them.
 		if (diag) renderDiagnose(out);
 
-		run.addEventListener('click', async () => {
+		/* One scan-and-show, so the button and the brightness gate take the
+		 * same path. The gate used to throw the reading away and put nothing
+		 * in its place. */
+		runScan = async () => {
 			run.disabled = true;
 			run.textContent = 'Scanning…';
 			try {
@@ -1663,7 +1927,8 @@ export function mountEditor(root, {
 				run.disabled = false;
 				run.textContent = 'Scan the frame';
 			}
-		});
+		};
+		run.addEventListener('click', () => runScan());
 	}
 
 	/*
@@ -1753,6 +2018,36 @@ export function mountEditor(root, {
 		scanSet.push({ id: state.openId, name: state.name || 'a frame', keys,
 			/* Carried so the end of a run can say whether it saw everything. */
 			truncated: !!diag.truncated, found: diag.defectCount });
+	}
+
+	/*
+	 * A section that can be folded away, for the numbers under a verdict.
+	 *
+	 * Built on <details>, which brings the keyboard and the screen-reader
+	 * behaviour with it -- a div with a click handler brings neither, and this
+	 * is the first disclosure in the tree, so whatever it does becomes the
+	 * pattern. Styled off .re-shead, which is already a heading-plus-rule row
+	 * at ~15 call sites and is exactly the shape of a summary bar.
+	 *
+	 * Open state is not remembered between renders on purpose: the panel is
+	 * rebuilt from scratch on every scan, and restoring a toggle would mean
+	 * carrying UI state through a path that otherwise carries only readings.
+	 */
+	function foldout(title, build, open = false) {
+		const d = el('details');
+		if (open) d.open = true;
+		d.style.cssText = 'margin-top:9px';
+		const sum = el('summary', 're-shead');
+		sum.style.cssText = 'cursor:pointer;list-style:none;margin-bottom:0';
+		sum.append(Object.assign(el('h3', 're-cap'), { textContent: title }));
+		sum.append(el('span', 're-rule'));
+		sum.append(Object.assign(el('span', 're-note'), { textContent: '▾' }));
+		d.append(sum);
+		const body = el('div');
+		body.style.cssText = 'margin-top:7px';
+		build(body);
+		d.append(body);
+		return d;
 	}
 
 	function statLine(name, value, note) {
@@ -1988,7 +2283,11 @@ export function mountEditor(root, {
 			out.append(statLine('reading', 'below ' + Math.round(diag.backgroundCut),
 				'only where the picture is dark'));
 
-		out.append(deviationPlot(diag));
+		/* The deviation field belongs to ONE frame -- it is every pixel of the
+		 * frame that was scanned, against its neighbours. After a tally it
+		 * rides along on the spread of `diag` and would sit under a headline
+		 * about five captures describing only the last of them. */
+		if (!diag.fromTally) out.append(deviationPlot(diag));
 
 		/*
 		 * Two captures of different views, intersected.
@@ -2022,9 +2321,33 @@ export function mountEditor(root, {
 		 * fall is itself the answer -- a population that appears once each and
 		 * never again is the scene, and one that keeps coming back is not.
 		 */
-		const held = scanSet.filter((v) => v.id !== state.openId);
-		const all = held.concat([{ name: state.name || 'this frame',
-			keys: diag.defects.map((p) => p.x + ',' + p.y) }]);
+		/*
+		 * The captures themselves, never the answer fed back as one of them.
+		 *
+		 * The open frame's reading is substituted in here so that a scan which
+		 * has not been kept still counts -- and that is right while `diag` IS
+		 * this frame's own scan. It stops being right the moment the tally has
+		 * replaced `diag.defects` with its own result, because the fifth
+		 * capture then becomes the conclusion, offered as evidence for itself.
+		 *
+		 * Measured on a real run of five: the progress line said 388 sites had
+		 * turned up every time and this table said 397, because
+		 * `in-all-5 = #{c=5} + #{c=4 and absent from capture 5}` -- nine sites
+		 * that had missed a capture, reported as having missed none. Sites
+		 * seen ONLY in the last capture went the other way and disappeared
+		 * from the table altogether, which is why its rows stopped summing to
+		 * the count above it.
+		 *
+		 * So: if this frame has been kept, scanSet already holds its real
+		 * reading and is the whole truth. Only stand in for it when it has not
+		 * been kept and `diag` is a genuine single-frame scan.
+		 */
+		const kept = scanSet.some((v) => v.id === state.openId);
+		const all = kept || diag.fromTally
+			? scanSet.slice()
+			: scanSet.filter((v) => v.id !== state.openId)
+				.concat([{ name: state.name || 'this frame',
+					keys: diag.defects.map((p) => p.x + ',' + p.y) }]);
 		const M = all.length;
 		if (M < 2) {
 			out.append(Object.assign(el('p', 're-note'), {
@@ -2150,8 +2473,18 @@ export function mountEditor(root, {
 				 * on screen -- and if it had to be in the current frame's list
 				 * too, the rule would be an intersection again.
 				 */
+				/*
+				 * `partial` comes along. It says a capture filled the scan's
+				 * store, so the list is short near the bottom of the frame,
+				 * and the exported file's header is written from it. Dropping
+				 * it here turned that header from "NO" to "yes, as far as the
+				 * scan could see" on a click that changed no evidence -- while
+				 * the warning on screen, which reads a different flag, went on
+				 * saying the opposite.
+				 */
 				diag = { ...diag, defects: pts, defectCount: pts.length, truncated: false,
-					fromTally: { need: needN, of: M } };
+					fromTally: { need: needN, of: M,
+						partial: all.some((v) => v.truncated) } };
 				renderDiagnose(out);
 				drawMarks();
 			});
@@ -2181,34 +2514,76 @@ export function mountEditor(root, {
 		out.append(Object.assign(el('div', 're-shead'), {
 			innerHTML: '<h3 class="re-cap">Black level</h3><span class="re-rule"></span>',
 		}));
-		out.append(statLine('file', String(i.black), 'what the DNG says'));
-		out.append(statLine('frame', rgb(diag.blackFloor, (v) => v.toFixed(0).padStart(5)),
-			'the darkest the frame really gets, per plane'));
 		const floor = Math.min(...diag.blackFloor);
+		/*
+		 * The judgement first, and one an owner can act on.
+		 *
+		 * "The file claims a higher pedestal than the frame reaches" reads as
+		 * a fault and offers no remedy -- and for most people it is not even a
+		 * fault they own: it is the camera's own black level, in the camera's
+		 * own file. Say what it costs the picture and who can change it.
+		 */
+		const low = floor + 2 < i.black;
 		out.append(Object.assign(el('p', 're-note'), {
-			style: 'margin:5px 0 0',
-			textContent: floor + 2 < i.black
-				? 'The file claims a higher pedestal than the frame reaches, which clips the ' +
-					'shadows to black. Worth checking against a lens-cap frame.'
-				: 'Consistent with the file, as far as this frame can say — a scene with ' +
-					'nothing truly dark in it cannot say much.',
+			style: 'margin:0 0 3px;color:#e6e8ee',
+			textContent: low
+				? 'The camera subtracts more than this frame actually reaches, so the ' +
+					'deepest shadows are being flattened to pure black. Nothing here can ' +
+					'change that — it is set in the camera\u2019s own tuning — but it is worth ' +
+					'knowing if shadow detail is what you are missing.'
+				: 'Normal. The camera\u2019s black level agrees with what the frame reaches.',
+		}));
+		out.append(foldout('The numbers', (b) => {
+			b.append(statLine('file', String(i.black), 'what the DNG says'));
+			b.append(statLine('frame', rgb(diag.blackFloor, (v) => v.toFixed(0).padStart(5)),
+				'the darkest the frame really gets, per plane'));
+			if (!low) b.append(Object.assign(el('p', 're-note'), {
+				style: 'margin:5px 0 0',
+				textContent: 'A scene with nothing truly dark in it cannot say much; a frame ' +
+					'with the lens covered says the most.',
+			}));
 		}));
 
 		out.append(Object.assign(el('div', 're-shead'), {
 			innerHTML: '<h3 class="re-cap">Clipping</h3><span class="re-rule"></span>',
 		}));
-		out.append(statLine('R G B', rgb(diag.clipped, (v) => pct(v).padStart(7)),
-			'at or above ' + i.white));
+		const blown = Math.max(...diag.clipped);
+		out.append(Object.assign(el('p', 're-note'), {
+			style: 'margin:0 0 3px;color:#e6e8ee',
+			textContent: blown >= 0.01
+				? 'Something in this frame is burnt out — ' + pct(blown).trim() + ' of one ' +
+					'colour has gone as bright as the sensor goes, and no detail survives ' +
+					'there. A shorter exposure keeps it.'
+				: 'Normal. Nothing worth speaking of has burnt out.',
+		}));
+		out.append(foldout('The numbers', (b) => {
+			b.append(statLine('R G B', rgb(diag.clipped, (v) => pct(v).padStart(7)),
+				'at or above ' + i.white));
+		}));
 
 		out.append(Object.assign(el('div', 're-shead'), {
 			innerHTML: '<h3 class="re-cap">Noise</h3><span class="re-rule"></span>',
 		}));
-		out.append(statLine('R G B', rgb(diag.noise, (v) => v.toFixed(1).padStart(6)),
-			'counts, one sigma'));
+		/* Against the frame's own signal range, which is the only thing here
+		 * that makes a count of noise mean anything to a reader. */
+		const sigma = Math.max(...diag.noise);
+		const range = (i.white || 0) - (i.black || 0);
+		const noisy = range > 0 && sigma / range > 0.01;
 		out.append(Object.assign(el('p', 're-note'), {
-			style: 'margin:5px 0 0',
-			textContent: 'A median of local differences, so an edge in the frame does not ' +
-				'read as noise' + (i.iso ? `. This frame is ISO ${i.iso}.` : '.'),
+			style: 'margin:0 0 3px;color:#e6e8ee',
+			textContent: noisy
+				? 'Grainy, which is what a small sensor does when it is short of light. ' +
+					'More light, or a longer exposure, is the only cure.'
+				: 'Normal for this exposure.',
+		}));
+		out.append(foldout('The numbers', (b) => {
+			b.append(statLine('R G B', rgb(diag.noise, (v) => v.toFixed(1).padStart(6)),
+				'counts, one sigma'));
+			b.append(Object.assign(el('p', 're-note'), {
+				style: 'margin:5px 0 0',
+				textContent: 'A median of local differences, so an edge in the frame does not ' +
+					'read as noise' + (i.iso ? `. This frame is ISO ${i.iso}.` : '.'),
+			}));
 		}));
 	}
 
@@ -4598,6 +4973,14 @@ export function mountEditor(root, {
 			// dimensions, so not even where they were measured -- and shaded
 			// against a peak held from a lens position that no longer exists.
 			resetFocusState();
+			/*
+			 * A frame arriving is news to the Diagnose rail. Nothing rebuilt
+			 * it here before, which was harmless while every control worked
+			 * without a frame -- but the guided run's button now waits for one
+			 * and would have stayed disabled after the frame it was waiting
+			 * for had landed. Mode-guarded, so the other tabs are untouched.
+			 */
+			if (mode === 'diagnose') buildDiagnose();
 			saveBtn.disabled = false;
 			nameEl.textContent = label;
 			sensorChip.hidden = false;

@@ -49,6 +49,42 @@ const numbers = (v) => {
  * rather than half-read, because a profile is built on top of it and written
  * to a camera: a zero curve is a real (and broken) curve, and a table set
  * that is short a temperature would be blended at an undefined one. */
+/*
+ * What the camera does about bad pixels, out of its own profile.
+ *
+ * The section is named for the profile in force -- a camera running its night
+ * profile calls it [ir_static_dpc] and a day one [static_dpc] -- so the name
+ * is found rather than assumed, and handed back so a patch can be written to
+ * the same place it was read from.
+ *
+ * DpcStrength is one value per gain step, which is why the answer depends on
+ * which step the frame was taken at; without a way to map ISO onto that index
+ * the honest summary is the range, not a single number.
+ */
+export function readDefectCorrection(ini) {
+	const name = Object.keys(ini || {}).find((k) => /(^|_)static_dpc$/.test(k));
+	if (!name) return null;
+	const sec = ini[name];
+	const nums = (v) => String(v || '').split(',')
+		.map((x) => Number(x.trim())).filter((x) => Number.isFinite(x));
+	const strength = nums(sec.DpcStrength);
+	return {
+		section: name,
+		enabled: String(sec.DpcEnable).trim() === '1',
+		strength,
+		/* 0-255 in the vendor's units; reported as a share so the copy can
+		 * speak of it without naming a scale nobody outside the SDK knows. */
+		strongest: strength.length ? Math.max(...strength) / 255 : null,
+		weakest: strength.length ? Math.min(...strength) / 255 : null,
+	};
+}
+
+/* The smallest patch that turns the corrector on, written back into the
+ * section it was read from so a night profile is not given a day one's key. */
+export function enableDefectCorrection(state) {
+	return '[' + state.section + ']\nDpcEnable = "1"\n';
+}
+
 export function readColour(ini) {
 	const awb = ini.static_awb || {}, ccm = ini.static_ccm || {};
 	const staticWb = numbers(awb.AutoStaticWb);
