@@ -46,6 +46,31 @@ export function blend(z) {
  * interesting case of the two, because a specular highlight in an otherwise
  * fine zone will pin the filters without dimming the luma.
  */
+/*
+ * The per-zone accumulators are u16, and a zone that reaches the top of that
+ * range has stopped measuring: the filter's real response went higher and the
+ * counter could not say so.
+ *
+ * This is NOT the same as `clipped`, which is about the picture -- pixels over
+ * the high-luma threshold, a specular highlight in an otherwise fine zone. A
+ * saturated zone can be perfectly exposed. What is full is the counter, and
+ * the cause is the filter's gain, not the scene.
+ *
+ * It matters most to anything comparing one reading with another, because a
+ * pinned value cannot fall: a defocus sweep across a saturated peak reports
+ * that nothing changed, which is indistinguishable from a filter that cannot
+ * see focus at all. The two need different answers -- cut the gain, or change
+ * the filter -- so they must not produce the same number.
+ */
+export const ZONE_CEILING = 65535;
+
+export function zoneSaturated(z, ceiling = ZONE_CEILING) {
+	/* The two the blend is made of, and only those. h1 and v1 belong to the
+	 * other bank and can sit at the ceiling all day without touching the value
+	 * this page reports. */
+	return z.h2 >= ceiling || z.v2 >= ceiling;
+}
+
 export function zoneState(z, { yFloor = 0, hlCeil = 0 } = {}) {
 	if (z.hlcnt > hlCeil) return 'clipped';
 	if (z.y <= yFloor) return 'unlit';
@@ -103,12 +128,31 @@ export function summarise(zones, rows, cols, opts = {}) {
 		if (fv[i] > peak) { peak = fv[i]; peakAt = i; }
 	}
 	const measured = state.filter((s) => s === 'measured').length;
+	const ceiling = opts.ceiling !== undefined ? opts.ceiling : ZONE_CEILING;
+	const sat = zones.map((z) => zoneSaturated(z, ceiling));
+	/* Saturation is reported, not subtracted. Dropping a pinned zone from the
+	 * peak would handpoint the reading at some lower zone and carry on as if
+	 * the number meant something; the honest answer is that the peak is real
+	 * but cannot rise, and the caller is told so. */
 	return {
 		rows, cols, fv, state, measured,
 		peak: peakAt < 0 ? null : peak,
 		peakAt: peakAt < 0 ? null : { row: (peakAt / cols) | 0, col: peakAt % cols, index: peakAt },
 		unlit: state.filter((s) => s === 'unlit').length,
 		clipped: state.filter((s) => s === 'clipped').length,
+		saturated: sat.filter(Boolean).length,
+		/* The one that decides whether a comparison is worth anything: the
+		 * grid's own peak sitting at the ceiling is what makes a sweep flat.
+		 *
+		 * Any zone TIED at the peak, not just the one that happened to win it.
+		 * Peak selection keeps the first strict maximum, and a pinned zone can
+		 * tie with an unpinned one at the same blended value -- {h2: 65534,
+		 * v2: 5} and {h2: 65535, v2: 0} both come to 55295 -- so reading the
+		 * flag off the winning index alone lets grid order decide whether the
+		 * reading is trustworthy. If anything at the top of the grid cannot
+		 * rise, the peak cannot rise. */
+		peakSaturated: peakAt >= 0 &&
+			fv.some((v, i) => v === peak && state[i] === 'measured' && sat[i]),
 	};
 }
 

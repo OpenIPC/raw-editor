@@ -1135,6 +1135,54 @@ console.log('\nfocus statistics: the grid a person focuses a lens by');
 		assert(`a zone carrying ${JSON.stringify(bad)} is refused`, refused);
 	}
 
+	// A pinned counter is the fault here that looks like a good result: large,
+	// steady, and unable to move. Measured on an 85H50AI, a bank whose own sum
+	// moved 2.6x across a defocus sweep reported a spread of 1/1.0, because its
+	// peak zone sat on 65535 at both ends.
+	{
+		const at = A.summarise(grid(1, 2, (i) => zone({ h2: i ? 100 : A.ZONE_CEILING })), 1, 2);
+		check('a zone at the top of the counter is counted', at.saturated, 1);
+		assert('and the peak sitting there is called out', at.peakSaturated);
+
+		// Reported, not subtracted. Dropping the pinned zone would hand back
+		// some lower zone's value as though it were the peak.
+		check('the pinned zone is still the peak', at.peak, A.blend(zone({ h2: A.ZONE_CEILING })));
+
+		const below = A.summarise(grid(1, 2, (i) => zone({ h2: i ? 100 : A.ZONE_CEILING - 1 })), 1, 2);
+		check('one short of the ceiling is not saturated', below.saturated, 0);
+		assert('nor is its peak', !below.peakSaturated);
+
+		// v2 shares the blend with h2, so it pins the value just as hard.
+		const vert = A.summarise(grid(1, 1, () => zone({ v2: A.ZONE_CEILING })), 1, 1);
+		check('v2 at the ceiling counts too', vert.saturated, 1);
+
+		// h1 and v1 belong to the other bank and never reach the reported value.
+		const other = A.summarise(grid(1, 1, () => zone({ h1: A.ZONE_CEILING, v1: A.ZONE_CEILING })), 1, 1);
+		check('the other bank at its ceiling does not', other.saturated, 0);
+
+		// Peak selection keeps the first strict maximum, so a pinned zone can
+		// tie with an unpinned one and lose -- these two both blend to 55295.
+		// Reading the flag off the winning index alone would let grid order
+		// decide whether the sweep is trustworthy.
+		{
+			const lo = zone({ h2: A.ZONE_CEILING - 1, v2: 5 });
+			const hi = zone({ h2: A.ZONE_CEILING, v2: 0 });
+			check('the tie is a real one', A.blend(lo), A.blend(hi));
+			const tied = A.summarise([lo, hi], 1, 2);
+			assert('a pinned zone tied at the peak still condemns it', tied.peakSaturated);
+			// ...and in the order where it wins outright, which is the easy case.
+			assert('whichever way round they sit', A.summarise([hi, lo], 1, 2).peakSaturated);
+		}
+
+		// A saturated zone that is too dark to believe is not the peak, so the
+		// sweep has nothing to distrust.
+		const dark = A.summarise(grid(1, 2, (i) => (i
+			? zone({ h2: 100 })
+			: zone({ y: 0, h2: A.ZONE_CEILING }))), 1, 2);
+		assert('a pinned zone that was never measured does not condemn the peak',
+			!dark.peakSaturated);
+	}
+
 	// A grid whose length disagrees with its shape would still draw -- shifted,
 	// every zone in the wrong place. Refused rather than rendered.
 	let threw = false;

@@ -3111,6 +3111,22 @@ export function mountEditor(root, {
 			(s.unlit ? `, ${s.unlit} too dark` : '') +
 			(s.clipped ? `, ${s.clipped} blown out` : '') + '.';
 		focusStatus.append(line);
+		/* A pinned counter is the one fault here that reads as a good result:
+		 * the number is large and steady, which looks like a sharp, stable
+		 * picture. It is neither -- it is a value that has stopped being able
+		 * to move, and every comparison made against it is worthless. */
+		if (s.saturated) {
+			const box = el('div', 're-notice re-warn', ICON.warn);
+			box.append(Object.assign(el('div'), {
+				textContent: `${s.saturated} zone${s.saturated === 1 ? ' is' : 's are'} ` +
+					'reading at the top of the camera\u2019s counter' +
+					(s.peakSaturated ? ', the sharpest among them' : '') +
+					'. The filter\u2019s gain is higher than the counter can hold, so ' +
+					'those readings cannot rise and a comparison between two of them ' +
+					'means nothing. Lower the first gain until this clears.',
+			}));
+			focusStatus.append(box);
+		}
 		if (!s.measured) {
 			const box = el('div', 're-notice re-warn', ICON.warn);
 			box.append(Object.assign(el('div'), {
@@ -3373,7 +3389,7 @@ export function mountEditor(root, {
 		const gen = ++sweepGen;
 		const mine = () => gen === sweepGen;
 		const vals = [];
-		let out = 0, failed = null, lost = 0;
+		let out = 0, failed = null, lost = 0, pinned = 0;
 		/* The poll is stopped for the duration: it and the sweep would be
 		 * asking the same camera for the same grid at once, and its answers
 		 * would land in the panel out of step with where the lens actually is.
@@ -3386,6 +3402,10 @@ export function mountEditor(root, {
 				try {
 					const s = await readGrid();
 					if (s.peak !== null) vals.push(s.peak);
+					/* Counted across the whole sweep, not just at the ends: one
+					 * pinned reading anywhere along it is enough to make the
+					 * spread an understatement. */
+					if (s.peakSaturated) pinned++;
 				} catch (e) {
 					failed = e && e.message ? e.message : String(e);
 					break;
@@ -3437,7 +3457,7 @@ export function mountEditor(root, {
 		if (!vals.length) return { failed: 'nothing measurable along the sweep.' + back, lost: lost };
 		const hi = Math.max.apply(null, vals), lo = Math.min.apply(null, vals);
 		return { hi: hi, lo: lo, ratio: lo > 0 ? hi / lo : null, n: vals.length,
-			lost: lost, back: back };
+			lost: lost, back: back, pinned: pinned, steps: vals.length };
 	}
 
 
@@ -3704,6 +3724,23 @@ export function mountEditor(root, {
 						return;
 					}
 					if (r.failed) { say('Could not measure it: ' + r.failed, true); return; }
+					/* A sweep taken across a pinned peak gets no ratio at all.
+					 * Reporting one would be the same mistake in a new place:
+					 * a saturated reading cannot fall, so the spread comes out
+					 * near 1 and reads as "this filter cannot see focus" when
+					 * the filter may be fine and the counter simply full.
+					 * Measured on an 85H50AI: a bank whose own sum moved 2.6x
+					 * across the sweep reported 1/1.0, because its peak zone
+					 * never left 65535. */
+					if (r.pinned) {
+						say('Cannot say. The sharpest zone was at the top of the ' +
+							'camera\u2019s counter for ' + r.pinned + ' of the ' +
+							r.steps + ' readings, so it had no room to fall and the ' +
+							'spread would be an understatement of nothing. Lower the ' +
+							'first gain until the grid stops reading at the ceiling, ' +
+							'then measure again.' + r.back, true);
+						return;
+					}
 					/* The ratio, not the peak. A filter that reads loudly
 					 * everywhere is worse than a quiet one that falls away,
 					 * and the peak alone cannot tell them apart -- which is

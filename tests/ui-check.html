@@ -2452,6 +2452,44 @@ try {
 	t('and the lens ends where it began', g.seen.pos === 0, String(g.seen.pos));
 	g.ed.destroy();
 
+	// A pinned counter, which is the failure that looks like a result. The
+	// zone values here are the shape measured on an 85H50AI: a peak stuck on
+	// 65535 whatever the lens does, while the rest of the grid moves.
+	g = await mk({ lens: true, sweepGrid: (pos) => ({ rows: 1, cols: 2, zones: [
+		[0, 65535, 0, 9, 1000, 0], [0, Math.max(10, 900 - pos * 110), 0, 1, 1000, 0]] }) });
+	q(g.host, 'af-measure').click();
+	for (let i = 0; i < 200 && q(g.host, 'af-measure').hidden; i++) await pause(100);
+	{
+		const s = q(g.host, 'af-status').textContent;
+		t('a sweep over a pinned peak refuses to give a ratio',
+			/Cannot say/.test(s) && !/Falls to/.test(s), s.slice(0, 80));
+		t('and says which knob fixes it', /first gain/.test(s), s.slice(0, 120));
+	}
+	g.ed.destroy();
+
+	// ... but only then. A filter that genuinely cannot see focus must still
+	// get its honest 1/1.0 rather than being excused as saturation.
+	g = await mk({ lens: true, sweepGrid: () => ({ rows: 1, cols: 2, zones: [
+		[0, 900, 0, 9, 1000, 0], [0, 100, 0, 1, 1000, 0]] }) });
+	q(g.host, 'af-measure').click();
+	for (let i = 0; i < 200 && q(g.host, 'af-measure').hidden; i++) await pause(100);
+	{
+		const s = q(g.host, 'af-status').textContent;
+		t('a flat sweep that is not pinned still reports its spread',
+			/Falls to/.test(s) && !/Cannot say/.test(s), s.slice(0, 80));
+	}
+	g.ed.destroy();
+
+	// The live grid, not just the sweep: a pinned reading is large and steady,
+	// which is exactly what a good one looks like.
+	g = await mk({ grid: { rows: 1, cols: 2,
+		zones: [[0, 65535, 0, 90, 1000, 0], [0, 100, 0, 10, 1000, 0]] } });
+	await pause(150);
+	t('the live grid says when the counter is full',
+		/top of the camera/.test(g.host.textContent), '');
+	t('and that it is the sharpest zone', /the sharpest among them/.test(g.host.textContent), '');
+	g.ed.destroy();
+
 	// Near and Far drive the same lens the sweep is driving.
 	g = await mk({ lens: true });
 	q(g.host, 'af-measure').click();
