@@ -721,7 +721,7 @@ try {
 	send.click();
 	await untilKeep();
 	const revertsBefore = calls.filter((c) => c[0] === 'revert').length;
-	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Preview').click();
 	for (let i = 0; i < 20 && calls.filter((c) => c[0] === 'revert').length === revertsBefore; i++)
 		await new Promise((r) => setTimeout(r, 100));
 	t('leaving Calibrate mid-countdown puts the change back',
@@ -1014,7 +1014,7 @@ try {
 	// be where a person put them.
 	{
 		const placed = [...host.querySelectorAll('.re-chart-grip')].map((g) => g.style.left);
-		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Preview').click();
 		await new Promise((r) => setTimeout(r, 200));
 		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Calibrate').click();
 		const again = host.querySelector('[data-act="find-chart"]');
@@ -1149,7 +1149,7 @@ try {
 	// is not one of the scan's inputs: saturation is the sensor's and is in the
 	// file. The finding this covers was that lowering White made real hot
 	// pixels disappear from the report.
-	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Preview').click();
 	await new Promise((r) => setTimeout(r, 200));
 	{
 		// The label is uppercased by CSS, not in the DOM, so match what is
@@ -1169,7 +1169,7 @@ try {
 
 	// A scan describes one frame under one set of inputs. Change the Bayer
 	// pattern and the old defect coordinates describe nothing.
-	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Preview').click();
 	await new Promise((r) => setTimeout(r, 200));
 	[...host.querySelectorAll('.re-panel .re-seg button')].find((b) => b.textContent === 'BGGR').click();
 	await new Promise((r) => setTimeout(r, 400));
@@ -1181,7 +1181,7 @@ try {
 		host.querySelector('.re-insp').textContent.replace(/\s+/g, ' ').slice(0, 70));
 
 	// Switching away must take the marks with it.
-	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Preview').click();
 	await new Promise((r) => setTimeout(r, 200));
 	t('leaving Bad pixels hides its marks', host.querySelector('.re-marks').hidden);
 	ed.destroy();
@@ -1668,7 +1668,7 @@ try {
 
 	ed.setDemosaic ? ed.setDemosaic(1) : null;
 	// No public setter, so drive it the way a user does: the Develop control.
-	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Preview').click();
 	await until('the demosaic control', () => [...host.querySelectorAll('.re-seg button')]
 		.some((b) => b.textContent === 'Bilinear'));
 	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Bilinear').click();
@@ -1677,7 +1677,7 @@ try {
 	t('bilinear is called out, with what it costs',
 		/Bilinear/.test(warned()) && /ten points/.test(warned()), warned().slice(0, 120));
 
-	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Preview').click();
 	await until('the demosaic control', () => [...host.querySelectorAll('.re-seg button')]
 		.some((b) => b.textContent === 'None'));
 	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'None').click();
@@ -1687,7 +1687,7 @@ try {
 		/almost nothing/.test(warned()), warned().slice(0, 120));
 
 	// Back to RCD so the rest of this block measures what it meant to.
-	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Preview').click();
 	await until('the demosaic control', () => [...host.querySelectorAll('.re-seg button')]
 		.some((b) => b.textContent === 'RCD'));
 	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'RCD').click();
@@ -1703,7 +1703,7 @@ try {
 	 * inside that window read the PREVIOUS picture, under a warning describing
 	 * the new one. The fingerprints have to differ. */
 	const pickDemosaic = async (label) => {
-		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Preview').click();
 		await until('the demosaic control', () => [...host.querySelectorAll('.re-seg button')]
 			.some((b) => b.textContent === label));
 		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === label).click();
@@ -1876,7 +1876,7 @@ try {
 
 	// Leaving the tab must stop the poll.
 	const before = calls;
-	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Develop').click();
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Preview').click();
 	await new Promise((r) => setTimeout(r, 120));
 	t('leaving Focus stops the poll', calls === before, `${before} -> ${calls}`);
 
@@ -1998,7 +1998,7 @@ try {
 
 		// Leave with a read outstanding, answer it, come back.
 		[...host.querySelectorAll('.re-seg button')]
-			.find((b) => b.textContent.trim() === 'Develop').click();
+			.find((b) => b.textContent.trim() === 'Preview').click();
 		await pause(30);
 		const orphan = waiting.shift();
 		if (orphan) orphan(GZ(900));                    // HIGH, for a tab that is gone
@@ -2155,7 +2155,7 @@ try {
 	// Leaving the tab and closing the editor are teardowns, not gestures.
 	down(btn(g.host, 'near'));
 	await pause(40);
-	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Develop').click();
+	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Preview').click();
 	await pause(60);
 	let n = g.moves.length;
 	await pause(80);
@@ -2581,7 +2581,7 @@ try {
 	q(g.host, 'af-apply').click();
 	await pause(120);
 	t('a filter is waiting', !!q(g.host, 'hold'));
-	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Develop').click();
+	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Preview').click();
 	await pause(100);
 	t('leaving the tab puts it back', g.seen.reverts === 1, String(g.seen.reverts));
 	g.ed.destroy();
@@ -2655,7 +2655,7 @@ try {
 	g = await mk({ applySlow: true });
 	q(g.host, 'af-apply').click();
 	await pause(80);
-	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Develop').click();
+	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Preview').click();
 	await pause(80);
 	g.seen.releaseApply();
 	await pause(150);
@@ -2719,7 +2719,7 @@ try {
 	g = await mk({ revertSlow: 1200 });
 	q(g.host, 'af-apply').click();
 	await pause(150);
-	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Develop').click();
+	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Preview').click();
 	await pause(80);
 	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
 	await pause(150);
@@ -2786,7 +2786,7 @@ try {
 	g = await mk({ lens: true });
 	q(g.host, 'af-measure').click();
 	await pause(1600);
-	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Develop').click();
+	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Preview').click();
 	for (let i = 0; i < 200 && g.seen.pos !== 0; i++) await pause(100);
 	t('leaving the tab brings it back too', g.seen.pos === 0, String(g.seen.pos));
 	g.ed.destroy();
@@ -2842,7 +2842,7 @@ try {
 	g = await mk({ lens: true });
 	q(g.host, 'af-measure').click();
 	await pause(1600);
-	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Develop').click();
+	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Preview').click();
 	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
 	await pause(50);
 	q(g.host, 'af-measure').click();
