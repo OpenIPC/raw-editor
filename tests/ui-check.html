@@ -2010,9 +2010,28 @@ try {
 		let grid = opts.grid || GRID;
 		const focus = {
 			intervalMs: 40,
-			zones: () => Promise.resolve(grid),
+			zones: () => {
+				seen.reads = (seen.reads || 0) + 1;
+				// From that read ONWARDS, not on it alone: the live poll reads
+				// too, so an exact count picks whichever of the two got there
+				// first, and the sweep saw a healthy camera the once it mattered.
+				if (opts.readFailsAt && seen.reads >= opts.readFailsAt)
+					return Promise.reject(new Error('the camera stopped answering'));
+				return Promise.resolve(opts.sweepGrid ? opts.sweepGrid(seen.pos || 0) : grid);
+			},
 		};
 		seen.setGrid = (g) => { grid = g; };
+		if (opts.lens) {
+			seen.moves = [];
+			seen.pos = 0;
+			focus.move = (v) => {
+				seen.moves.push(v);
+				if (v === 'far') seen.pos++;
+				if (v === 'near') seen.pos--;
+				return Promise.resolve();
+			};
+			focus.moveRepeatMs = 20;
+		}
 		if (!opts.readOnly) {
 			focus.holdSeconds = opts.hold || 30;
 			focus.filters = () => (opts.readFails
@@ -2296,6 +2315,69 @@ try {
 	t('and works again once it has landed',
 		g.seen.applied.length === madeBefore + 1, String(g.seen.applied.length));
 	g.ed.destroy();
+	// Measuring how sharply a filter peaks means MOVING the lens, so every
+	// check below is about it going back. An operator who asked for a
+	// measurement did not ask to have their focus moved.
+
+	// No lens, no button: it cannot be done from here.
+	g = await mk({});
+	t('no way to measure without a lens to drive', !q(g.host, 'af-measure'));
+	g.ed.destroy();
+
+	// A filter that falls away steeply is the one worth keeping. The peak
+	// alone cannot tell it from one that is merely loud everywhere, which is
+	// the mistake this exists to prevent.
+	g = await mk({ lens: true, sweepGrid: (pos) => ({ rows: 1, cols: 2, zones: [
+		// sharp at the start, falling as the lens walks away
+		[0, Math.max(10, 900 - pos * 110), 0, 9, 1000, 0], [0, 10, 0, 1, 1000, 0]] }) });
+	t('a lens grows the button', !!q(g.host, 'af-measure'));
+	q(g.host, 'af-measure').click();
+	for (let i = 0; i < 200 && q(g.host, 'af-measure').hidden; i++) await pause(100);
+	const said = q(g.host, 'af-status') ? q(g.host, 'af-status').textContent : '';
+	t('it reports how far the reading falls, not how big it got',
+		/Falls to 1\/\d/.test(said), said.slice(0, 90));
+	// Out and back, step for step.
+	const far = g.seen.moves.filter((m) => m === 'far').length;
+	const near = g.seen.moves.filter((m) => m === 'near').length;
+	t('the lens is walked out and walked back the same distance',
+		far === near && far > 0, far + ' out, ' + near + ' back');
+	t('and ends where it started', g.seen.pos === 0, String(g.seen.pos));
+	g.ed.destroy();
+
+	// Stopping half way is the case that most needs the lens returned.
+	g = await mk({ lens: true });
+	q(g.host, 'af-measure').click();
+	await pause(1600);
+	q(g.host, 'af-measure-stop').click();
+	// Waited out rather than guessed: the walk back takes as many steps as
+	// were taken out, and a fixed pause that was short would report the lens
+	// stranded when it was merely still moving.
+	for (let i = 0; i < 200 && q(g.host, 'af-measure').hidden; i++) await pause(100);
+	t('stopping still brings the lens back', g.seen.pos === 0, String(g.seen.pos));
+	t('and says so', /back where it started/.test(
+		q(g.host, 'af-status') ? q(g.host, 'af-status').textContent : ''),
+		q(g.host, 'af-status') ? q(g.host, 'af-status').textContent.slice(0, 60) : '');
+	g.ed.destroy();
+
+	// Leaving the tab mid-sweep, which is the same problem without a button.
+	g = await mk({ lens: true });
+	q(g.host, 'af-measure').click();
+	await pause(1600);
+	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Develop').click();
+	for (let i = 0; i < 200 && g.seen.pos !== 0; i++) await pause(100);
+	t('leaving the tab brings it back too', g.seen.pos === 0, String(g.seen.pos));
+	g.ed.destroy();
+
+	// A camera that stops answering half way through.
+	g = await mk({ lens: true, readFailsAt: 3 });
+	q(g.host, 'af-measure').click();
+	for (let i = 0; i < 200 && q(g.host, 'af-measure').hidden; i++) await pause(100);
+	t('a camera that stops answering is reported',
+		/Could not measure/.test(q(g.host, 'af-status') ? q(g.host, 'af-status').textContent : ''),
+		q(g.host, 'af-status') ? q(g.host, 'af-status').textContent.slice(0, 70) : '(none)');
+	t('and the button comes back', q(g.host, 'af-measure').hidden === false);
+	g.ed.destroy();
+
 } catch (e) {
 	t('the filter designer is handled', false, e.message);
 }
