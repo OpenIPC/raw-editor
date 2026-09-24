@@ -1887,6 +1887,14 @@ export function mountEditor(root, {
 	 * the second one back. */
 	let holdEnd = null;
 
+	/* A hold that has been ended but whose revert or confirmation is still
+	 * travelling. stopHold() clears holdEnd the moment finish() starts, so
+	 * holdEnd alone says "nothing is waiting to be confirmed" while the camera
+	 * is still being put back -- and a write admitted in that window is undone
+	 * by the older request landing after it, leaving the camera on what it had
+	 * before and the panel showing a countdown for something else. */
+	let holdSettling = false;
+
 	function stopHold() {
 		if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
 		if (holdTick) { clearInterval(holdTick); holdTick = null; }
@@ -1903,10 +1911,12 @@ export function mountEditor(root, {
 	/* Refuse a second write while one is waiting to be confirmed or put back,
 	 * and say so where the button was pressed. */
 	function busyHolding(where) {
-		if (!holdEnd) return false;
+		if (!holdEnd && !holdSettling) return false;
 		const box = el('div', 're-notice re-warn', ICON.warn);
 		box.append(Object.assign(el('div'), {
-			textContent: 'The last change is still waiting — keep it or put it back first.',
+			textContent: holdEnd
+				? 'The last change is still waiting — keep it or put it back first.'
+				: 'The last change is still being put back — try again in a moment.',
 		}));
 		where.append(box);
 		return true;
@@ -2153,6 +2163,11 @@ export function mountEditor(root, {
 			 * then says happened. */
 			if (finished) return;
 			finished = true;
+			/* Only a revert. A confirmation in flight leaves the camera on what
+			 * it already shows, so a write behind it is harmless; a revert is
+			 * travelling to put the camera BACK, and a write admitted before it
+			 * lands is undone by it. */
+			if (revert) holdSettling = true;
 			keep.disabled = true;
 			back.disabled = true;
 			stopHold();
@@ -2165,6 +2180,7 @@ export function mountEditor(root, {
 				} catch (e) {
 					text.textContent = 'Could not put it back: ' + e.message;
 				}
+				holdSettling = false;
 				send.disabled = false;
 				return;
 			}
@@ -2182,6 +2198,9 @@ export function mountEditor(root, {
 					await host.keep();
 				} catch (e) {
 					bar.append(acts);
+					keep.disabled = false;
+					back.disabled = false;
+					finished = false;
 					text.textContent = 'Applied, but confirming did not reach the camera: ' +
 						e.message + ' It may still be put back on its own — try again.';
 					send.disabled = false;
@@ -3379,6 +3398,10 @@ export function mountEditor(root, {
 			 * would re-enable the button under an apply that has not answered,
 			 * and a second apply then overwrites the one set of hold handles --
 			 * two trials, one countdown, and whichever revert lands last wins. */
+			/* Not holdSettling. Reading writes nothing, and refusing it here
+			 * left the button disabled with nothing to re-enable it once the
+			 * revert landed -- a panel stuck until it was reloaded. The write
+			 * itself is refused by busyHolding(), which is where it belongs. */
 			if (filterBusy || holdEnd) {
 				say('Finish with the last change first.', true);
 				return Promise.resolve();

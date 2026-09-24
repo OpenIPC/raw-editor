@@ -2028,7 +2028,13 @@ try {
 					? Promise.reject(new Error('refused')) : Promise.resolve();
 			};
 			if (!opts.noRevert)
-				focus.revertFilters = () => { seen.reverts++; return Promise.resolve(); };
+				focus.revertFilters = () => {
+					seen.reverts++;
+					// A camera that takes its time putting things back.
+					return opts.revertSlow
+						? new Promise((res) => setTimeout(res, opts.revertSlow))
+						: Promise.resolve();
+				};
 			if (!opts.noKeep)
 				focus.keepFilters = (f) => {
 					seen.kept.push(f);
@@ -2261,6 +2267,34 @@ try {
 		g.seen.reverts === 0, String(g.seen.reverts));
 	t('and the confirmation stands', g.seen.kept.length === 1,
 		String(g.seen.kept.length));
+	g.ed.destroy();
+	// Leaving arms a revert, and that revert is still travelling when the
+	// operator comes back. stopHold() clears the "something is waiting" marker
+	// the moment the revert STARTS, so without a second marker a fresh write
+	// is admitted here -- and the older revert lands after it, putting the
+	// camera on what it had before while the panel counts down for something
+	// else entirely.
+	g = await mk({ revertSlow: 1200 });
+	q(g.host, 'af-apply').click();
+	await pause(150);
+	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Develop').click();
+	await pause(80);
+	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+	await pause(150);
+	const madeBefore = g.seen.applied.length;
+	q(g.host, 'af-apply').click();
+	await pause(150);
+	t('a write is refused while the last one is still being put back',
+		g.seen.applied.length === madeBefore, String(g.seen.applied.length));
+	t('and says so where the button was pressed',
+		/still being put back/i.test(g.host.querySelector('.re-notice.re-warn') ?
+			g.host.querySelector('.re-notice.re-warn').textContent : ''));
+	// And once it has landed, the panel works again.
+	await pause(1400);
+	q(g.host, 'af-apply').click();
+	await pause(150);
+	t('and works again once it has landed',
+		g.seen.applied.length === madeBefore + 1, String(g.seen.applied.length));
 	g.ed.destroy();
 } catch (e) {
 	t('the filter designer is handled', false, e.message);
