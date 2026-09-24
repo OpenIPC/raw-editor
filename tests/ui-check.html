@@ -2020,11 +2020,24 @@ try {
 				: Promise.resolve(JSON.parse(JSON.stringify(FILT))));
 			focus.applyFilters = (f) => {
 				seen.applied.push(f);
+				// A host that reports failure by THROWING rather than rejecting.
+				if (opts.applyThrows) throw new Error('no route to the camera');
+				if (opts.applySlow)
+					return new Promise((res) => { seen.releaseApply = res; });
 				return opts.applyFails
 					? Promise.reject(new Error('refused')) : Promise.resolve();
 			};
-			focus.revertFilters = () => { seen.reverts++; return Promise.resolve(); };
-			if (!opts.noKeep) focus.keepFilters = (f) => { seen.kept.push(f); return Promise.resolve(); };
+			if (!opts.noRevert)
+				focus.revertFilters = () => { seen.reverts++; return Promise.resolve(); };
+			if (!opts.noKeep)
+				focus.keepFilters = (f) => {
+					seen.kept.push(f);
+					// A camera that takes its time confirming, so the clock can
+					// come round while the answer is still outstanding.
+					return opts.keepSlow
+						? new Promise((res) => setTimeout(res, opts.keepSlow))
+						: Promise.resolve();
+				};
 		}
 		const ed = mountEditor(host, { base: '../dist/', styles: false, autoCapture: false, focus });
 		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
@@ -2153,6 +2166,101 @@ try {
 	t('and says why', /stopped answering/.test(
 		g.host.querySelector('.re-notice.re-warn') ?
 		g.host.querySelector('.re-notice.re-warn').textContent : ''));
+	g.ed.destroy();
+	// Everything below is one family: an apply is a round trip, and the panel
+	// that asked can be gone or asking again before the answer lands.
+
+	// A host that can apply but not put back would arm a countdown it cannot
+	// honour, so it gets no writable panel at all.
+	g = await mk({ noRevert: true });
+	t('no writable panel without a way to put it back', !q(g.host, 'af-apply'));
+	g.ed.destroy();
+
+	// A host that cannot persist is still useful, but must not be told its
+	// tuning survives a restart.
+	g = await mk({ noKeep: true });
+	q(g.host, 'af-apply').click();
+	await pause(150);
+	q(g.host, 'keep').click();
+	await pause(100);
+	const kept = q(g.host, 'hold') ? q(g.host, 'hold').textContent : '';
+	t('a host that cannot save does not claim a restart will remember',
+		/cannot save/i.test(kept) && !/use this after a restart/i.test(kept),
+		kept.slice(0, 80));
+	g.ed.destroy();
+
+	// A synchronous throw escapes the chain if the call is made outside it,
+	// leaving the button disabled and "Applying" on screen for good.
+	g = await mk({ applyThrows: true });
+	q(g.host, 'af-apply').click();
+	await pause(150);
+	t('a write that throws is reported like one that rejects',
+		/no route/.test(g.host.querySelector('.re-notice.re-warn') ?
+			g.host.querySelector('.re-notice.re-warn').textContent : ''));
+	t('and does not leave the panel stuck on Applying',
+		q(g.host, 'af-apply').disabled === false);
+	g.ed.destroy();
+
+	// An answer that arrives after the panel is gone must not arm a countdown
+	// nobody can see -- a camera that reverts on its own with nothing on
+	// screen having said it would.
+	g = await mk({ applySlow: true });
+	q(g.host, 'af-apply').click();
+	await pause(80);
+	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Develop').click();
+	await pause(80);
+	g.seen.releaseApply();
+	await pause(150);
+	t('a late answer arms no hidden trial', !q(g.host, 'hold'));
+	t('and starts no rollback of its own', g.seen.reverts === 0, String(g.seen.reverts));
+	g.ed.destroy();
+
+	// Reading the camera during a slow apply would re-enable the button and
+	// admit a second write over the one set of hold handles.
+	g = await mk({ applySlow: true });
+	q(g.host, 'af-apply').click();
+	await pause(80);
+	q(g.host, 'af-reload').click();
+	await pause(80);
+	t('reading is refused while a write is in flight',
+		q(g.host, 'af-apply').disabled === true);
+	g.seen.releaseApply();
+	await pause(150);
+	t('and only one write was made', g.seen.applied.length === 1,
+		String(g.seen.applied.length));
+	g.ed.destroy();
+
+	// Keep and Put-it-back are both live until one is pressed, and the clock
+	// can fire between the click and the first await.
+	g = await mk({});
+	q(g.host, 'af-apply').click();
+	await pause(150);
+	// Held before the first click: finish() removes the buttons, so looking
+	// them up again would find nothing and test nothing. A detached node still
+	// fires its listener, which is exactly the re-entry being guarded against.
+	const kb = q(g.host, 'keep'), rb = q(g.host, 'revert');
+	kb.click();
+	kb.click();
+	if (rb) rb.click();
+	await pause(150);
+	t('confirming twice persists once', g.seen.kept.length === 1,
+		String(g.seen.kept.length));
+	t('and does not also roll back', g.seen.reverts === 0, String(g.seen.reverts));
+	g.ed.destroy();
+
+	// The click is not the only way in. Disabling the buttons stops a second
+	// press, but the clock is not a press -- it fires on its own while a slow
+	// confirmation is still outstanding, and without a guard it rolls back a
+	// change the operator has already kept and the panel has already said so.
+	g = await mk({ hold: 1, keepSlow: 4000 });
+	q(g.host, 'af-apply').click();
+	await pause(150);
+	q(g.host, 'keep').click();
+	await pause(6500);
+	t('the clock does not undo a confirmation still in flight',
+		g.seen.reverts === 0, String(g.seen.reverts));
+	t('and the confirmation stands', g.seen.kept.length === 1,
+		String(g.seen.kept.length));
 	g.ed.destroy();
 } catch (e) {
 	t('the filter designer is handled', false, e.message);

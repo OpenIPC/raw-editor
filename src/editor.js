@@ -2144,7 +2144,17 @@ export function mountEditor(root, {
 		acts.append(keep, back);
 		bar.append(acts);
 
+		let finished = false;
 		const finish = async (revert) => {
+			/* Once. Keep and Put-it-back are both live until one is pressed, and
+			 * the clock can fire between the click and the first await -- two
+			 * entries send a persist and a rollback at the same time and the
+			 * camera keeps whichever answered last, which is not what the panel
+			 * then says happened. */
+			if (finished) return;
+			finished = true;
+			keep.disabled = true;
+			back.disabled = true;
 			stopHold();
 			acts.remove();
 			if (revert) {
@@ -2179,7 +2189,13 @@ export function mountEditor(root, {
 				}
 			}
 			bar.classList.remove('re-warn');
-			text.textContent = 'Kept. The camera will use this after a restart too.';
+			/* Only a host with a keep() can make anything survive a restart.
+			 * Saying so without one tells an operator their tuning is safe when
+			 * the next power cycle will take it away. */
+			text.textContent = host.keep
+				? 'Kept. The camera will use this after a restart too.'
+				: 'Kept for now. This camera cannot save it, so a restart '
+					+ 'brings back what it had.';
 			send.disabled = false;
 		};
 		keep.addEventListener('click', () => finish(false));
@@ -3225,6 +3241,15 @@ export function mountEditor(root, {
 	 * the vertical pair, which between them contribute a sixth of the reading.
 	 * Offering all four would suggest they are equally worth turning.
 	 */
+	/* Bumped by every filter write and every teardown. An apply is a round trip
+	 * to a camera, and the panel that asked can be gone before the answer comes
+	 * -- another tab, a destroyed editor, or simply a second attempt. A late
+	 * answer under an old number is dropped rather than arming a countdown
+	 * nobody can see, restarting a poll nobody is watching, or overwriting the
+	 * one set of hold handles with a second. */
+	let filterGen = 0;
+	let filterBusy = false;
+
 	function buildFilterDesigner(panel) {
 		const box = el('div', 're-panel');
 		box.style.marginTop = '10px';
@@ -3350,13 +3375,24 @@ export function mountEditor(root, {
 		 * opened on the defaults would offer to "keep" a filter the operator
 		 * never chose. */
 		const load = () => {
+			/* Refused while a write is in flight or a trial is waiting. Reading
+			 * would re-enable the button under an apply that has not answered,
+			 * and a second apply then overwrites the one set of hold handles --
+			 * two trials, one countdown, and whichever revert lands last wins. */
+			if (filterBusy || holdEnd) {
+				say('Finish with the last change first.', true);
+				return Promise.resolve();
+			}
 			send.disabled = true;
 			say('Reading the camera…');
+			const gen = filterGen;
 			return focus.filters().then((f) => {
+				if (gen !== filterGen) return;
 				fill(f);
 				say('');
 				send.disabled = false;
 			}).catch((e) => {
+				if (gen !== filterGen) return;
 				say('Could not read the filter: ' + (e && e.message ? e.message : e), true);
 			});
 		};
@@ -3384,12 +3420,25 @@ export function mountEditor(root, {
 		};
 
 		send.addEventListener('click', () => {
+			if (filterBusy) return;
 			if (busyHolding(status)) return;
 			const got = gather();
 			if (got.bad) { say(got.bad, true); return; }
 			send.disabled = true;
+			filterBusy = true;
 			say('Applying…');
-			Promise.resolve(focus.applyFilters(got.filters)).then(() => {
+			const gen = ++filterGen;
+			/* Called inside the chain, so a host that reports failure by
+			 * THROWING is caught by the same .catch as one that rejects. Called
+			 * outside it, a synchronous throw escapes the click handler with the
+			 * button disabled and "Applying…" on screen for good. */
+			new Promise((res) => res(focus.applyFilters(got.filters))).then(() => {
+				filterBusy = false;
+				/* The panel that asked may be gone -- another tab, a destroyed
+				 * editor, a second attempt. Arming a countdown nobody can see
+				 * leaves a camera that reverts on its own with nothing on
+				 * screen having said it would. */
+				if (gen !== filterGen) return;
 				say('');
 				/* The held best is from the old filter and cannot be compared
 				 * with what this one reads -- different filters count detail
@@ -3404,6 +3453,8 @@ export function mountEditor(root, {
 							? () => focus.keepFilters(got.filters) : undefined,
 					});
 			}).catch((e) => {
+				filterBusy = false;
+				if (gen !== filterGen) return;
 				say('The camera refused it: ' + (e && e.message ? e.message : e), true);
 				send.disabled = false;
 			});
@@ -3465,8 +3516,14 @@ export function mountEditor(root, {
 		});
 		row.append(reset);
 		panel.append(row);
+		/* revertFilters as well as the other two: it is what the clock and a
+		 * mode change call, and a panel that could apply but not put back would
+		 * arm a countdown it cannot honour. keepFilters stays optional -- a
+		 * host that can only try is still useful -- and the countdown says so
+		 * rather than promising a restart will remember. */
 		if (focus && typeof focus.filters === 'function' &&
-			typeof focus.applyFilters === 'function') {
+			typeof focus.applyFilters === 'function' &&
+			typeof focus.revertFilters === 'function') {
 			buildFilterDesigner(panel);
 		}
 		insp.append(panel);
@@ -3541,6 +3598,9 @@ export function mountEditor(root, {
 		/* A poll that outlived its tab would keep a camera answering for a
 		 * panel nobody is looking at. */
 		if (m !== 'focus') { stopFocusPoll(); moveRelease(); focusStatus = null; }
+		/* Anything a filter write has outstanding belonged to the panel that is
+		 * going. Its answer must not come back and arm a trial here. */
+		filterGen++;
 		if (m === 'plates') {
 			buildPlates();
 		} else if (m === 'calibrate') {
@@ -3818,6 +3878,7 @@ export function mountEditor(root, {
 			stopHold();
 			stopFocusPoll();
 			moveRelease();
+			filterGen++;
 			abandonAll('the editor was closed');
 			worker?.terminate();
 			worker = null;
