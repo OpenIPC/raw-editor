@@ -942,9 +942,15 @@ export function mountEditor(root, {
 		const svg = document.createElementNS(NS, 'svg');
 		svg.setAttribute('class', 're-chart-svg');
 		/*
-		 * A cap on what is drawn, not on what is counted: a sensor with ten
-		 * thousand bad pixels would otherwise spend a second building circles
-		 * nobody can tell apart.
+		 * A cap on what is drawn, not on what is counted. This used to say ten
+		 * thousand rings would cost a second to build, which does not survive
+		 * being measured: in headless Chromium, building and laying out that
+		 * many circles is 89.9 ms, against 47.0 ms for 4096 and 6.2 ms for
+		 * 600 -- median of seven, on this desktop x86. So the cap is not
+		 * really about the clock. It is that a frame cannot show ten thousand
+		 * rings as ten thousand things; past a few hundred they merge into a
+		 * wash that hides the picture underneath and says nothing the count
+		 * beside it does not say better.
 		 *
 		 * Every k-th, and NOT the first six hundred. The list arrives in the
 		 * order the scan walks the frame, which is row by row, so a prefix of
@@ -1213,7 +1219,7 @@ export function mountEditor(root, {
 	 * Everything underneath this was already here -- the brightness gate, the
 	 * tally across captures, the arrangement index -- and all of it was behind
 	 * knowing to press Scan, knowing to choose Darkest, knowing to press Keep
-	 * five times and knowing what "3 of 5" buys. This drives those, and owns
+	 * five times and knowing what "4 of 5" buys. This drives those, and owns
 	 * no judgement of its own.
 	 *
 	 * Five captures, because one cannot tell a bad pixel from a noisy one: the
@@ -1313,8 +1319,23 @@ export function mountEditor(root, {
 		needN = need;
 		const pts = [...tally].filter(([, c]) => c >= need)
 			.map(([k]) => { const [x, y] = k.split(','); return { x: +x, y: +y }; });
+		/*
+		 * Whether any capture in this run hit the engine's store cap.
+		 *
+		 * It matters, and it is not visible in the result: a capture that
+		 * overflowed kept a census of the top of its frame only, so every
+		 * candidate below the row it stopped on was never a candidate for the
+		 * tally either. The list that comes out is then short by an unknown
+		 * amount in a known place, and the old code set truncated to false and
+		 * presented it as the whole answer. It is still worth having -- the
+		 * sites it did confirm are confirmed -- so the run finishes and says
+		 * what it could not see rather than refusing.
+		 */
+		const clipped = scanSet.filter((v) => v.truncated);
+		hunt.clipped = clipped.length;
+		hunt.mostFound = clipped.reduce((m, v) => Math.max(m, v.found || 0), 0);
 		diag = { ...diag, defects: pts, defectCount: pts.length, truncated: false,
-			fromTally: { need, of: M } };
+			fromTally: { need, of: M, partial: clipped.length > 0 } };
 		hunt.done = true;
 		buildDiagnose();
 		drawMarks();
@@ -1345,6 +1366,10 @@ export function mountEditor(root, {
 					diag.fromTally.of + ' captures'
 				: 'a single capture, unconfirmed'),
 			'# taken       ' + new Date().toISOString(),
+			'# complete    ' + (diag.fromTally && diag.fromTally.partial
+				? 'NO - a capture filled the scan\'s store, so sites near the bottom ' +
+					'of the frame were never examined'
+				: 'yes, as far as the scan could see'),
 			'# ' + diag.defects.length + ' sites, x,y in sensor pixels',
 		].join('\n');
 		const body = diag.defects.map((p) => p.x + ',' + p.y).join('\n');
@@ -1449,8 +1474,9 @@ export function mountEditor(root, {
 						' ms. Dark current builds up with time, so a longer exposure finds ' +
 						'more of them — take these at the exposure the camera will really ' +
 						'run at, or the list will describe a sensor you are not using. ' +
-						(hunt.dark ? 'Dark current also roughly doubles every 6–8 °C, so a ' +
-							'cold camera understates a warm one.' : ''),
+						(hunt.dark ? 'Dark current also climbs steeply with temperature, so a ' +
+							'map taken on a cold camera understates a warm one — take it in ' +
+							'the place the camera actually lives.' : ''),
 				}));
 		}
 
@@ -1489,6 +1515,20 @@ export function mountEditor(root, {
 			fin.addEventListener('click', finishHunt);
 			row.append(fin);
 		} else {
+			if (hunt.clipped) {
+				const box = el('div', 're-notice re-warn');
+				box.style.cssText = 'margin:0 0 9px';
+				box.dataset.act = 'hunt-partial';
+				box.append(Object.assign(el('div'), {
+					textContent: `${hunt.clipped} of these captures found more defects than ` +
+						`the scan can hold — one reached ${hunt.mostFound}. Everything below ` +
+						'the row it filled up on was never looked at, so this list is short ' +
+						'by an unknown number of sites near the bottom of the frame. The ' +
+						'ones it does name were seen every time and are real. A shorter ' +
+						'exposure finds fewer, if you need the whole map.',
+				}));
+				panel.append(box);
+			}
 			const save = el('button', 're-btn re-pri', '');
 			save.dataset.act = 'hunt-export';
 			save.textContent = 'Save the list';
@@ -1676,9 +1716,29 @@ export function mountEditor(root, {
 	 * vote twice. */
 	function keepCurrentScan() {
 		if (!diag) return;
-		scanSet = scanSet.filter((v) => v.name !== state.name);
-		scanSet.push({ name: state.name || 'a frame',
-			keys: diag.defects.map((p) => p.x + ',' + p.y) });
+		const keys = diag.defects.map((p) => p.x + ',' + p.y);
+		/*
+		 * Keyed on the frame that was opened, not on what it was called.
+		 *
+		 * A name is a display label and the contract does not require a host to
+		 * vary it -- and when it does not, five captures collapse into one
+		 * entry, the tally never sees a second vote, and a guided run ends
+		 * having confirmed nothing at all. The case the old key existed for --
+		 * reading one frame twice, which must not count twice -- is an open,
+		 * so the open is what to count.
+		 *
+		 * Deduplicating on the READING rather than the open was tried, on the
+		 * grounds that two captures of a real sensor never give byte-identical
+		 * defect lists. They do not, but two other things do, and both matter:
+		 * a fixture built to repeat the same view exactly, which is how the
+		 * "these are following the picture" verdict is tested, and any pair of
+		 * captures that find nothing at all, whose empty lists are equal. Both
+		 * collapsed into a single capture and took the tally with them.
+		 */
+		scanSet = scanSet.filter((v) => v.id !== state.openId);
+		scanSet.push({ id: state.openId, name: state.name || 'a frame', keys,
+			/* Carried so the end of a run can say whether it saw everything. */
+			truncated: !!diag.truncated, found: diag.defectCount });
 	}
 
 	function statLine(name, value, note) {
@@ -1859,7 +1919,18 @@ export function mountEditor(root, {
 					: `${diag.defectCount} pixel${diag.defectCount === 1 ? '' : 's'} disagree with every ` +
 						'one of their same-colour neighbours by more than the noise explains.')
 				+ (ringed < diag.defects.length
-					? ` Rings mark ${ringed} of them, spread through the frame.` : ''),
+					? (diag.truncated
+						/*
+						 * Not "through the frame" when the store stopped short.
+						 * The rings sample the list evenly, but the list itself
+						 * ends at the row the scan filled up on, so the bottom
+						 * of the picture carries none -- and saying otherwise
+						 * would be the same overstatement this cap was fixed
+						 * for in the first place.
+						 */
+						? ` Rings mark ${ringed} of the ${diag.defects.length} it kept, ` +
+							'spread through the part of the frame it reached.'
+						: ` Rings mark ${ringed} of them, spread through the frame.`) : ''),
 		}));
 		if (diag.truncated)
 			out.append(Object.assign(el('div', 're-notice re-warn'), {
@@ -1937,7 +2008,7 @@ export function mountEditor(root, {
 		 * fall is itself the answer -- a population that appears once each and
 		 * never again is the scene, and one that keeps coming back is not.
 		 */
-		const held = scanSet.filter((v) => v.name !== state.name);
+		const held = scanSet.filter((v) => v.id !== state.openId);
 		const all = held.concat([{ name: state.name || 'this frame',
 			keys: diag.defects.map((p) => p.x + ',' + p.y) }]);
 		const M = all.length;
@@ -2077,7 +2148,7 @@ export function mountEditor(root, {
 		row.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin-top:8px';
 		const keep = el('button', 're-btn', '');
 		keep.dataset.act = 'hold-scan';
-		const already = scanSet.some((v) => v.name === state.name);
+		const already = scanSet.some((v) => v.id === state.openId);
 		keep.textContent = already ? 'Kept' : 'Keep this scan';
 		keep.disabled = already;
 		keep.addEventListener('click', () => {
@@ -4459,6 +4530,7 @@ export function mountEditor(root, {
 			 * is still here" -- and scanning the old one twice would have it
 			 * agreeing with itself. */
 			opened++;
+			state.openId = opened;
 			// The chart and the scan both belonged to the frame that has just
 			// been replaced.
 			corners = null;

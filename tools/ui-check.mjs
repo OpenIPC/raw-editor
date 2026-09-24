@@ -65,7 +65,11 @@ const server = createServer(async (req, res) => {
 		/* `level` is the flat field the spikes sit on, and it is what decides
 		 * whether the editor calls a frame covered: the default 300 of 4095 is
 		 * a lit scene, and something near the floor is a capped lens. */
+		/* width/height as well as n, because the engine stores at most 4096
+		 * defects and 512x512 cannot be made to overflow it -- the spikes
+		 * start landing on each other first. */
 		res.end(makeDefectFrame({ mode: q.get('mode') || 'scattered',
+			width: Number(q.get('w') || 512), height: Number(q.get('h') || 512),
 			n: Number(q.get('n') || 120), shared: Number(q.get('shared') || 0),
 			level: Number(q.get('level') || 300),
 			seed: Number(q.get('seed') || 3) }).bytes);

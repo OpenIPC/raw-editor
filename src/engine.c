@@ -1525,11 +1525,16 @@ static float local_background(int x, int y, int w, int h) {
  * the same density would give. R = 1 is random, R below 1 clustered, R above 1
  * dispersed. On a frame of a furnished room this comes back near 0.5, which is
  * the scan announcing that it is describing the furniture.
+ *
+ * `area` is the region the points were COLLECTED over, in pixels, and it is
+ * the caller's to work out -- it is not always the frame. The density the
+ * index is measured against comes from it, so an area larger than what was
+ * really examined reads as a set more clustered than it is.
  */
-static void clark_evans(const i32 *pts, int n, int w, int h, float *out_r, float *out_z) {
+static void clark_evans(const i32 *pts, int n, double area, float *out_r, float *out_z) {
     *out_r = 0.f;
     *out_z = 0.f;
-    if (n < 3) return;
+    if (n < 3 || !(area > 0.0)) return;
     double sum = 0.0;
     for (int i = 0; i < n; i++) {
         double best = 1e30;
@@ -1542,7 +1547,6 @@ static void clark_evans(const i32 *pts, int n, int w, int h, float *out_r, float
         }
         sum += sqrtd(best);
     }
-    const double area = (double)w * (double)h;
     const double obs = sum / n;
     const double expd = 0.5 * sqrtd(area / n);
     if (!(expd > 0.0)) return;
@@ -1733,7 +1737,7 @@ EXPORT(diagnose) i32 diagnose(i32 cfa, i32 white, float sigmas, float bg_percent
     u32 dev_n = 0;
 
     i32 found = 0;
-    int last_y = 0;
+    int last_y = 0, last_x = 0;
     for (int y = 2; y < h - 2; y++) {
         for (int x = 2; x < w - 2; x++) {
             u16 nb[4];
@@ -1815,10 +1819,13 @@ EXPORT(diagnose) i32 diagnose(i32 cfa, i32 white, float sigmas, float bg_percent
             if (defects && found < max_defects) {
                 defects[found * 2] = x;
                 defects[found * 2 + 1] = y;
-                /* The last row the store reached, which is the bottom of the
-                 * window the kept set was censused over. See the area passed
+                /* Where the store stopped, which is the far corner of the
+                 * region the kept set was censused over. The column matters as
+                 * well as the row: the limit lands partway along a row, and
+                 * the rest of that row was never examined. See the area passed
                  * to clark_evans below. */
                 last_y = y;
+                last_x = x;
             }
             found++;
         }
@@ -1860,10 +1867,20 @@ EXPORT(diagnose) i32 diagnose(i32 cfa, i32 white, float sigmas, float bg_percent
              * words it uses to say the operator is photographing furniture.
              * Over the window it reached, the same run reads 1.015.
              */
-            const int win_w = w - 4;
-            const int win_h = found > max_defects ? last_y - 1 : h - 4;
-            if (win_w >= 1 && win_h >= 1) {
-                clark_evans(defects, n, win_w, win_h, &r, &z);
+            const double cols = (double)(w - 4);
+            double area;
+            if (found > max_defects) {
+                /* Whole rows above the one it stopped on, plus the part of
+                 * that row it actually walked. Counting the last row whole
+                 * would hand the index area nothing was ever looked at in,
+                 * and a too-large area reads as a too-clustered set -- which
+                 * is the very mistake this is here to undo, in miniature. */
+                area = (double)(last_y - 2) * cols + (double)(last_x - 1);
+            } else {
+                area = cols * (double)(h - 4);
+            }
+            if (area > 0.0) {
+                clark_evans(defects, n, area, &r, &z);
                 stats[13] = r;
                 stats[14] = z;
                 stats[15] = (float)n;
