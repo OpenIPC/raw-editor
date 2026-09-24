@@ -103,7 +103,11 @@ try {
 	results = JSON.parse(await Promise.race([
 		reported,
 		new Promise((_, rej) =>
-			setTimeout(() => rej(new Error('the page never reported within 60s')), 60000)),
+			/* 60s once, and the suite reached 58 of them. That is not a budget
+			 * any more, it is a coin toss on a slow machine -- and the failure
+			 * it produces says "the page never reported", which reads like a
+			 * hang rather than a clock running out. Raised with room to grow. */
+			setTimeout(() => rej(new Error('the page never reported within 180s')), 180000)),
 	]));
 } catch (e) {
 	console.error(e.message);

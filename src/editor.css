@@ -105,6 +105,13 @@
 .re-seg button:disabled { color: #5b606c; cursor: not-allowed; }
 .re-seg.re-tight button { padding: 4px 8px; font-size: 11px; }
 
+/* Number and text entry inside a panel. Unstyled until now -- the one field
+ * that used this class sat on a dark panel wearing the browser's own light
+ * chrome. */
+.re-in { appearance: none; background: #10131a; color: #e7eaf0;
+  border: 1px solid #2c313d; border-radius: 6px; padding: 4px 6px; font: inherit; }
+.re-in:focus { outline: none; border-color: #5c70e8; }
+.re-in:disabled { opacity: .5; }
 .re-btn { appearance: none; border: 1px solid #2c313d; padding: 6px 11px; border-radius: 8px;
 	background: #232734; color: #e6e8ee; font: inherit; font-size: 12px; font-weight: 500;
 	cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }

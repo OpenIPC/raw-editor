@@ -264,7 +264,19 @@ export function mountEditor(root, {
 	 * the other button, and the grid says which way was right. `moveRepeatMs`
 	 * is how often a held button re-sends, and must be shorter than whatever
 	 * deadline the host's motor stops itself on; `moveMaxMs` is how long a hold
-	 * may last before this side gives up on it regardless. */
+	 * may last before this side gives up on it regardless.
+	 *
+	 * A host that can also TUNE the filters supplies four more:
+	 * { filters(), applyFilters(f), revertFilters(), keepFilters(f),
+	 *   holdSeconds }. `filters()` resolves to what the camera is running as
+	 * { gain: [7], shift: [4], enable: [3], coring: [3] }; apply puts a set on
+	 * the camera without saving it, revert takes it back, keep makes it
+	 * survive a restart. Without them the panel reads and does not write.
+	 *
+	 * These DO get a countdown, unlike `move`, and for a reason the lens
+	 * buttons do not have: a filter that measures the wrong thing looks like a
+	 * camera that will not focus, so there is nothing on screen to tell an
+	 * operator which change to undo. The clock undoes it for them. */
 	focus,
 	/* How long to wait for the module to arrive and answer. The camera's own
 	 * loader gives the CDN eight seconds; a test harness under a virtual clock
@@ -2096,7 +2108,7 @@ export function mountEditor(root, {
 			return;
 		}
 
-		armHold(out, send, hold, 'Applied to the camera.');
+		armHold(out, send, hold, 'Applied to the camera.', calibrate);
 	}
 
 	/*
@@ -2105,7 +2117,10 @@ export function mountEditor(root, {
 	 * which is the right way round for a change that can make the picture
 	 * unwatchable.
 	 */
-	function armHold(out, send, hold, applied) {
+	/* `host` supplies revert() and an optional keep(). It was `calibrate`
+	 * implicitly until the Focus tab grew something to write, and a hold that
+	 * put back the wrong thing would be worse than one that did nothing. */
+	function armHold(out, send, hold, applied, host) {
 		const bar = el('div', 're-notice re-warn', ICON.warn);
 		bar.dataset.act = 'hold';
 		const text = el('div');
@@ -2135,7 +2150,7 @@ export function mountEditor(root, {
 			if (revert) {
 				text.textContent = 'Putting it back…';
 				try {
-					await calibrate.revert();
+					await host.revert();
 					text.textContent = 'Put back. The camera is on what it had before.';
 				} catch (e) {
 					text.textContent = 'Could not put it back: ' + e.message;
@@ -2151,10 +2166,10 @@ export function mountEditor(root, {
 			 * be the worst answer available: the operator stops watching, and
 			 * the change is taken back anyway.
 			 */
-			if (calibrate.keep) {
+			if (host.keep) {
 				text.textContent = 'Confirming…';
 				try {
-					await calibrate.keep();
+					await host.keep();
 				} catch (e) {
 					bar.append(acts);
 					text.textContent = 'Applied, but confirming did not reach the camera: ' +
@@ -2354,7 +2369,7 @@ export function mountEditor(root, {
 					return;
 				}
 				armHold(result, save, Math.max(5, calibrate.holdSeconds || 30),
-					'Saved into the camera profile.');
+					'Saved into the camera profile.', calibrate);
 			});
 			result.append(save);
 		}
@@ -3191,6 +3206,213 @@ export function mountEditor(root, {
 		});
 	}
 
+	/*
+	 * Tuning the filter the focus reading comes from.
+	 *
+	 * Deliberately NOT a frequency-response plot. How the gains and shifts map
+	 * onto filter sections is not in any software the vendor ships -- it was
+	 * looked for in their library and in the ISP kernel source and is in
+	 * neither, because it is in the silicon. A curve drawn here would be an
+	 * invention presented as a measurement.
+	 *
+	 * What IS measurable is on screen already. The grid is live, so a
+	 * coefficient change shows up in the zones within a poll, and the panel's
+	 * held best is the number to beat. That is the whole loop: change it,
+	 * watch it, keep it if the peak got sharper.
+	 *
+	 * One bank, not four. The camera measures focus through the second
+	 * horizontal filter -- the others are a differently tuned companion and
+	 * the vertical pair, which between them contribute a sixth of the reading.
+	 * Offering all four would suggest they are equally worth turning.
+	 */
+	function buildFilterDesigner(panel) {
+		const box = el('div', 're-panel');
+		box.style.marginTop = '10px';
+		box.append(Object.assign(el('div', 're-shead'), {
+			innerHTML: '<h3 class="re-cap">Filter</h3><span class="re-rule"></span>',
+		}));
+		box.append(Object.assign(el('p', 're-note'), {
+			textContent: 'What the camera counts as detail. Change it, watch the ' +
+				'squares, and keep it if the sharpest zone reads higher than it did.',
+		}));
+
+		const status = el('div');
+		box.append(status);
+		const rows = el('div');
+		box.append(rows);
+
+		/* The ranges are the camera's register fields, and the panel refuses
+		 * out of range rather than letting the camera refuse silently: these
+		 * are written into a few bits each and nothing downstream checks. */
+		const FIELDS = [
+			{ k: 'gain', label: 'Gains', n: 7, lo: -511, hi: 511, first: [0, 255],
+			  hint: 'An input scale, then three pairs — one per section.' },
+			{ k: 'shift', label: 'Shifts', n: 4, lo: 0, hi: 7,
+			  hint: 'How far each stage divides its result down.' },
+			{ k: 'coring', label: 'Coring', n: 3, lo: 0, hi: 2047, slope: [1, 15],
+			  hint: 'Threshold, slope, limit. A high threshold throws away the ' +
+				'small detail that coming into focus produces.' },
+		];
+		const inputs = {};
+		let enables = [];
+
+		const mkRow = (f) => {
+			const row = el('div');
+			row.style.cssText = 'margin-top:9px';
+			row.append(Object.assign(el('div', 're-cap'), { textContent: f.label }));
+			const line = el('div');
+			line.style.cssText = 'display:flex;gap:5px;flex-wrap:wrap;margin-top:4px';
+			inputs[f.k] = [];
+			for (let i = 0; i < f.n; i++) {
+				const inp = el('input', 're-in');
+				inp.type = 'number';
+				inp.dataset.act = 'af-' + f.k + '-' + i;
+				inp.style.cssText = 'width:64px';
+				/* Per-slot bounds where a slot differs from its neighbours: the
+				 * first gain is an unsigned input scale, not a coefficient, and
+				 * the coring slope is four bits where the two beside it are
+				 * eleven. One range over the row would let a number through
+				 * that the camera cannot hold. */
+				const lo = (f.first && i === 0) ? f.first[0]
+					: (f.slope && i === f.slope[0]) ? 0 : f.lo;
+				const hi = (f.first && i === 0) ? f.first[1]
+					: (f.slope && i === f.slope[0]) ? f.slope[1] : f.hi;
+				inp.min = String(lo);
+				inp.max = String(hi);
+				inputs[f.k].push(inp);
+				line.append(inp);
+			}
+			row.append(line);
+			row.append(Object.assign(el('span', 'hint'), { textContent: f.hint }));
+			return row;
+		};
+		FIELDS.forEach((f) => rows.append(mkRow(f)));
+
+		/* The section switches, which are the one control whose effect the
+		 * measurements are unambiguous about: the third section reads HIGHER
+		 * as the picture blurs, so a camera focusing worse with it on is not a
+		 * mystery. Named rather than numbered for that reason. */
+		const enRow = el('div');
+		enRow.style.cssText = 'margin-top:9px';
+		enRow.append(Object.assign(el('div', 're-cap'), { textContent: 'Sections' }));
+		const enLine = el('div');
+		enLine.style.cssText = 'display:flex;gap:12px;flex-wrap:wrap;margin-top:4px';
+		enables = [0, 1, 2].map((i) => {
+			const lab = el('label');
+			lab.style.cssText = 'display:flex;gap:5px;align-items:center';
+			const cb = el('input');
+			cb.type = 'checkbox';
+			cb.dataset.act = 'af-enable-' + i;
+			lab.append(cb, Object.assign(el('span'), { textContent: String(i + 1) }));
+			enLine.append(lab);
+			return cb;
+		});
+		enRow.append(enLine);
+		enRow.append(Object.assign(el('span', 'hint'), {
+			textContent: 'Section 3 reads higher as the picture blurs, so leaving ' +
+				'it off is most of why this filter tracks focus at all.',
+		}));
+		rows.append(enRow);
+
+		const acts = el('div');
+		acts.style.cssText = 'display:flex;gap:8px;margin-top:10px;flex-wrap:wrap';
+		const send = el('button', 're-btn re-pri', '');
+		send.dataset.act = 'af-apply';
+		send.textContent = 'Try it';
+		send.disabled = true;
+		const back = el('button', 're-btn', '');
+		back.dataset.act = 'af-reload';
+		back.textContent = 'Read from camera';
+		acts.append(send, back);
+		box.append(acts);
+
+		const say = (msg, warn) => {
+			status.replaceChildren();
+			if (!msg) return;
+			const n = el('div', 're-notice' + (warn ? ' re-warn' : ''), warn ? ICON.warn : null);
+			n.append(Object.assign(el('div'), { textContent: msg }));
+			status.append(n);
+		};
+
+		const fill = (f) => {
+			FIELDS.forEach((spec) => {
+				const v = (f && f[spec.k]) || [];
+				inputs[spec.k].forEach((inp, i) => {
+					inp.value = typeof v[i] === 'number' ? String(v[i]) : '';
+				});
+			});
+			const en = (f && f.enable) || [];
+			enables.forEach((cb, i) => { cb.checked = !!en[i]; });
+		};
+
+		/* Read back rather than assumed. The camera may be running a sensor
+		 * profile's filter rather than the compiled-in one, and a panel that
+		 * opened on the defaults would offer to "keep" a filter the operator
+		 * never chose. */
+		const load = () => {
+			send.disabled = true;
+			say('Reading the camera…');
+			return focus.filters().then((f) => {
+				fill(f);
+				say('');
+				send.disabled = false;
+			}).catch((e) => {
+				say('Could not read the filter: ' + (e && e.message ? e.message : e), true);
+			});
+		};
+		back.addEventListener('click', load);
+
+		const gather = () => {
+			const out = { enable: enables.map((cb) => (cb.checked ? 1 : 0)) };
+			for (const spec of FIELDS) {
+				const vals = [];
+				for (const inp of inputs[spec.k]) {
+					const raw = inp.value.trim();
+					if (raw === '') return { bad: spec.label + ' is not filled in.' };
+					const v = Number(raw);
+					if (!Number.isFinite(v) || Math.floor(v) !== v)
+						return { bad: spec.label + ' takes whole numbers.' };
+					const lo = Number(inp.min), hi = Number(inp.max);
+					if (v < lo || v > hi)
+						return { bad: spec.label + ': ' + v + ' is outside ' + lo +
+							' to ' + hi + ', which is what the camera can hold.' };
+					vals.push(v);
+				}
+				out[spec.k] = vals;
+			}
+			return { filters: out };
+		};
+
+		send.addEventListener('click', () => {
+			if (busyHolding(status)) return;
+			const got = gather();
+			if (got.bad) { say(got.bad, true); return; }
+			send.disabled = true;
+			say('Applying…');
+			Promise.resolve(focus.applyFilters(got.filters)).then(() => {
+				say('');
+				/* The held best is from the old filter and cannot be compared
+				 * with what this one reads -- different filters count detail
+				 * differently, so the number to beat has to start again. */
+				focusHold = null; focusBest = null;
+				renderFocus();
+				startFocusPoll();
+				armHold(status, send, Math.max(5, focus.holdSeconds || 30),
+					'Applied to the camera.', {
+						revert: () => focus.revertFilters(),
+						keep: focus.keepFilters
+							? () => focus.keepFilters(got.filters) : undefined,
+					});
+			}).catch((e) => {
+				say('The camera refused it: ' + (e && e.message ? e.message : e), true);
+				send.disabled = false;
+			});
+		});
+
+		load();
+		panel.append(box);
+	}
+
 	function buildFocus() {
 		insp.replaceChildren();
 		const panel = el('div', 're-panel');
@@ -3243,6 +3465,10 @@ export function mountEditor(root, {
 		});
 		row.append(reset);
 		panel.append(row);
+		if (focus && typeof focus.filters === 'function' &&
+			typeof focus.applyFilters === 'function') {
+			buildFilterDesigner(panel);
+		}
 		insp.append(panel);
 
 		renderFocus();
@@ -3307,7 +3533,11 @@ export function mountEditor(root, {
 		marks.hidden = m !== 'diagnose';
 		plateMarks.hidden = m !== 'plates';
 		focusMarks.hidden = m !== 'focus';
-		if (m !== 'calibrate') abandonHold();
+		/* Unconditional now that two panels can arm one. Nobody confirms a
+		 * change they can no longer see, so a mode change ends it the way the
+		 * clock would have: put back. buildCalibrate() does the same on its own
+		 * way in, which is harmless and keeps that panel's rebuild honest. */
+		abandonHold();
 		/* A poll that outlived its tab would keep a camera answering for a
 		 * panel nobody is looking at. */
 		if (m !== 'focus') { stopFocusPoll(); moveRelease(); focusStatus = null; }
