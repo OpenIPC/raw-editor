@@ -3030,16 +3030,22 @@ export function mountEditor(root, {
 		focusSum = null; focusBest = null; focusErr = null; focusHold = null;
 	}
 
+	/* One grid, summarised. Shared by the poll and by the sweep so the two
+	 * cannot come to different conclusions about the same camera. */
+	async function readGrid() {
+		const g = await focus.zones();
+		const zones = g.zones.map((z) => (Array.isArray(z)
+			? { h1: z[0], h2: z[1], v1: z[2], v2: z[3], y: z[4], hlcnt: z[5] }
+			: z));
+		return summarise(zones, g.rows, g.cols);
+	}
+
 	async function focusTick() {
 		if (!focus) return;
 		const gen = focusGen;
 		let sum = null, err = null;
 		try {
-			const g = await focus.zones();
-			const zones = g.zones.map((z) => (Array.isArray(z)
-				? { h1: z[0], h2: z[1], v1: z[2], v2: z[3], y: z[4], hlcnt: z[5] }
-				: z));
-			sum = summarise(zones, g.rows, g.cols);
+			sum = await readGrid();
 		} catch (e) {
 			err = e && e.message ? e.message : String(e);
 		}
@@ -3199,9 +3205,44 @@ export function mountEditor(root, {
 		moveSend(moveVerb, moveRelease);
 	}
 
+	/* The sweep needs to KNOW whether a move happened, where the hold-to-run
+	 * buttons only need to stop asking: it counts the steps it took out so it
+	 * can give exactly that many back, and a step it counted but the camera
+	 * refused is a step it will hand back one too many of. So this one reports
+	 * the outcome instead of calling back, and treats a rejection and a throw
+	 * alike -- a host may do either. */
+	function moveOnce(verb) {
+		let p;
+		try {
+			p = focus.move(verb);
+		} catch (e) {
+			return Promise.resolve(false);
+		}
+		if (p && typeof p.then === 'function') {
+			return p.then(function () { return true; }, function () { return false; });
+		}
+		return Promise.resolve(true);
+	}
+
+	/* The sweep drives the lens for several seconds at a time, and Near and Far
+	 * drive the same lens. Uncounted travel in the middle of a measurement
+	 * invalidates both the ratio and the claim that the lens went back where it
+	 * started, so for the duration the buttons are held down rather than
+	 * trusted: disabled where they are visible, and refused in the handler in
+	 * case anything reaches one another way (a keyboard, a stale pointer). */
+	let motorBtns = [];
+	let lensOwned = false;
+
+	function ownLens(on) {
+		lensOwned = on;
+		motorBtns.forEach(function (b) { b.disabled = on; });
+		if (on) moveRelease();
+	}
+
 	function holdToRun(btn, verb) {
 		const press = function (ev) {
 			if (ev && ev.button !== undefined && ev.button !== 0) return;
+			if (lensOwned) return;
 			/* One hold at a time, and a second pointer is ignored rather than
 			 * taking over. Taking over meant releasing EITHER pointer stopped
 			 * whatever was running, so the finger lifted was not necessarily
@@ -3236,6 +3277,7 @@ export function mountEditor(root, {
 			 * configured with, and treating one as a fresh press turns a held
 			 * key into a burst of nudges at a cadence this side never chose. */
 			if (ev.repeat) return;
+			if (lensOwned) return;
 			ev.preventDefault();
 			moveSend(verb, null);
 		});
@@ -3269,6 +3311,140 @@ export function mountEditor(root, {
 	let filterGen = 0;
 	let filterBusy = false;
 
+	/*
+	 * How sharply the filter peaks, rather than how big a number it makes.
+	 *
+	 * This exists because the obvious way to read the panel is wrong. Turning
+	 * on the third filter section more than doubles the value on a focused
+	 * scene -- and makes the filter worse, because that section reads higher as
+	 * the picture BLURS. Anyone tuning by "make the number go up" ends up with
+	 * a camera that focuses badly and a reading that says it is doing well.
+	 *
+	 * What separates a good filter from a big one is the RATIO between focus
+	 * and not-focus, and nothing on a still scene can show that. So the lens is
+	 * walked away from where it sits, the value read at each step, and the
+	 * spread reported. A filter worth keeping falls away steeply; one that is
+	 * merely loud barely moves.
+	 *
+	 * One direction, and back. A sweep through focus and out the other side
+	 * would measure more, but it has to leave the lens where it found it -- an
+	 * operator who asked for a measurement did not ask to have their focus
+	 * moved -- and every extra step is another chance for the return to fall
+	 * short of where it started.
+	 */
+	const SWEEP_STEPS = 8;
+	const SWEEP_SETTLE_MS = 700;
+	let sweepGen = 0;
+	/* A sweep in flight when the editor is torn down still has a return walk to
+	 * finish -- the lens is real and must go back -- but what it must NOT do is
+	 * restart the poll afterwards. destroy() stops the poll and empties the
+	 * root without changing `mode`, so a finally that asks only "are we still in
+	 * Focus?" answers yes for a panel that no longer exists and reads the
+	 * camera for as long as the page is open. */
+	let sweepClosed = false;
+	/* Non-null while a sweep owns the lens, INCLUDING its return walk. Aborting
+	 * a sweep bumps the generation, which stops it measuring; it cannot stop it
+	 * walking back, and for those few seconds there is still a sweep sending
+	 * `near`. A second sweep starting then sends `far` against it, and neither
+	 * the reading nor the final position means anything. */
+	let sweepBusy = null;
+
+	function sweepStop() { sweepGen++; }
+
+	function runSweep(say, onStep) {
+		const prior = sweepBusy;
+		/* The generation this was ASKED under. A sweep queued behind another's
+		 * walk back can be cancelled before it ever starts -- the operator left
+		 * Focus again while it waited -- and starting then would drive the lens
+		 * for a panel nobody is looking at. */
+		const at = sweepGen;
+		const p = (async function () {
+			if (prior) { try { await prior; } catch (e) { /* not ours to report */ } }
+			if (sweepGen !== at) return null;
+			return sweepRun(say, onStep);
+		})();
+		sweepBusy = p;
+		const clear = function () { if (sweepBusy === p) sweepBusy = null; };
+		p.then(clear, clear);
+		return p;
+	}
+
+	async function sweepRun(say, onStep) {
+		const gen = ++sweepGen;
+		const mine = () => gen === sweepGen;
+		const vals = [];
+		let out = 0, failed = null, lost = 0;
+		/* The poll is stopped for the duration: it and the sweep would be
+		 * asking the same camera for the same grid at once, and its answers
+		 * would land in the panel out of step with where the lens actually is.
+		 * The manual controls go with it -- see ownLens. */
+		stopFocusPoll();
+		ownLens(true);
+		try {
+			for (let i = 0; i <= SWEEP_STEPS; i++) {
+				if (!mine()) break;
+				try {
+					const s = await readGrid();
+					if (s.peak !== null) vals.push(s.peak);
+				} catch (e) {
+					failed = e && e.message ? e.message : String(e);
+					break;
+				}
+				if (!mine()) break;
+				onStep(i, SWEEP_STEPS * 2);
+				if (i === SWEEP_STEPS) break;
+				/* Counted only if it actually happened. A refused move that was
+				 * counted anyway is a step handed back that was never taken,
+				 * which walks the lens PAST where the operator left it. */
+				if (!(await moveOnce('far'))) {
+					failed = 'the camera would not move the lens';
+					break;
+				}
+				out++;
+				await pause(SWEEP_SETTLE_MS);
+			}
+		} finally {
+			/* Every step taken is a step given back, and NOT conditional on the
+			 * sweep still being the current one. Abandoning the lens where an
+			 * abort found it is worse than never measuring: the operator's
+			 * focus is gone and nothing said so. Stopping, leaving the tab, a
+			 * camera that stopped answering and a thrown error all arrive
+			 * here. */
+			for (let i = 0; i < out; i++) {
+				/* A refused step does not stop the walk: the next one may well
+				 * be taken, and stopping early strands the lens further out
+				 * than carrying on can. It is counted, and said out loud at the
+				 * end -- claiming the lens is back when a step was refused is
+				 * the one outcome worse than saying nothing. */
+				if (!(await moveOnce('near'))) lost++;
+				await pause(SWEEP_SETTLE_MS);
+				onStep(SWEEP_STEPS + i + 1, SWEEP_STEPS * 2);
+			}
+			await moveOnce('stop');
+			ownLens(false);
+			/* The panel is useless without its live grid, and a camera left
+			 * un-polled looks broken -- but only for a panel that still exists.
+			 * `mode` alone does not answer that: destroy() leaves it as it
+			 * found it. */
+			if (mode === 'focus' && !sweepClosed) startFocusPoll();
+		}
+		const back = lost
+			? ' The lens may not be back where it started: the camera refused ' +
+				lost + ' of the ' + out + ' steps back.'
+			: '';
+		if (failed) return { failed: failed + '.' + back, lost: lost };
+		if (!mine()) return { stopped: true, lost: lost, back: back };
+		if (!vals.length) return { failed: 'nothing measurable along the sweep.' + back, lost: lost };
+		const hi = Math.max.apply(null, vals), lo = Math.min.apply(null, vals);
+		return { hi: hi, lo: lo, ratio: lo > 0 ? hi / lo : null, n: vals.length,
+			lost: lost, back: back };
+	}
+
+
+	function pause(ms) {
+		return new Promise(function (r) { setTimeout(r, ms); });
+	}
+
 	function buildFilterDesigner(panel) {
 		const box = el('div', 're-panel');
 		box.style.marginTop = '10px';
@@ -3281,6 +3457,9 @@ export function mountEditor(root, {
 		}));
 
 		const status = el('div');
+		/* Named so a reader -- or a test -- can tell this panel's message from
+		 * the grid's own above it; both are notices and both can be warnings. */
+		status.dataset.act = 'af-status';
 		box.append(status);
 		const rows = el('div');
 		box.append(rows);
@@ -3368,6 +3547,21 @@ export function mountEditor(root, {
 		back.dataset.act = 'af-reload';
 		back.textContent = 'Read from camera';
 		acts.append(send, back);
+
+		/* Only where the lens can be driven. Measuring how sharply a filter
+		 * peaks means moving the focus, and a camera focused by hand cannot be
+		 * asked to do that from here. */
+		let measure = null, stop = null;
+		if (typeof focus.move === 'function') {
+			measure = el('button', 're-btn', '');
+			measure.dataset.act = 'af-measure';
+			measure.textContent = 'Measure it';
+			stop = el('button', 're-btn', '');
+			stop.dataset.act = 'af-measure-stop';
+			stop.textContent = 'Stop';
+			stop.hidden = true;
+			acts.append(measure, stop);
+		}
 		box.append(acts);
 
 		const say = (msg, warn) => {
@@ -3483,12 +3677,60 @@ export function mountEditor(root, {
 			});
 		});
 
+		if (measure) {
+			const busy = (on) => {
+				measure.hidden = on;
+				stop.hidden = !on;
+				send.disabled = on;
+				back.disabled = on;
+			};
+			stop.addEventListener('click', function () { sweepStop(); });
+			measure.addEventListener('click', function () {
+				if (busyHolding(status)) return;
+				busy(true);
+				runSweep(say, function (i, n) {
+					say('Walking the lens and reading as it goes — ' + i + ' of ' + n +
+						'. It will be put back where it started.');
+				}).then(function (r) {
+					busy(false);
+					/* Cancelled before it ever started, behind another sweep's
+					 * walk back. Nothing was measured and nothing was moved, so
+					 * there is nothing to report either. */
+					if (!r) { say(''); return; }
+					if (r.stopped) {
+						say(r.lost
+							? 'Stopped.' + r.back
+							: 'Stopped. The lens is back where it started.', !!r.lost);
+						return;
+					}
+					if (r.failed) { say('Could not measure it: ' + r.failed, true); return; }
+					/* The ratio, not the peak. A filter that reads loudly
+					 * everywhere is worse than a quiet one that falls away,
+					 * and the peak alone cannot tell them apart -- which is
+					 * exactly the mistake this button exists to prevent. */
+					say((r.ratio === null
+						? 'Highest ' + r.hi + ', lowest ' + r.lo + ' across the sweep.'
+						: 'Falls to 1/' + r.ratio.toFixed(1) + ' of its peak across the ' +
+							'sweep (' + r.hi + ' down to ' + r.lo + '). A filter worth ' +
+							'keeping falls away steeply; a loud one barely moves.') + r.back,
+						!!r.lost);
+				}).catch(function (e) {
+					busy(false);
+					say('Could not measure it: ' + (e && e.message ? e.message : e), true);
+				});
+			});
+		}
+
 		load();
 		panel.append(box);
 	}
 
 	function buildFocus() {
 		insp.replaceChildren();
+		/* The panel is rebuilt from scratch on every entry, so the buttons the
+		 * last one made are detached and must not be kept -- disabling a node
+		 * nobody can see is a leak that also hides a bug. */
+		motorBtns = [];
 		const panel = el('div', 're-panel');
 		panel.append(Object.assign(el('div', 're-shead'), {
 			innerHTML: '<h3 class="re-cap">Focus</h3><span class="re-rule"></span>',
@@ -3519,7 +3761,9 @@ export function mountEditor(root, {
 				const b = el('button', 're-btn', '');
 				b.dataset.act = 'focus-' + pair[0];
 				b.textContent = pair[1];
+				b.disabled = lensOwned;
 				holdToRun(b, pair[0]);
+				motorBtns.push(b);
 				row.append(b);
 			});
 		}
@@ -3620,7 +3864,7 @@ export function mountEditor(root, {
 		abandonHold();
 		/* A poll that outlived its tab would keep a camera answering for a
 		 * panel nobody is looking at. */
-		if (m !== 'focus') { stopFocusPoll(); moveRelease(); focusStatus = null; }
+		if (m !== 'focus') { stopFocusPoll(); moveRelease(); sweepStop(); focusStatus = null; }
 		/* Anything a filter write has outstanding belonged to the panel that is
 		 * going. Its answer must not come back and arm a trial here. */
 		filterGen++;
@@ -3901,6 +4145,10 @@ export function mountEditor(root, {
 			stopHold();
 			stopFocusPoll();
 			moveRelease();
+			sweepStop();
+			// The walk back still has to happen -- the lens is real -- but
+			// nothing after it may touch a panel that is being removed.
+			sweepClosed = true;
 			filterGen++;
 			abandonAll('the editor was closed');
 			worker?.terminate();
