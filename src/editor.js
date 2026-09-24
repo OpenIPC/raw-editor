@@ -781,9 +781,10 @@ export function mountEditor(root, {
 	 * because the page stopped watching is the one failure here that damages
 	 * something. */
 	const onLetGo = () => moveRelease();
+	const onPointerLetGo = (ev) => moveReleaseFrom(ev);
 	window.addEventListener('blur', onLetGo);
-	window.addEventListener('pointerup', onLetGo);
-	window.addEventListener('pointercancel', onLetGo);
+	window.addEventListener('pointerup', onPointerLetGo);
+	window.addEventListener('pointercancel', onPointerLetGo);
 	document.addEventListener('visibilitychange', onLetGo);
 
 	/* ---- diagnose --------------------------------------------------------
@@ -3088,6 +3089,12 @@ export function mountEditor(root, {
 	 * flight. Carrying the number means a refusal only ever releases the hold
 	 * that asked for it. */
 	let moveGen = 0;
+	/* Which pointer owns the hold, so a second finger touching and lifting
+	 * somewhere else cannot end it. Only POINTER events are filtered by it:
+	 * blur, a hidden tab, leaving the tab and teardown are not one pointer's
+	 * business and still release unconditionally -- and if the owning pointer's
+	 * release is genuinely lost, the give-up cap is what ends the hold. */
+	let movePointer = null;
 
 	/* A host reports a motor it cannot drive either by throwing or by rejecting,
 	 * and both mean the same thing. Only the first is a synchronous exception,
@@ -3111,11 +3118,24 @@ export function mountEditor(root, {
 		}
 	}
 
+	/* A release from a pointer that never owned the hold is somebody else's
+	 * finger. An event carrying no pointerId at all is not a pointer's report
+	 * and always counts. */
+	function moveReleaseFrom(ev) {
+		const id = ev && ev.pointerId;
+		if (movePointer !== null && id !== undefined && id !== null &&
+			id !== movePointer) {
+			return;
+		}
+		moveRelease();
+	}
+
 	function moveRelease() {
 		if (moveTimer) { clearInterval(moveTimer); moveTimer = null; }
 		if (moveGiveUp) { clearTimeout(moveGiveUp); moveGiveUp = null; }
 		if (!moveVerb) return;
 		moveVerb = null;
+		movePointer = null;
 		moveGen++;
 		/* Told to stop even though it would time out anyway: the deadline is
 		 * the fallback, not the plan, and a lens that keeps creeping after the
@@ -3140,6 +3160,7 @@ export function mountEditor(root, {
 			 * moving. */
 			if (moveVerb) return;
 			moveVerb = verb;
+			movePointer = (ev && ev.pointerId !== undefined) ? ev.pointerId : null;
 			moveGen++;
 			/* Armed BEFORE the first ask. Arming them after meant a move that
 			 * failed synchronously released a hold whose timers did not exist
@@ -3154,7 +3175,7 @@ export function mountEditor(root, {
 		};
 		btn.addEventListener('pointerdown', press);
 		['pointerup', 'pointercancel', 'pointerleave'].forEach(function (n) {
-			btn.addEventListener(n, moveRelease);
+			btn.addEventListener(n, moveReleaseFrom);
 		});
 		/* Keyboard is not a hold: a key repeat is the OS's, at its own rate, and
 		 * space fires click. One press, one nudge, which is also the only way
@@ -3559,8 +3580,8 @@ export function mountEditor(root, {
 			ro?.disconnect();
 			window.removeEventListener('resize', onResize);
 			window.removeEventListener('blur', onLetGo);
-			window.removeEventListener('pointerup', onLetGo);
-			window.removeEventListener('pointercancel', onLetGo);
+			window.removeEventListener('pointerup', onPointerLetGo);
+			window.removeEventListener('pointercancel', onPointerLetGo);
 			document.removeEventListener('visibilitychange', onLetGo);
 			// A countdown that outlived its editor would revert a camera whose
 			// operator had closed the page and moved on.

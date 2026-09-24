@@ -1863,6 +1863,42 @@ try {
 		ed.destroy();
 	}
 
+	// A second finger that touches and lifts elsewhere while a hold is running.
+	// It never owned the hold, so it has no business ending it -- resting a
+	// thumb on the screen and lifting it should not stop a focus run.
+	{
+		const g4 = await mk(true);
+		const near = btn(g4.host, 'near');
+		near.dispatchEvent(new PointerEvent('pointerdown',
+			{ bubbles: true, button: 0, pointerId: 1 }));
+		await pause(60);
+		g4.moves.length = 0;
+		window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 2 }));
+		await pause(60);
+		t('another pointer lifting does not end the hold',
+			g4.moves.indexOf('stop') < 0 && g4.moves.indexOf('near') >= 0,
+			g4.moves.join(',') || '(nothing)');
+		// The one that started it still ends it, wherever it is lifted.
+		window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 }));
+		await pause(60);
+		const k4 = g4.moves.length;
+		await pause(80);
+		t('and the pointer that owns it does, from anywhere',
+			g4.moves[k4 - 1] === 'stop' && g4.moves.length === k4, g4.moves.slice(-3).join(','));
+
+		// Teardown is nobody's pointer and still counts, whoever is holding.
+		near.dispatchEvent(new PointerEvent('pointerdown',
+			{ bubbles: true, button: 0, pointerId: 7 }));
+		await pause(60);
+		window.dispatchEvent(new Event('blur'));
+		await pause(60);
+		const k5 = g4.moves.length;
+		await pause(80);
+		t('blur still stops it regardless of who is holding',
+			g4.moves[k5 - 1] === 'stop' && g4.moves.length === k5, g4.moves.slice(-3).join(','));
+		g4.ed.destroy();
+	}
+
 	// Two pointers. Taking over meant releasing EITHER stopped whatever was
 	// running, so the finger lifted was not the one that chose the direction.
 	{
