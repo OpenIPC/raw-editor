@@ -396,7 +396,12 @@ export function mountEditor(root, {
 	const sensorChip = el('span', 're-chip');
 	sensorChip.hidden = true;
 	const modeItems = [
-		{ label: 'Develop', value: 'develop' },
+		/* "Develop" is darkroom language for turning a latent image into a
+		 * visible one, and a camera owner has no reason to know it. This is
+		 * the tab where you look at the picture, so it says so. The mode key
+		 * stays `develop`, as does the worker call behind it: both are
+		 * internal, and the operation really is a demosaic-and-render. */
+		{ label: 'Preview', value: 'develop' },
 		/* Named for what it finds, not for what it does to find it. "Diagnose"
 		 * is a verb that never says what is being diagnosed, and an owner
 		 * looking for stuck pixels had no reason to guess it was in here. The
@@ -3527,7 +3532,7 @@ export function mountEditor(root, {
 		}));
 
 		/* The reader is handed a develop from this engine, at whatever demosaic
-		 * Develop is set to -- and two of the four cost it real accuracy. Scored
+		 * Preview is set to -- and two of the four cost it real accuracy. Scored
 		 * against ground truth on 150 plate crops through THIS engine, at the
 		 * sampling a plate arrives at (exact match, clean / one frame of noise /
 		 * a twenty-frame stack):
@@ -3547,9 +3552,9 @@ export function mountEditor(root, {
 			warn.dataset.act = 'demosaic-warning';
 			warn.style.cssText = 'margin-top:8px;color:#c9a227';
 			warn.textContent = state.demosaic === 0
-				? 'Develop is set to no demosaic, and the reader is handed what ' +
-				  'Develop produces — it will read almost nothing. Gradient or RCD.'
-				: 'Develop is set to Bilinear. Measured on this engine, that costs ' +
+				? 'Preview is set to no demosaic, and the reader is handed what ' +
+				  'Preview produces — it will read almost nothing. Gradient or RCD.'
+				: 'Preview is set to Bilinear. Measured on this engine, that costs ' +
 				  'the reader about ten points against Gradient or RCD.';
 			panel.append(warn);
 		}
@@ -5060,7 +5065,7 @@ export function mountEditor(root, {
 				(r.info.iso ? ` · ISO ${r.info.iso}` : '') +
 				(r.info.exposure ? ` · ${(r.info.exposure * 1000).toFixed(1)} ms` : '');
 			// setMode rather than buildInspector: opening a frame while
-			// Calibrate is selected used to draw Develop's controls under
+			// Calibrate is selected used to draw Preview's controls under
 			// Calibrate's heading and leave the old frame's corners floating
 			// over the new picture, inert.
 			setMode(mode);
