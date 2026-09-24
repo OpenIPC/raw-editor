@@ -1882,6 +1882,42 @@ try {
 		g2.ed.destroy();
 	}
 
+	// A refusal that arrives late. The host answers whenever it gets round to
+	// it, which can be after the hold that asked has ended and another begun --
+	// and a stale "no" stopping a live hold makes the buttons unreliable for as
+	// long as one slow answer is outstanding.
+	{
+		const host = document.createElement('div');
+		document.body.append(host);
+		const seen = [];
+		let rejectFirst = null, n = 0;
+		const ed = mountEditor(host, { base: '../dist/', styles: false, autoCapture: false,
+			focus: { intervalMs: 5000, moveRepeatMs: 400, moveMaxMs: 4000,
+				zones: () => Promise.resolve({ rows: 1, cols: 2,
+					zones: [[0, 900, 0, 90, 1000, 0], [0, 100, 0, 10, 1000, 0]] }),
+				move: (v) => {
+					seen.push(v);
+					// The first directional ask hangs, then refuses on cue.
+					if (v !== 'stop' && n++ === 0)
+						return new Promise((_, rej) => { rejectFirst = rej; });
+					return Promise.resolve();
+				} } });
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+		await pause(120);
+		down(btn(host, 'near'));
+		await pause(40);
+		btn(host, 'near').dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+		await pause(40);
+		down(btn(host, 'far'));              // a new hold, live
+		await pause(40);
+		seen.length = 0;
+		rejectFirst(new Error('the first one, answered late'));
+		await pause(80);
+		t('a refusal from a finished hold does not stop the one running now',
+			seen.indexOf('stop') < 0, seen.join(',') || '(nothing)');
+		ed.destroy();
+	}
+
 	// A held key auto-repeats at whatever rate the OS was configured with.
 	{
 		const g3 = await mk(true);

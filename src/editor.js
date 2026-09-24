@@ -3081,6 +3081,13 @@ export function mountEditor(root, {
 	 * whose full travel takes a few, and nothing else. */
 	const MOVE_MAX_MS = 10000;
 	let moveTimer = null, moveGiveUp = null, moveVerb = null;
+	/* Bumped by every press and every release. A move that fails reports it
+	 * whenever the host gets round to it, which may be after the hold that sent
+	 * it has ended and another has begun -- and a stale failure stopping a live
+	 * hold makes the buttons unreliable for as long as one flaky answer is in
+	 * flight. Carrying the number means a refusal only ever releases the hold
+	 * that asked for it. */
+	let moveGen = 0;
 
 	/* A host reports a motor it cannot drive either by throwing or by rejecting,
 	 * and both mean the same thing. Only the first is a synchronous exception,
@@ -3088,15 +3095,19 @@ export function mountEditor(root, {
 	 * goes on asking a motor that has already said no for the whole give-up
 	 * window, raising an unhandled rejection each time round. */
 	function moveSend(verb, onFail) {
+		const gen = moveGen;
+		const fail = function () {
+			if (onFail && gen === moveGen) onFail();
+		};
 		let p;
 		try {
 			p = focus.move(verb);
 		} catch (e) {
-			if (onFail) onFail();
+			fail();
 			return;
 		}
 		if (p && typeof p.catch === 'function') {
-			p.catch(function () { if (onFail) onFail(); });
+			p.catch(fail);
 		}
 	}
 
@@ -3105,6 +3116,7 @@ export function mountEditor(root, {
 		if (moveGiveUp) { clearTimeout(moveGiveUp); moveGiveUp = null; }
 		if (!moveVerb) return;
 		moveVerb = null;
+		moveGen++;
 		/* Told to stop even though it would time out anyway: the deadline is
 		 * the fallback, not the plan, and a lens that keeps creeping after the
 		 * button came up reads as a broken control. A stop that itself fails
@@ -3128,6 +3140,7 @@ export function mountEditor(root, {
 			 * moving. */
 			if (moveVerb) return;
 			moveVerb = verb;
+			moveGen++;
 			/* Armed BEFORE the first ask. Arming them after meant a move that
 			 * failed synchronously released a hold whose timers did not exist
 			 * yet -- and then press installed them anyway, so the repeat ran on
