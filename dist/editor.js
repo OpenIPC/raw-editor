@@ -397,7 +397,12 @@ export function mountEditor(root, {
 	sensorChip.hidden = true;
 	const modeItems = [
 		{ label: 'Develop', value: 'develop' },
-		{ label: 'Diagnose', value: 'diagnose' },
+		/* Named for what it finds, not for what it does to find it. "Diagnose"
+		 * is a verb that never says what is being diagnosed, and an owner
+		 * looking for stuck pixels had no reason to guess it was in here. The
+		 * mode key stays `diagnose` -- it is internal, and renaming it would
+		 * be churn with nothing visible at the end of it. */
+		{ label: 'Bad pixels', value: 'diagnose' },
 		{ label: 'Calibrate', value: 'calibrate' },
 	];
 	// Not created and disabled: a tab that can never work is worse than no tab,
@@ -1113,10 +1118,10 @@ export function mountEditor(root, {
 	 * and how much blur it survives before it stops reading.
 	 *
 	 * It lives on the Plates tab, under the list the plate is chosen from. It
-	 * used to sit in Diagnose, which is about the sensor's own health and not
+	 * used to sit in Bad pixels, which is about the sensor's own health and not
 	 * about the picture -- and every one of these questions is about one
 	 * plate, so the answer differed across a frame while the card sat on a tab
-	 * with nothing to pick a plate on. Diagnose grew a guided run afterwards
+	 * with nothing to pick a plate on. That tab grew a guided run afterwards
 	 * and this card landed in the middle of it, between the steps and their
 	 * result, which is what finally made the misfiling obvious.
 	 *
@@ -1304,8 +1309,16 @@ export function mountEditor(root, {
 	async function readDpc() {
 		if (dpcAsked || !sensor || !sensor.profile) return;
 		dpcAsked = true;
-		try { dpc = readDefectCorrection(parseIni(await sensor.profile())); }
-		catch (e) { dpc = { failed: e && e.message ? e.message : 'could not be read' }; }
+		try {
+			/* null means the profile named no such section -- an answer, and a
+			 * different one from "still asking". Left as null it read as a
+			 * request in flight, and since dpcAsked blocks a retry the card
+			 * said "Asking the camera..." for as long as the editor was open. */
+			dpc = readDefectCorrection(parseIni(await sensor.profile()))
+				|| { absent: true };
+		} catch (e) {
+			dpc = { failed: e && e.message ? e.message : 'could not be read' };
+		}
 		if (mode === 'diagnose') buildDiagnose();
 	}
 
@@ -1330,6 +1343,14 @@ export function mountEditor(root, {
 		if (!dpc) {
 			panel.append(Object.assign(el('p', 're-note'), {
 				style: 'margin:0 0 9px', textContent: 'Asking the camera\u2026' }));
+			return;
+		}
+		if (dpc.absent) {
+			panel.append(Object.assign(el('p', 're-note'), {
+				style: 'margin:0 0 9px',
+				textContent: 'This camera\u2019s profile does not say whether it corrects ' +
+					'stuck pixels, so there is nothing here to read or change.',
+			}));
 			return;
 		}
 		if (dpc.failed) {
@@ -1371,7 +1392,16 @@ export function mountEditor(root, {
 		on.addEventListener('click', async () => {
 			on.disabled = true;
 			try {
-				if (dpcHold) { await sensor.keep(); dpcHold = null; dpc.enabled = true; }
+				if (dpcHold) {
+					/* Stop the clock FIRST. Setting the handle to null does not
+					 * cancel the timer it names, so a kept change sat there
+					 * until the hold expired and was then quietly put back --
+					 * while the card, rebuilt, went on saying it was on. */
+					clearTimeout(dpcHold);
+					dpcHold = null;
+					await sensor.keep();
+					dpc.enabled = true;
+				}
 				else {
 					await sensor.patch(enableDefectCorrection(dpc));
 					/* Same hold-and-confirm as a calibration: written now, put
@@ -1396,7 +1426,7 @@ export function mountEditor(root, {
 			}));
 	}
 
-	function sensorVerdict(pts) {
+	function sensorVerdict(pts, partial) {
 		const i = state.info || {};
 		const total = (i.width || 0) * (i.height || 0);
 		if (!pts || !total) return null;
@@ -1424,6 +1454,19 @@ export function mountEditor(root, {
 				'than scattered — which is what detail in a picture looks like, and not ' +
 				'what a sensor looks like. Cover the lens, or move the camera between ' +
 				'captures, and run it again.'];
+		/*
+		 * A short list cannot be called a normal one.
+		 *
+		 * When a capture filled the scan's store it stopped part-way down the
+		 * frame, so the count is low by an unknown amount in a known place --
+		 * and a fraction computed from it is low too. "Normal" would then be
+		 * read off the very evidence that went missing.
+		 */
+		if (partial)
+			return ['re-warn', `${n} stuck pixels confirmed — ${share} of this sensor, and ` +
+				'scattered at random, so they are the sensor rather than the scene. How ' +
+				'many there are in total is not known: at least one of these captures found ' +
+				'more than the scan can hold and stopped part-way down the frame. ' + taken];
 		if (frac <= NORMAL_FRACTION)
 			return ['re-ok', `${n} stuck pixels — ${share} of this sensor, scattered at ` +
 				'random, which is what a sensor\u2019s own faults look like. That is a ' +
@@ -1440,6 +1483,10 @@ export function mountEditor(root, {
 		// captures the operator has forgotten about.
 		scanSet = [];
 		needTouched = false;
+		/* Ask the camera again. Its correction can be changed from elsewhere
+		 * between runs, and a second run reporting the first run's reading is
+		 * worse than not reporting one. */
+		if (!dpcHold) { dpc = null; dpcAsked = false; }
 		/* And from looking everywhere, whatever the last run or the operator
 		 * left the gate on. The first capture decides whether to narrow it,
 		 * and narrowing a frame that is dark all over destroys the answer
@@ -1761,7 +1808,8 @@ export function mountEditor(root, {
 			 * the owner holding a text file and no idea whether the number in
 			 * it was bad news. Everything under this is the working.
 			 */
-			const v = sensorVerdict(diag && diag.fromTally ? diag.defects : null);
+			const v = sensorVerdict(diag && diag.fromTally ? diag.defects : null,
+				!!hunt.clipped);
 			if (v) {
 				const box = el('div', 're-notice ' + v[0], v[0] === 're-ok' ? ICON.ok : ICON.warn);
 				box.style.cssText = 'margin:0 0 9px';
@@ -1902,7 +1950,7 @@ export function mountEditor(root, {
 		const out = el('div', 're-panel');
 		out.hidden = true;
 		insp.append(out);
-		// A scan that is still valid is still worth showing. Leaving Diagnose
+		// A scan that is still valid is still worth showing. Leaving the tab
 		// and coming back rebuilt an empty panel over a reading that had not
 		// gone anywhere -- and the marks stayed on the picture, so there were
 		// rings with nothing to explain them.
@@ -2343,11 +2391,25 @@ export function mountEditor(root, {
 		 * been kept and `diag` is a genuine single-frame scan.
 		 */
 		const kept = scanSet.some((v) => v.id === state.openId);
-		const all = kept || diag.fromTally
+		/*
+		 * A tally-derived reading carries the frame's OWN keys with it, so
+		 * marking does not change how many captures there were.
+		 *
+		 * The first version of this fix sent every tally straight to scanSet,
+		 * which is right after a guided run -- keepCurrentScan has been called,
+		 * so the frame is in there. In the manual flow it is not: the reading
+		 * on screen stands in for it, and pressing Mark threw that stand-in
+		 * away. The capture count fell by one, the votes and the suggested
+		 * threshold moved with it, and no evidence had changed at all.
+		 */
+		const self = diag.fromTally && diag.fromTally.selfKeys;
+		const all = kept
 			? scanSet.slice()
 			: scanSet.filter((v) => v.id !== state.openId)
-				.concat([{ name: state.name || 'this frame',
-					keys: diag.defects.map((p) => p.x + ',' + p.y) }]);
+				.concat(self || !diag.fromTally
+					? [{ name: state.name || 'this frame',
+						keys: self || diag.defects.map((p) => p.x + ',' + p.y) }]
+					: []);
 		const M = all.length;
 		if (M < 2) {
 			out.append(Object.assign(el('p', 're-note'), {
@@ -2484,7 +2546,10 @@ export function mountEditor(root, {
 				 */
 				diag = { ...diag, defects: pts, defectCount: pts.length, truncated: false,
 					fromTally: { need: needN, of: M,
-						partial: all.some((v) => v.truncated) } };
+						partial: all.some((v) => v.truncated),
+						/* This frame's own reading, kept so the table can go on
+						 * counting it once the marks are the tally's. */
+						selfKeys: kept ? null : diag.defects.map((p) => p.x + ',' + p.y) } };
 				renderDiagnose(out);
 				drawMarks();
 			});
@@ -4974,7 +5039,7 @@ export function mountEditor(root, {
 			// against a peak held from a lens position that no longer exists.
 			resetFocusState();
 			/*
-			 * A frame arriving is news to the Diagnose rail. Nothing rebuilt
+			 * A frame arriving is news to the Bad pixels rail. Nothing rebuilt
 			 * it here before, which was harmless while every control worked
 			 * without a frame -- but the guided run's button now waits for one
 			 * and would have stayed disabled after the frame it was waiting
@@ -5087,6 +5152,19 @@ export function mountEditor(root, {
 			sweepClosed = true;
 			filterGen++;
 			abandonAll('the editor was closed');
+			/*
+			 * The correction hold is a timer of its own, and it outlived the
+			 * editor: close the page inside the hold and it still fired, still
+			 * called revert(), and changed a camera whose operator had gone.
+			 * A change nobody is watching is put back NOW rather than on a
+			 * schedule -- the whole point of the hold is that someone is there
+			 * to keep it.
+			 */
+			if (dpcHold) {
+				clearTimeout(dpcHold);
+				dpcHold = null;
+				try { sensor?.revert(); } catch (e) { /* the page is going */ }
+			}
 			worker?.terminate();
 			worker = null;
 			if (styles) releaseStylesheet();

@@ -35,14 +35,29 @@ if (new URLSearchParams(location.search).get('narrow') === '1') {
 	t('and the picture keeps a usable height',
 		stage.height > 200, `${stage.height.toFixed(0)}px tall`);
 
-	const tabs = [...host.querySelectorAll('.re-top .re-seg button')];
-	t('every tab is reachable rather than off the edge',
-		tabs.length > 0 && tabs.every((b) => {
-			const r = b.getBoundingClientRect();
-			return r.left >= -1 && r.right <= host.querySelector('.re-top').scrollWidth + 1;
-		}), tabs.map((b) => b.textContent).join('|'));
+	/*
+	 * Reachable means it can be brought into view, not that it exists.
+	 *
+	 * The first version of this compared each tab's right edge against
+	 * .re-top.scrollWidth -- the width of the whole scrollable content, which
+	 * an offscreen tab is inside by definition. It would have passed with the
+	 * bar still overflowing off the screen, which is the fault it was written
+	 * for. So: scroll to each tab and check it actually lands in the visible
+	 * box.
+	 */
 	const top = host.querySelector('.re-top');
-	t('and the bar can be scrolled to them when it overflows',
+	const tabs = [...host.querySelectorAll('.re-top .re-seg button')];
+	const unreachable = [];
+	for (const b of tabs) {
+		b.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+		await new Promise((r) => setTimeout(r, 20));
+		const r = b.getBoundingClientRect(), box = top.getBoundingClientRect();
+		if (r.left < box.left - 1 || r.right > box.right + 1) unreachable.push(b.textContent.trim());
+	}
+	t('every tab can be scrolled into view', tabs.length > 0 && unreachable.length === 0,
+		unreachable.length ? 'cannot reach: ' + unreachable.join(', ')
+			: tabs.map((b) => b.textContent.trim()).join('|'));
+	t('and the bar is scrollable when its tabs do not fit',
 		top.scrollWidth <= top.clientWidth + 1 || getComputedStyle(top).overflowX === 'auto',
 		`scrollWidth ${top.scrollWidth}, clientWidth ${top.clientWidth}`);
 
@@ -101,8 +116,8 @@ try {
 	const tabNames = (el) => [...el.querySelectorAll('.re-seg button')].map((b) => b.textContent.trim());
 	t('no Plates tab without a plates provider', !tabNames(bare).includes('Plates'),
 		tabNames(bare).join('|'));
-	t('and Diagnose does not offer to read one either', (() => {
-		const d = [...bare.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Diagnose');
+	t('and Bad pixels does not offer to read one either', (() => {
+		const d = [...bare.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Bad pixels');
 		if (!d) return false;
 		d.click();
 		return !/Reading a plate here/i.test(bare.querySelector('.re-insp').textContent);
@@ -146,9 +161,9 @@ try {
 	t('and asks for one of those to be picked before it measures',
 		/Pick one of the plates above/i.test(insp.textContent),
 		insp.textContent.replace(/\s+/g, ' ').slice(0, 110));
-	const diag = [...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Diagnose');
+	const diag = [...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Bad pixels');
 	diag.click();
-	t('and Diagnose is left to the sensor, with no plate card in it',
+	t('and Bad pixels is left to the sensor, with no plate card in it',
 		!/Reading a plate here/i.test(host.querySelector('.re-insp').textContent),
 		host.querySelector('.re-insp').textContent.replace(/\s+/g, ' ').slice(0, 110));
 } catch (e) {
@@ -763,7 +778,7 @@ try {
 	// Clumped defects: the arrangement of scene detail, not of silicon.
 	await ed.open(new Uint8Array(await (await fetch('/__defects.dng?mode=clustered&n=120')).arrayBuffer()),
 		'clustered.dng');
-	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose').click();
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Bad pixels').click();
 	await new Promise((r) => setTimeout(r, 250));
 	await scan();
 
@@ -1109,8 +1124,8 @@ try {
 		return lit > px.length / 8;      // not a black frame
 	})());
 
-	const diagBtn = [...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose');
-	t('Diagnose is a mode now, not a stub', !!diagBtn && !diagBtn.disabled);
+	const diagBtn = [...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Bad pixels');
+	t('Bad pixels is a mode now, not a stub', !!diagBtn && !diagBtn.disabled);
 	diagBtn.click();
 	await new Promise((r) => setTimeout(r, 300));
 	t('and it offers to scan rather than scanning unasked',
@@ -1146,7 +1161,7 @@ try {
 		input.value = String(Math.max(+input.min, +input.value - 200));
 		input.dispatchEvent(new Event('change', { bubbles: true }));
 		await new Promise((r) => setTimeout(r, 500));
-		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose').click();
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Bad pixels').click();
 		await new Promise((r) => setTimeout(r, 300));
 		t('moving the render white point keeps the scan, which is not about it',
 			/Black level/.test(host.querySelector('.re-insp').textContent));
@@ -1158,7 +1173,7 @@ try {
 	await new Promise((r) => setTimeout(r, 200));
 	[...host.querySelectorAll('.re-panel .re-seg button')].find((b) => b.textContent === 'BGGR').click();
 	await new Promise((r) => setTimeout(r, 400));
-	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose').click();
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Bad pixels').click();
 	await new Promise((r) => setTimeout(r, 300));
 	t('changing the Bayer pattern throws the old scan away',
 		!/Black level/.test(host.querySelector('.re-insp').textContent) &&
@@ -1168,7 +1183,7 @@ try {
 	// Switching away must take the marks with it.
 	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Develop').click();
 	await new Promise((r) => setTimeout(r, 200));
-	t('leaving Diagnose hides its marks', host.querySelector('.re-marks').hidden);
+	t('leaving Bad pixels hides its marks', host.querySelector('.re-marks').hidden);
 	ed.destroy();
 	host.remove();
 } catch (e) {
@@ -1195,7 +1210,7 @@ try {
 	const bytes = new Uint8Array(
 		await (await fetch('/__defects.dng?n=1500&seed=3')).arrayBuffer());
 	await ed.open(bytes, 'many.dng');
-	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose').click();
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Bad pixels').click();
 	await new Promise((r) => setTimeout(r, 120));
 	host.querySelector('[data-act="scan"]').click();
 	for (let i = 0; i < 120 && !host.querySelector('.re-devplot'); i++)
@@ -1271,7 +1286,7 @@ for (const [what, query, wantDark] of [
 		const first = new Uint8Array(
 			await (await fetch(`/__defects.dng?${query}&seed=99`)).arrayBuffer());
 		await ed.open(first, 'first.dng');
-		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose').click();
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Bad pixels').click();
 		await new Promise((r) => setTimeout(r, 120));
 
 		const start = host.querySelector('[data-act="hunt-start"]');
@@ -1360,7 +1375,7 @@ try {
 	});
 	await ed.open(new Uint8Array(await (await fetch(
 		'/__defects.dng?level=20&n=40&shared=12&seed=199')).arrayBuffer()), 'frame.dng');
-	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose').click();
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Bad pixels').click();
 	await new Promise((r) => setTimeout(r, 120));
 	host.querySelector('[data-act="hunt-start"]').click();
 	await new Promise((r) => setTimeout(r, 80));
@@ -1411,7 +1426,7 @@ try {
 	});
 	await ed.open(new Uint8Array(await (await fetch(
 		`/__defects.dng?${q}&seed=299`)).arrayBuffer()), 'big.dng');
-	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose').click();
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Bad pixels').click();
 	await new Promise((r) => setTimeout(r, 120));
 	host.querySelector('[data-act="hunt-start"]').click();
 	await new Promise((r) => setTimeout(r, 80));
@@ -1466,7 +1481,7 @@ try {
 	});
 	await ed.open(new Uint8Array(await (await fetch(
 		'/__defects.dng?level=20&n=40&shared=12&seed=399')).arrayBuffer()), 'first.dng');
-	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose').click();
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Bad pixels').click();
 	await new Promise((r) => setTimeout(r, 120));
 	host.querySelector('[data-act="hunt-start"]').click();
 	await new Promise((r) => setTimeout(r, 80));

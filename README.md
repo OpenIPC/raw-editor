@@ -78,7 +78,7 @@ both the camera's own JPEG and this editor rendered the chart's grey row 20 to
 balance. Clicking one grey patch brought the row to within a couple of levels
 of neutral.
 
-**Diagnose** reports what is wrong with the sensor rather than with the picture:
+**Bad pixels** reports what is wrong with the sensor rather than with the picture:
 pixels that disagree with every one of their same-colour neighbours by more
 than the noise explains, the black level the frame itself implies against the
 one the file claims, what has already clipped, and how noisy the rest is. All
