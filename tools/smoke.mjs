@@ -1160,6 +1160,20 @@ console.log('\nfocus statistics: the grid a person focuses a lens by');
 		const other = A.summarise(grid(1, 1, () => zone({ h1: A.ZONE_CEILING, v1: A.ZONE_CEILING })), 1, 1);
 		check('the other bank at its ceiling does not', other.saturated, 0);
 
+		// Peak selection keeps the first strict maximum, so a pinned zone can
+		// tie with an unpinned one and lose -- these two both blend to 55295.
+		// Reading the flag off the winning index alone would let grid order
+		// decide whether the sweep is trustworthy.
+		{
+			const lo = zone({ h2: A.ZONE_CEILING - 1, v2: 5 });
+			const hi = zone({ h2: A.ZONE_CEILING, v2: 0 });
+			check('the tie is a real one', A.blend(lo), A.blend(hi));
+			const tied = A.summarise([lo, hi], 1, 2);
+			assert('a pinned zone tied at the peak still condemns it', tied.peakSaturated);
+			// ...and in the order where it wins outright, which is the easy case.
+			assert('whichever way round they sit', A.summarise([hi, lo], 1, 2).peakSaturated);
+		}
+
 		// A saturated zone that is too dark to believe is not the peak, so the
 		// sweep has nothing to distrust.
 		const dark = A.summarise(grid(1, 2, (i) => (i

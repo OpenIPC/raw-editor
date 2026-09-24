@@ -142,8 +142,17 @@ export function summarise(zones, rows, cols, opts = {}) {
 		clipped: state.filter((s) => s === 'clipped').length,
 		saturated: sat.filter(Boolean).length,
 		/* The one that decides whether a comparison is worth anything: the
-		 * grid's own peak sitting at the ceiling is what makes a sweep flat. */
-		peakSaturated: peakAt >= 0 && sat[peakAt],
+		 * grid's own peak sitting at the ceiling is what makes a sweep flat.
+		 *
+		 * Any zone TIED at the peak, not just the one that happened to win it.
+		 * Peak selection keeps the first strict maximum, and a pinned zone can
+		 * tie with an unpinned one at the same blended value -- {h2: 65534,
+		 * v2: 5} and {h2: 65535, v2: 0} both come to 55295 -- so reading the
+		 * flag off the winning index alone lets grid order decide whether the
+		 * reading is trustworthy. If anything at the top of the grid cannot
+		 * rise, the peak cannot rise. */
+		peakSaturated: peakAt >= 0 &&
+			fv.some((v, i) => v === peak && state[i] === 'measured' && sat[i]),
 	};
 }
 
