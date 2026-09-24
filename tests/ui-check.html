@@ -81,12 +81,24 @@ try {
 		!!insp.querySelector('[data-act="find-plates"]'));
 	t('which says nothing has been found yet rather than nothing at all',
 		/Candidates are listed best read first/i.test(insp.textContent));
+	/*
+	 * The plate card belongs on Plates, not on Diagnose.
+	 *
+	 * It asks whether the plate you picked can be read, which is a question
+	 * about the picture; Diagnose is about the sensor's own health. It sat in
+	 * Diagnose until the guided defect run went in above it and left it
+	 * between the steps of that run and their result.
+	 */
+	t('the plate card sits on Plates, under the list it asks about',
+		/Reading a plate here/i.test(insp.textContent));
+	t('and asks for one of those to be picked before it measures',
+		/Pick one of the plates above/i.test(insp.textContent),
+		insp.textContent.replace(/\s+/g, ' ').slice(0, 110));
 	const diag = [...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Diagnose');
 	diag.click();
-	t('Diagnose gains the plate card when a provider is there',
-		/Reading a plate here/i.test(host.querySelector('.re-insp').textContent));
-	t('and asks for a plate to be picked before it measures one',
-		/Pick a plate on the Plates tab/i.test(host.querySelector('.re-insp').textContent));
+	t('and Diagnose is left to the sensor, with no plate card in it',
+		!/Reading a plate here/i.test(host.querySelector('.re-insp').textContent),
+		host.querySelector('.re-insp').textContent.replace(/\s+/g, ' ').slice(0, 110));
 } catch (e) {
 	t('the Plates tab follows the host', false, e.message);
 }

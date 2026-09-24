@@ -1085,12 +1085,27 @@ export function mountEditor(root, {
 
 	function pct(v) { return (v * 100).toFixed(v >= 0.01 ? 1 : 3) + '%'; }
 
-	/* The second card in Diagnose: the picture's fitness for reading a plate,
-	 * as opposed to the sensor's own health. Built only when the host gave us
-	 * somewhere to read from. */
+	/*
+	 * Whether the plate you picked can be read: how many pixels across it is,
+	 * and how much blur it survives before it stops reading.
+	 *
+	 * It lives on the Plates tab, under the list the plate is chosen from. It
+	 * used to sit in Diagnose, which is about the sensor's own health and not
+	 * about the picture -- and every one of these questions is about one
+	 * plate, so the answer differed across a frame while the card sat on a tab
+	 * with nothing to pick a plate on. Diagnose grew a guided run afterwards
+	 * and this card landed in the middle of it, between the steps and their
+	 * result, which is what finally made the misfiling obvious.
+	 *
+	 * Refilled rather than rebuilt, so choosing a different plate refreshes it
+	 * where it stands instead of stacking a second copy underneath.
+	 */
+	let plateFitPanel = null;
 	function buildPlateFitness() {
 		if (!plates) return;
-		const panel = el('div', 're-panel');
+		if (!plateFitPanel) plateFitPanel = el('div', 're-panel');
+		const panel = plateFitPanel;
+		panel.replaceChildren();
 		panel.append(Object.assign(el('div', 're-shead'), {
 			innerHTML: '<h3 class="re-cap">Reading a plate here</h3><span class="re-rule"></span>',
 		}));
@@ -1099,11 +1114,11 @@ export function mountEditor(root, {
 		const rows = el('div');
 		rows.style.cssText = 'display:flex;flex-direction:column;gap:7px;margin-top:9px';
 		panel.append(rows);
-		insp.append(panel);
+		if (panel.parentNode !== insp) insp.append(panel);
 
 		if (!plateCands || plateSel < 0) {
-			note.textContent = 'Pick a plate on the Plates tab first — these are questions ' +
-				'about one plate, and the answers differ across a frame.';
+			note.textContent = 'Pick one of the plates above — these are questions about ' +
+				'a single plate, and the answers differ across a frame.';
 			return;
 		}
 		const c = plateCands[plateSel];
@@ -1622,7 +1637,6 @@ export function mountEditor(root, {
 			}));
 		panel.append(gate);
 		insp.append(panel);
-		buildPlateFitness();
 
 		const out = el('div', 're-panel');
 		out.hidden = true;
@@ -3116,6 +3130,8 @@ export function mountEditor(root, {
 		list.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:10px';
 		panel.append(list);
 		insp.append(panel);
+		/* Directly under the list, because that is what it asks about. */
+		buildPlateFitness();
 
 		const meter = el('div', 're-panel');
 		meter.hidden = true;
@@ -3366,7 +3382,10 @@ export function mountEditor(root, {
 				}));
 				r.append(t);
 				r.dataset.act = 'plate-row';
-				r.addEventListener('click', () => { plateSel = i; paintList(); paintMeter(); paintBurst(); drawPlateMarks(); });
+				r.addEventListener('click', () => {
+				plateSel = i;
+				paintList(); paintMeter(); paintBurst(); buildPlateFitness(); drawPlateMarks();
+			});
 				list.append(r);
 			});
 		}
@@ -3458,7 +3477,7 @@ export function mountEditor(root, {
 		find.addEventListener('click', async () => {
 			if (!state.info) { status.textContent = 'Open or capture a frame first.'; return; }
 			find.disabled = true;
-			plateSel = -1; meter.hidden = true; burst.hidden = true;
+			plateSel = -1; meter.hidden = true; burst.hidden = true; buildPlateFitness();
 			try {
 				if (!plateReader) {
 					status.textContent = 'Fetching the reader…';
