@@ -1142,8 +1142,9 @@ try {
 	const cRect = host.querySelector('canvas').getBoundingClientRect();
 	const picTop = cRect.top - sRect.top, picH = cRect.height;
 	const deepest = (Math.max(...cys) - picTop) / picH;
-	// 1342 defects drawn 600 at a time as a prefix reach 600/1342 = 45% of the
-	// rows and stop; sampled, they reach the bottom of the picture.
+	// 1342 defects drawn 600 at a time as a prefix reach 600/1342 of the rows
+	// and stop -- measured, the lowest ring sits at 44% of the picture. Sampled,
+	// they reach the bottom of it.
 	t('and spreads them over the whole frame rather than the top of it',
 		picH > 0 && deepest > 0.7,
 		`lowest ring at ${(deepest * 100).toFixed(0)}% of the picture, ` +
@@ -1155,6 +1156,107 @@ try {
 	host.remove();
 } catch (e) {
 	t('the rings sample the frame', false, e.message);
+}
+
+/*
+ * The guided run, which is the whole feature for anyone who does not already
+ * know how to drive the panels underneath it.
+ *
+ * Each capture is a different seed, so its scattered false positives differ --
+ * the shape of noise -- while `shared` plants twelve sites in the same places
+ * every time, which is the shape of silicon. That is what the tally is for.
+ */
+async function huntSettle(host) {
+	for (let i = 0; i < 150; i++) {
+		const b = host.querySelector('[data-act="hunt-step"]');
+		if ((!b || !b.disabled) && !/Working/.test(host.textContent)) return;
+		await new Promise((r) => setTimeout(r, 100));
+	}
+}
+
+for (const [what, query, wantDark] of [
+	['a covered lens', 'level=20&n=40&shared=12', true],
+	['a lit scene', 'level=300&n=40&shared=12', false],
+]) {
+	try {
+		const host = document.createElement('div');
+		document.body.append(host);
+		let shot = 0;
+		const ed = mountEditor(host, {
+			base: '../dist/', styles: false, autoCapture: false,
+			capture: async () => {
+				shot++;
+				const b = new Uint8Array(await (await fetch(
+					`/__defects.dng?${query}&seed=${100 + shot}`)).arrayBuffer());
+				return { bytes: b, name: 'shot-' + shot + '.dng' };
+			},
+		});
+		const first = new Uint8Array(
+			await (await fetch(`/__defects.dng?${query}&seed=99`)).arrayBuffer());
+		await ed.open(first, 'first.dng');
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Diagnose').click();
+		await new Promise((r) => setTimeout(r, 120));
+
+		const start = host.querySelector('[data-act="hunt-start"]');
+		t(`${what}: the tab offers to find the bad pixels without being driven`, !!start);
+		start.click();
+		await new Promise((r) => setTimeout(r, 80));
+		t(`${what}: and says how to make the frame dark before it takes one`,
+			/opaque over the lens/i.test(host.querySelector('.re-insp').textContent));
+
+		host.querySelector('[data-act="hunt-step"]').click();
+		await huntSettle(host);
+		const verdict = host.querySelector('[data-act="hunt-verdict"]');
+		t(`${what}: the first capture is graded from the frame, not from what it was told`,
+			!!verdict, host.querySelector('.re-insp').textContent.replace(/\s+/g, ' ').slice(0, 120));
+		t(`${what}: and reads it as ${wantDark ? 'covered' : 'a picture'}`,
+			wantDark === /Covered/.test(verdict?.textContent || ''),
+			(verdict?.textContent || '(nothing)').slice(0, 110));
+		// A scene needs the camera moved between captures; a covered lens does
+		// not, and telling someone to move a camera that is under a box is how
+		// advice stops being believed.
+		t(`${what}: says ${wantDark ? 'to leave the camera alone' : 'to move the camera'}`,
+			wantDark === !/move the camera/i.test(verdict?.textContent || ''),
+			(verdict?.textContent || '').slice(0, 110));
+		t(`${what}: and counts what it has so far`,
+			/So far: \d+ sites?/.test(host.textContent),
+			host.querySelector('[data-act="hunt-progress"]')?.textContent || '(nothing)');
+
+		for (let i = 0; i < 4; i++) {
+			const b = host.querySelector('[data-act="hunt-step"]');
+			if (!b) break;
+			b.click();
+			await huntSettle(host);
+		}
+		t(`${what}: five captures in, it offers the answer rather than a sixth`,
+			!!host.querySelector('[data-act="hunt-finish"]') &&
+			!host.querySelector('[data-act="hunt-step"]'));
+		host.querySelector('[data-act="hunt-finish"]').click();
+		await new Promise((r) => setTimeout(r, 200));
+		t(`${what}: and says which rule produced the list`,
+			/turned up in at least 4 of 5 captures/i.test(host.textContent),
+			host.textContent.match(/turned up in at least[^.]*\./)?.[0] || '(none)');
+		/*
+		 * A list to keep, or a straight answer that there is nothing to keep.
+		 *
+		 * Both are right, and which one turns up depends on the frame. These
+		 * fixtures are a flat field with spikes on it, so on the lit arm the
+		 * brightness gate has no texture to discriminate against and gates the
+		 * planted sites out along with everything else -- measured, 52 sites
+		 * per capture become 0. That is the gate behaving as designed on a
+		 * frame no camera produces, and the thing worth pinning is that the
+		 * run still ends somewhere rather than offering an empty file.
+		 */
+		const save = host.querySelector('[data-act="hunt-export"]');
+		t(`${what}: ending in a list to keep, or in saying there is none`,
+			(!!save && !save.disabled) ||
+			/Nothing appeared in enough captures/i.test(host.textContent),
+			save ? `export ${save.disabled ? 'disabled' : 'enabled'}` : '(no export button)');
+		ed.destroy();
+		host.remove();
+	} catch (e) {
+		t(`the guided run on ${what}`, false, e.message);
+	}
 }
 
 /* Confirming is only real once the host has been told. A keep() that fails

@@ -62,8 +62,12 @@ const server = createServer(async (req, res) => {
 		const q = new URL(req.url, 'http://x').searchParams;
 		const { makeDefectFrame } = await import('./make-defects.mjs');
 		res.writeHead(200, { 'content-type': 'application/octet-stream' });
+		/* `level` is the flat field the spikes sit on, and it is what decides
+		 * whether the editor calls a frame covered: the default 300 of 4095 is
+		 * a lit scene, and something near the floor is a capped lens. */
 		res.end(makeDefectFrame({ mode: q.get('mode') || 'scattered',
 			n: Number(q.get('n') || 120), shared: Number(q.get('shared') || 0),
+			level: Number(q.get('level') || 300),
 			seed: Number(q.get('seed') || 3) }).bytes);
 		return;
 	}
