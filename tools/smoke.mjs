@@ -1032,6 +1032,66 @@ console.log('\nand says how the defects it found are arranged');
 	assert('fewer than three defects gives no index rather than a meaningless one',
 		sparse.spread === null || sparse.spread.over >= 3,
 		JSON.stringify(sparse.spread));
+
+	/*
+	 * A cap on how many defects are kept must not change the verdict.
+	 *
+	 * The store fills in raster order, so what it keeps when it overflows is
+	 * every defect down to some row and none below -- a census of the top of
+	 * the frame. Divide that by the whole frame and the density comes out too
+	 * low, the expected nearest-neighbour distance too high, and R too small:
+	 * the run below read 0.420 against the same frame's 1.016 uncapped, and
+	 * anything under 0.8 is reported to the operator as "these are following
+	 * the picture". A scan that ran out of room was accusing them of
+	 * photographing furniture.
+	 *
+	 * maxDefects is dropped rather than the frame made huge, because the
+	 * arithmetic is the same either way and a 512x512 frame keeps the suite
+	 * quick. The frame is opened again for the second reading: open() is the
+	 * only thing that resets the bump allocator.
+	 */
+	const many = () => makeDefectFrame({ mode: 'scattered', n: 400, seed: 11 }).bytes;
+	engine.open(many());
+	const whole = engine.diagnose({ sigmas: 6 });
+	engine.open(many());
+	const capped = engine.diagnose({ sigmas: 6, maxDefects: 64 });
+	assert('a cap that bites is reported as one',
+		capped.truncated && capped.spread && capped.spread.over === 64,
+		`truncated ${capped.truncated}, over ${capped.spread?.over}`);
+	assert('and a capped scan still calls a scattered set scattered',
+		capped.spread && Math.abs(capped.spread.index - 1) < 0.3,
+		`R = ${capped.spread?.index.toFixed(3)} over ${capped.spread?.over} ` +
+			`of ${capped.defectCount}`);
+	assert('reading the same frame with and without the cap agrees',
+		whole.spread && capped.spread &&
+		Math.abs(whole.spread.index - capped.spread.index) < 0.25,
+		`uncapped ${whole.spread?.index.toFixed(3)}, capped ${capped.spread?.index.toFixed(3)}`);
+}
+
+console.log('\nand how bright the frame it read was');
+{
+	/*
+	 * The median of each plane, which is what says whether the lens was
+	 * covered. Nothing else in the reading does: the black floor is the 0.1st
+	 * percentile and is near black in any frame with a shadow in it.
+	 *
+	 * Checked against a frame built at a known level, and then against the
+	 * real fixture, whose scene is a warm lamp on a card -- amber, so red sits
+	 * well above blue and neither is near the floor.
+	 */
+	const { makeDefectFrame } = await import('./make-defects.mjs');
+	engine.open(makeDefectFrame({ mode: 'scattered', n: 20, level: 300, seed: 5 }).bytes);
+	const flat = engine.diagnose({ sigmas: 6 });
+	assert('a frame built at a known level reads back at it',
+		flat.median.every((v) => Math.abs(v - 300) <= 2),
+		flat.median.join(' / '));
+
+	engine.open(readFileSync(new URL('../tests/fixture.dng', import.meta.url)));
+	const real = engine.diagnose();
+	check('the fixture reads the level measured off it', real.median, [152, 152, 79]);
+	assert('which is well clear of the black level the file declares',
+		real.median.every((v) => v > 50),
+		`black 50, medians ${real.median.join(' / ')}`);
 }
 
 console.log('\nthe chart is found where it was drawn');

@@ -201,7 +201,10 @@ export class Engine {
 		 * thought about it gets. */
 		const bg = opts.backgroundPercentile === undefined
 			? 100 : Math.max(1, Math.min(100, Number(opts.backgroundPercentile) || 100));
-		if (!this.statsPtr) this.statsPtr = x.alloc(21 * 4);
+		/* DIAG_STATS in engine.c, which this side cannot see -- the two are
+		 * duplicates of one number and have to move together, here and at
+		 * the Float32Array below. */
+		if (!this.statsPtr) this.statsPtr = x.alloc(24 * 4);
 		if (!this.histPtrD) this.histPtrD = x.alloc(256 * 4);
 		if (!this.defectPtr || this.defectRoom < max) {
 			this.defectPtr = x.alloc(max * 2 * 4);
@@ -212,7 +215,7 @@ export class Engine {
 		const n = x.diagnose(cfa, white, sigmas, bg, this.statsPtr, this.defectPtr, max,
 			this.histPtrD);
 		if (n < 0) throw new Error(ERRORS[n] || 'the frame could not be diagnosed');
-		const s = new Float32Array(x.memory.buffer, this.statsPtr, 21);
+		const s = new Float32Array(x.memory.buffer, this.statsPtr, 24);
 		const d = new Int32Array(x.memory.buffer, this.defectPtr, Math.min(n, max) * 2);
 		const defects = [];
 		for (let k = 0; k < d.length; k += 2) defects.push({ x: d[k], y: d[k + 1] });
@@ -222,6 +225,10 @@ export class Engine {
 			noise: [Math.sqrt(s[3]), Math.sqrt(s[4]), Math.sqrt(s[5])],
 			darkest: [s[6], s[7], s[8]],
 			blackFloor: [s[9], s[10], s[11]],
+			/* How bright the frame is in the middle, per plane. What the black
+			 * floor cannot say: that is the 0.1st percentile and is dark in
+			 * any frame with a shadow in it. */
+			median: [s[21], s[22], s[23]],
 			defectCount: n,
 			defects,                 // capped at maxDefects; defectCount is the total
 			truncated: n > max,
