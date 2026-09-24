@@ -254,8 +254,17 @@ export function mountEditor(root, {
 	 * row-major. Without one there is no Focus tab at all, because a focus
 	 * display with nothing to display is worse than none.
 	 *
-	 * Read-only, unlike `calibrate` and `plates`: this one measures and never
-	 * writes, so it needs no revert and no countdown. */
+	 * Reading is the whole of it unless the host also supplies `move(verb)`,
+	 * where verb is 'near' | 'far' | 'stop'. With one, the panel grows a pair of
+	 * hold-to-run buttons; without one it does not, because a focus control on a
+	 * camera with no motor is a button that can only ever do nothing.
+	 *
+	 * `move` is the only part of this capability that writes, and it needs no
+	 * countdown even so: a lens that went the wrong way is put back by holding
+	 * the other button, and the grid says which way was right. `moveRepeatMs`
+	 * is how often a held button re-sends, and must be shorter than whatever
+	 * deadline the host's motor stops itself on; `moveMaxMs` is how long a hold
+	 * may last before this side gives up on it regardless. */
 	focus,
 	/* How long to wait for the module to arrive and answer. The camera's own
 	 * loader gives the CDN eight seconds; a test harness under a virtual clock
@@ -766,6 +775,16 @@ export function mountEditor(root, {
 		ro.observe(canvas);
 	}
 	window.addEventListener('resize', onResize);
+	/* A press that ends anywhere but on the button still has to stop the lens.
+	 * Dragging off it, switching window and hiding the tab all end the gesture
+	 * without a pointerup ever reaching the button, and a motor left running
+	 * because the page stopped watching is the one failure here that damages
+	 * something. */
+	const onLetGo = () => moveRelease();
+	window.addEventListener('blur', onLetGo);
+	window.addEventListener('pointerup', onLetGo);
+	window.addEventListener('pointercancel', onLetGo);
+	document.addEventListener('visibilitychange', onLetGo);
 
 	/* ---- diagnose --------------------------------------------------------
 	 *
@@ -3045,23 +3064,98 @@ export function mountEditor(root, {
 		}
 	}
 
+	/* A lens runs while the button is held.
+	 *
+	 * The motor is told to keep going by being asked again, and it stops on its
+	 * own once nobody asks -- which is what saves a lens whose release event was
+	 * lost to a closed tab or a dropped network. That safety net only works if
+	 * this side actually stops asking, so every way a press can end is wired to
+	 * the same release: pointerup, a pointer leaving the button, a cancelled
+	 * gesture, the window losing focus, the tab being hidden, and the editor
+	 * being torn down.
+	 *
+	 * And a cap regardless. All of those are events that might not arrive; a
+	 * repeat that never ends drives a lens into its mechanical stop, so the hold
+	 * gives up by itself however healthy it looks. `moveMaxMs` lets a host that
+	 * knows its mechanism shorten it -- ten seconds is a guess that suits a lens
+	 * whose full travel takes a few, and nothing else. */
+	const MOVE_MAX_MS = 10000;
+	let moveTimer = null, moveGiveUp = null, moveVerb = null;
+
+	function moveRelease() {
+		if (moveTimer) { clearInterval(moveTimer); moveTimer = null; }
+		if (moveGiveUp) { clearTimeout(moveGiveUp); moveGiveUp = null; }
+		if (!moveVerb) return;
+		moveVerb = null;
+		/* Told to stop even though it would time out anyway: the deadline is
+		 * the fallback, not the plan, and a lens that keeps creeping after the
+		 * button came up reads as a broken control. */
+		try { focus.move('stop'); } catch (e) { /* nothing to undo */ }
+	}
+
+	function holdToRun(btn, verb) {
+		const press = function (ev) {
+			if (ev && ev.button !== undefined && ev.button !== 0) return;
+			if (moveVerb) moveRelease();
+			moveVerb = verb;
+			const ask = function () { try { focus.move(verb); } catch (e) { moveRelease(); } };
+			ask();
+			moveTimer = setInterval(ask, (focus && focus.moveRepeatMs) || 250);
+			moveGiveUp = setTimeout(moveRelease,
+				(focus && focus.moveMaxMs) || MOVE_MAX_MS);
+			if (ev && ev.preventDefault) ev.preventDefault();
+		};
+		btn.addEventListener('pointerdown', press);
+		['pointerup', 'pointercancel', 'pointerleave'].forEach(function (n) {
+			btn.addEventListener(n, moveRelease);
+		});
+		/* Keyboard is not a hold: a key repeat is the OS's, at its own rate, and
+		 * space fires click. One press, one nudge, which is also the only way
+		 * this control is reachable without a pointer. */
+		btn.addEventListener('keydown', function (ev) {
+			if (ev.key !== 'Enter' && ev.key !== ' ') return;
+			ev.preventDefault();
+			try { focus.move(verb); } catch (e) { /* reported by the host */ }
+		});
+	}
+
 	function buildFocus() {
 		insp.replaceChildren();
 		const panel = el('div', 're-panel');
 		panel.append(Object.assign(el('div', 're-shead'), {
 			innerHTML: '<h3 class="re-cap">Focus</h3><span class="re-rule"></span>',
 		}));
+		/* Says what to actually DO, and that differs: a camera with a motor is
+		 * focused from this panel, one without is focused at the camera. Telling
+		 * someone to turn a lens they could drive from here, or to hold a button
+		 * that is not on screen, is worse than saying nothing. */
+		const drive = focus && typeof focus.move === 'function'
+			? 'Hold Near or Far until the bright patch is where you want it sharp.'
+			: 'Turn the lens until the bright patch is where you want it sharp.';
 		panel.append(Object.assign(el('p', 're-note'), {
 			textContent: 'Each square is one of the camera\'s focus zones, brightest where ' +
-				'the picture has the most detail. Turn the lens until the bright patch is ' +
-				'where you want it sharp. The picture behind is the frame you captured — ' +
-				'the squares are live.',
+				'the picture has the most detail. ' + drive + ' The picture behind is the ' +
+				'frame you captured — the squares are live.',
 		}));
 		focusStatus = el('div');
 		panel.append(focusStatus);
 
 		const row = el('div');
 		row.style.cssText = 'display:flex;gap:8px;margin-top:9px;flex-wrap:wrap';
+
+		/* Only where there is a motor to drive. Same rule the Capture button and
+		 * the Plates tab follow: a control that can never work is worse than
+		 * none, and most cameras focus by hand. */
+		if (focus && typeof focus.move === 'function') {
+			[['near', 'Near'], ['far', 'Far']].forEach(function (pair) {
+				const b = el('button', 're-btn', '');
+				b.dataset.act = 'focus-' + pair[0];
+				b.textContent = pair[1];
+				holdToRun(b, pair[0]);
+				row.append(b);
+			});
+		}
+
 		const reset = el('button', 're-btn', '');
 		reset.dataset.act = 'focus-reset';
 		reset.textContent = 'Reset the best';
@@ -3144,7 +3238,7 @@ export function mountEditor(root, {
 		if (m !== 'calibrate') abandonHold();
 		/* A poll that outlived its tab would keep a camera answering for a
 		 * panel nobody is looking at. */
-		if (m !== 'focus') { stopFocusPoll(); focusStatus = null; }
+		if (m !== 'focus') { stopFocusPoll(); moveRelease(); focusStatus = null; }
 		if (m === 'plates') {
 			buildPlates();
 		} else if (m === 'calibrate') {
@@ -3413,10 +3507,15 @@ export function mountEditor(root, {
 		destroy() {
 			ro?.disconnect();
 			window.removeEventListener('resize', onResize);
+			window.removeEventListener('blur', onLetGo);
+			window.removeEventListener('pointerup', onLetGo);
+			window.removeEventListener('pointercancel', onLetGo);
+			document.removeEventListener('visibilitychange', onLetGo);
 			// A countdown that outlived its editor would revert a camera whose
 			// operator had closed the page and moved on.
 			stopHold();
 			stopFocusPoll();
+			moveRelease();
 			abandonAll('the editor was closed');
 			worker?.terminate();
 			worker = null;

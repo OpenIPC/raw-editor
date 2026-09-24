@@ -1666,6 +1666,146 @@ try {
 	t('the focus timing paths are handled', false, e.message);
 }
 
+/* Driving the lens from the panel. Every check here is about the motor
+ * STOPPING: it keeps running only because the page keeps asking, and the one
+ * failure in this feature that damages something is a hold that never ends.
+ * The camera's own deadline is the net under that, and it only catches a page
+ * that has stopped asking -- so a repeat left running defeats it. */
+try {
+	const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+	const mk = async (withMotor) => {
+		const moves = [];
+		const host = document.createElement('div');
+		document.body.append(host);
+		const focus = {
+			intervalMs: 5000, moveRepeatMs: 20,
+			zones: () => Promise.resolve({ rows: 1, cols: 2,
+				zones: [[0, 900, 0, 90, 1000, 0], [0, 100, 0, 10, 1000, 0]] }),
+		};
+		if (withMotor) focus.move = (v) => { moves.push(v); return Promise.resolve(); };
+		const ed = mountEditor(host, { base: '../dist/', styles: false, autoCapture: false, focus });
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+		await pause(120);
+		return { host, ed, moves };
+	};
+	const btn = (h, act) => h.querySelector('[data-act="focus-' + act + '"]');
+	const down = (b) => b.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+
+	// A camera that cannot focus itself gets no buttons that could only sit there.
+	let g = await mk(false);
+	t('no motor, no Near/Far buttons', !btn(g.host, 'near') && !btn(g.host, 'far'),
+		'near=' + !!btn(g.host, 'near'));
+	const notes = (h) => [...h.querySelectorAll('.re-note')].map((n) => n.textContent).join(' | ');
+	t('and the panel says to turn the lens instead',
+		/Turn the lens/.test(notes(g.host)), notes(g.host).slice(0, 90));
+	g.ed.destroy();
+
+	g = await mk(true);
+	t('a motor grows both buttons', !!btn(g.host, 'near') && !!btn(g.host, 'far'));
+	t('and the panel says to hold them',
+		/Hold Near or Far/.test(notes(g.host)), notes(g.host).slice(0, 90));
+
+	// Held: it has to keep asking, or the camera stops on its own deadline.
+	down(btn(g.host, 'near'));
+	await pause(110);
+	const asked = g.moves.filter((m) => m === 'near').length;
+	t('holding keeps asking rather than asking once', asked > 2, asked + ' asks');
+	btn(g.host, 'near').dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+	await pause(60);
+	t('and letting go stops the lens',
+		g.moves[g.moves.length - 1] === 'stop', g.moves.slice(-3).join(','));
+	const after = g.moves.length;
+	await pause(80);
+	t('with nothing asked after the release', g.moves.length === after,
+		g.moves.slice(after).join(','));
+
+	// The ways a press ends WITHOUT a pointerup on the button. Each of these
+	// leaves the gesture over and the motor running if it is not wired.
+	for (const end of [
+		['the pointer leaving the button', (b) => b.dispatchEvent(new PointerEvent('pointerleave', { bubbles: true }))],
+		['the gesture being cancelled', (b) => b.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true }))],
+		['the window losing focus', () => window.dispatchEvent(new Event('blur'))],
+		['the tab being hidden', () => document.dispatchEvent(new Event('visibilitychange'))],
+		['a pointerup landing anywhere else', () => window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }))],
+	]) {
+		down(btn(g.host, 'far'));
+		await pause(50);
+		end[1](btn(g.host, 'far'));
+		await pause(50);
+		const n = g.moves.length;
+		await pause(80);
+		t(end[0] + ' stops it', g.moves[n - 1] === 'stop' && g.moves.length === n,
+			g.moves.slice(n - 2).join(','));
+	}
+
+	// Leaving the tab and closing the editor are teardowns, not gestures.
+	down(btn(g.host, 'near'));
+	await pause(40);
+	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Develop').click();
+	await pause(60);
+	let n = g.moves.length;
+	await pause(80);
+	t('leaving the Focus tab stops it', g.moves[n - 1] === 'stop' && g.moves.length === n);
+
+	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+	await pause(60);
+	down(btn(g.host, 'far'));
+	await pause(40);
+	g.ed.destroy();
+	await pause(60);
+	n = g.moves.length;
+	await pause(80);
+	t('and destroying the editor stops it', g.moves[n - 1] === 'stop' && g.moves.length === n,
+		g.moves.slice(-3).join(','));
+
+	// A press whose release never arrives at all. Every wiring above is an
+	// EVENT, and an event that does not fire is the case none of them covers --
+	// so the hold has to end itself, or the lens runs to its mechanical stop.
+	{
+		const moves = [];
+		const host = document.createElement('div');
+		document.body.append(host);
+		const ed = mountEditor(host, { base: '../dist/', styles: false, autoCapture: false,
+			focus: { intervalMs: 5000, moveRepeatMs: 15, moveMaxMs: 150,
+				zones: () => Promise.resolve({ rows: 1, cols: 2,
+					zones: [[0, 900, 0, 90, 1000, 0], [0, 100, 0, 10, 1000, 0]] }),
+				move: (v) => { moves.push(v); return Promise.resolve(); } } });
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+		await pause(120);
+		// Pressed and simply never released -- no pointerup, no blur, nothing.
+		down(btn(host, 'near'));
+		await pause(400);
+		const n = moves.length;
+		t('a hold whose release never comes gives up on its own',
+			moves[n - 1] === 'stop', moves.slice(-3).join(','));
+		await pause(150);
+		t('and stays stopped afterwards', moves.length === n,
+			moves.slice(n).join(','));
+		ed.destroy();
+	}
+
+	// A host whose move() throws must not leave the repeat running.
+	{
+		const host = document.createElement('div');
+		document.body.append(host);
+		let calls = 0;
+		const ed = mountEditor(host, { base: '../dist/', styles: false, autoCapture: false,
+			focus: { intervalMs: 5000, moveRepeatMs: 20,
+				zones: () => Promise.resolve({ rows: 1, cols: 2,
+					zones: [[0, 900, 0, 90, 1000, 0], [0, 100, 0, 10, 1000, 0]] }),
+				move: () => { calls++; throw new Error('no motor after all'); } } });
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+		await pause(120);
+		down(btn(host, 'near'));
+		await pause(120);
+		t('a move that throws does not leave the button repeating forever',
+			calls <= 3, calls + ' calls');
+		ed.destroy();
+	}
+} catch (e) {
+	t('the lens controls are handled', false, e.message);
+}
+
 // Reported over HTTP rather than through the title: the harness then runs on
 // a real clock. A virtual-time budget fires every timer as fast as it can,
 // which loses the race against the module's own fetches every time.
