@@ -2525,7 +2525,7 @@ try {
 			// sweep checks alone would outrun the page's whole time budget.
 			// Nothing to settle in a fixture; a test that has to ACT during a
 			// sweep asks for a slower one so there is a sweep to act on.
-			focus.sweepSettleMs = opts.settle || 30;
+			focus.sweepSettleMs = opts.settle !== undefined ? opts.settle : 30;
 		}
 		if (!opts.readOnly) {
 			focus.holdSeconds = opts.hold || 30;
@@ -3014,6 +3014,52 @@ try {
 		t('and it is ringed on the picture',
 			g.host.querySelectorAll('.re-fz-odd').length > 0,
 			g.host.querySelectorAll('.re-fz-odd').length + ' ringed');
+
+		// Switching to every zone is how you find out WHICH zone was flagged,
+		// so it is the last view that may drop the rings -- and it did, while
+		// the verdict went on saying they were on the picture.
+		const gr = (label) => [...g.host.querySelectorAll('[data-act="focus-grain"] button')]
+			.find((b) => b.textContent.trim() === label);
+		gr('All zones').click();
+		await pause(120);
+		t('and still ringed with every zone shown',
+			g.host.querySelectorAll('.re-fz-odd').length > 0,
+			g.host.querySelectorAll('.re-fz-odd').length + ' ringed');
+
+		// A finding belongs to the lens position it was measured at.
+		gr('3\u00d73').click();
+		await pause(80);
+		q(g.host, 'focus-far').dispatchEvent(new PointerEvent('pointerdown', { button: 0, bubbles: true }));
+		q(g.host, 'focus-far').dispatchEvent(new PointerEvent('pointerup', { button: 0, bubbles: true }));
+		await pause(150);
+		t('driving the lens by hand drops the old findings',
+			g.host.querySelectorAll('.re-fz-odd').length === 0,
+			g.host.querySelectorAll('.re-fz-odd').length + ' left');
+		// A new frame is a different scene; a ring left over from the last one
+		// points at a zone that no longer means anything.
+		q(g.host, 'af-measure').click();
+		for (let i = 0; i < 300 && q(g.host, 'af-measure').hidden; i++) await pause(100);
+		t('the findings come back', g.host.querySelectorAll('.re-fz-odd').length > 0);
+		await g.ed.open(bytes, 'fixture.dng');
+		await pause(300);
+		[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+		await pause(150);
+		t('and a new frame drops them',
+			g.host.querySelectorAll('.re-fz-odd').length === 0,
+			g.host.querySelectorAll('.re-fz-odd').length + ' left');
+	}
+	g.ed.destroy();
+
+	// A host with nothing to settle said so, and `0 || 700` turned that into
+	// the full production wait twice per step -- 11s of doing nothing, in
+	// exactly the case that asked for none.
+	g = await mk({ lens: true, settle: 0 });
+	{
+		const began = Date.now();
+		q(g.host, 'af-measure').click();
+		for (let i = 0; i < 300 && q(g.host, 'af-measure').hidden; i++) await pause(50);
+		const took = Date.now() - began;
+		t('a settle of zero is a value, not an absence', took < 3000, took + 'ms');
 	}
 	g.ed.destroy();
 

@@ -292,9 +292,15 @@ export function sweepZones(frames, opts = {}) {
 	if (!Array.isArray(frames) || frames.length < 3)
 		throw new Error(`a sweep needs at least three readings, got ${frames && frames.length}`);
 	const n = frames[0].fv.length;
-	for (const f of frames)
-		if (f.fv.length !== n)
+	const rows = frames[0].rows, cols = frames[0].cols;
+	/* Shape, not just count. Every index here is read back as a row and a
+	 * column through the CURRENT grid's width, so two grids of the same size
+	 * and different shape put the same index in a different part of the
+	 * picture -- and a ring drawn over the wrong zone is worse than none. */
+	for (const f of frames) {
+		if (f.fv.length !== n || f.rows !== rows || f.cols !== cols)
 			throw new Error('the grid changed shape during the sweep');
+	}
 
 	/* How much a zone has to move before its peak position means anything. A
 	 * zone reading the same at every position -- a blank wall, a patch of sky
@@ -308,21 +314,32 @@ export function sweepZones(frames, opts = {}) {
 
 	const peakAt = new Array(n).fill(null);
 	for (let i = 0; i < n; i++) {
-		let hi = -1, lo = Infinity, at = -1, ever = false;
+		let hi = -1, lo = Infinity, at = -1, ever = false, pinned = false;
 		for (let f = 0; f < frames.length; f++) {
+			if (frames[f].sat && frames[f].sat[i]) pinned = true;
 			if (frames[f].state[i] !== 'measured') continue;
 			ever = true;
 			const v = frames[f].fv[i];
 			if (v > hi) { hi = v; at = f; }
 			if (v < lo) lo = v;
 		}
+		/* A zone that hit the counter's ceiling anywhere along the sweep has
+		 * no usable peak POSITION, which is a separate loss from the one the
+		 * ratio suffers. Clamped readings plateau, the first of them wins the
+		 * argmax, and where the counter happened to fill up is not where the
+		 * lens was sharpest -- so the zone would be accused of focusing
+		 * somewhere else on the strength of an artefact. `state` cannot carry
+		 * this: summarise keeps saturation separate on purpose, because a
+		 * pinned zone is still perfectly well exposed. */
+		if (pinned) continue;
 		/* Never measured, or never moved. No opinion either way. */
 		if (!ever || hi <= 0 || (hi - lo) / hi < swing) continue;
 		peakAt[i] = at;
 	}
 
 	const heard = peakAt.filter((v) => v !== null).sort((a, b) => a - b);
-	if (!heard.length) return { consensus: null, peakAt, suspect: [], heard: 0 };
+	if (!heard.length)
+		return { consensus: null, peakAt, suspect: [], heard: 0, rows, cols };
 	/* Median, not mean. One smeared corner peaking at the far end of the sweep
 	 * drags a mean toward itself and then measures everything else against a
 	 * consensus it invented. */
@@ -331,5 +348,7 @@ export function sweepZones(frames, opts = {}) {
 	const suspect = [];
 	for (let i = 0; i < n; i++)
 		if (peakAt[i] !== null && Math.abs(peakAt[i] - consensus) > far) suspect.push(i);
-	return { consensus, peakAt, suspect, heard: heard.length, far };
+	/* The shape travels with the finding. A consumer holding these indices
+	 * across a grid change would otherwise place them by the new width. */
+	return { consensus, peakAt, suspect, heard: heard.length, far, rows, cols };
 }

@@ -1290,6 +1290,8 @@ console.log('\nfocus statistics: the grid a person focuses a lens by');
 		const frames = [0, 1, 2, 3, 4].map((p) => ({
 			fv: scene.map((c) => c[p]),
 			state: scene.map(() => 'measured'),
+			sat: scene.map(() => false),
+			rows: 1, cols: 4,
 		}));
 		const r = A.sweepZones(frames);
 		check('the scene agrees where focus is', r.consensus, 3);
@@ -1297,10 +1299,7 @@ console.log('\nfocus statistics: the grid a person focuses a lens by');
 
 		// A zone that never moves has an argmax and it is noise. Asking it
 		// where it focuses gets an answer indistinguishable from a real one.
-		const flat = frames.map((f, p) => ({
-			fv: [...f.fv.slice(0, 3), 500],
-			state: f.state,
-		}));
+		const flat = frames.map((f) => ({ ...f, fv: [...f.fv.slice(0, 3), 500] }));
 		const rf = A.sweepZones(flat);
 		check('a zone that never moved is not accused', rf.suspect.includes(3), false);
 		check('and is not counted as having an opinion', rf.peakAt[3], null);
@@ -1309,12 +1308,48 @@ console.log('\nfocus statistics: the grid a person focuses a lens by');
 		// toward itself and then judge everything else against it.
 		const smear = [curve(4), curve(4), curve(0), curve(4), curve(4)];
 		const rs = A.sweepZones([0, 1, 2, 3, 4].map((p) => ({
-			fv: smear.map((c) => c[p]), state: smear.map(() => 'measured') })));
+			fv: smear.map((c) => c[p]), state: smear.map(() => 'measured'),
+			sat: smear.map(() => false), rows: 1, cols: 5 })));
 		check('the consensus is the median', rs.consensus, 4);
 
 		let short = false;
 		try { A.sweepZones([{ fv: [1], state: ['measured'] }]); } catch { short = true; }
 		assert('a sweep too short to have a shape is refused', short);
+
+		// A clamped zone plateaus, so the FIRST ceiling reading wins its
+		// argmax -- and where the counter filled up is not where the lens was
+		// sharpest. Judged on that, the zone gets accused of focusing
+		// somewhere else on the strength of an artefact. `state` cannot carry
+		// this: a pinned zone is still perfectly well exposed.
+		{
+			const pin = [0, 1, 2, 3, 4].map((p) => ({
+				fv: scene.map((c) => c[p]),
+				state: scene.map(() => 'measured'),
+				// zone 1 is the outlier; say its counter was full throughout
+				sat: [false, true, false, false],
+				rows: 1, cols: 4,
+			}));
+			const rp = A.sweepZones(pin);
+			check('a clamped zone is given no peak position', rp.peakAt[1], null);
+			check('so it is not accused of focusing elsewhere', rp.suspect, []);
+			// ...and the rest of the frame still has its say.
+			check('while the others still agree', rp.consensus, 3);
+		}
+
+		// Two grids of the same SIZE and different shape put the same index in
+		// a different part of the picture, and a ring over the wrong zone is
+		// worse than no ring.
+		{
+			const one = (r, c) => ({ fv: [1, 2, 3, 4], state: Array(4).fill('measured'),
+				sat: Array(4).fill(false), rows: r, cols: c });
+			let reshaped = false;
+			try { A.sweepZones([one(1, 4), one(2, 2), one(1, 4)]); } catch { reshaped = true; }
+			assert('a grid that changed shape mid-sweep is refused', reshaped);
+		}
+
+		// The finding travels with the shape it was measured on, so a consumer
+		// cannot place it by some later grid's width.
+		check('a finding carries its own shape', [r.rows, r.cols], [1, 4]);
 	}
 
 	// A grid whose length disagrees with its shape would still draw -- shifted,

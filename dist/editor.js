@@ -3982,6 +3982,10 @@ export function mountEditor(root, {
 	 * lens can never be beaten, so it reads as "you are getting worse". */
 	function resetFocusState() {
 		focusSum = null; focusBest = null; focusErr = null; focusHold = null;
+		/* Measured against one scene, one lens position and one filter. A new
+		 * frame is none of those, and a ring left over from the last one
+		 * points at a zone that no longer means anything. */
+		focusOdd = null;
 	}
 
 	/* One grid, summarised. Shared by the poll and by the sweep so the two
@@ -4221,6 +4225,9 @@ export function mountEditor(root, {
 			 * moving. */
 			if (moveVerb) return;
 			moveVerb = verb;
+			/* Driving the lens by hand moves everything the findings were
+			 * measured against. */
+			focusOdd = null;
 			movePointer = (ev && ev.pointerId !== undefined) ? ev.pointerId : null;
 			moveGen++;
 			/* Armed BEFORE the first ask. Arming them after meant a move that
@@ -4308,7 +4315,11 @@ export function mountEditor(root, {
 	 * host seam like intervalMs and moveRepeatMs: a motor that settles faster
 	 * than this is being waited on for nothing, and a test driving a fixture
 	 * has nothing to settle at all. */
-	const settleMs = () => (focus && focus.sweepSettleMs) || SWEEP_SETTLE_MS;
+	/* `!== undefined`, not truthiness: 0 is a real answer here -- a host with
+	 * nothing to settle -- and `0 || 700` turns it into the full production
+	 * wait, twice per step, in exactly the case that asked for none. */
+	const settleMs = () => (focus && focus.sweepSettleMs !== undefined
+		? focus.sweepSettleMs : SWEEP_SETTLE_MS);
 	let sweepGen = 0;
 	/* A sweep in flight when the editor is torn down still has a return walk to
 	 * finish -- the lens is real and must go back -- but what it must NOT do is
@@ -4373,7 +4384,8 @@ export function mountEditor(root, {
 					 * distance that part of the frame is at. Throwing all but
 					 * the maximum away discards the only measurement that can
 					 * see dirt on the glass. */
-					frames.push({ fv: s.fv, state: s.state });
+					frames.push({ fv: s.fv, state: s.state, sat: s.satZone,
+						rows: s.rows, cols: s.cols });
 				} catch (e) {
 					failed = e && e.message ? e.message : String(e);
 					break;
@@ -4428,7 +4440,8 @@ export function mountEditor(root, {
 		/* Needs a sweep with a shape to it. A run cut short by a stop or a
 		 * refused move has too few positions for an argmax to mean anything. */
 		try { odd = sweepZones(frames); } catch (e) { odd = null; }
-		focusOdd = odd && odd.suspect.length ? odd.suspect : null;
+		focusOdd = odd && odd.suspect.length
+			? { idx: odd.suspect, rows: odd.rows, cols: odd.cols } : null;
 		drawFocusMarks();
 		return { hi: hi, lo: lo, ratio: lo > 0 ? hi / lo : null, n: vals.length,
 			lost: lost, back: back, pinned: pinned, steps: vals.length,
@@ -4656,7 +4669,8 @@ export function mountEditor(root, {
 				/* The held best is from the old filter and cannot be compared
 				 * with what this one reads -- different filters count detail
 				 * differently, so the number to beat has to start again. */
-				focusHold = null; focusBest = null;
+				/* Findings belong to the filter they were measured under. */
+				focusHold = null; focusBest = null; focusOdd = null;
 				renderFocus();
 				startFocusPoll();
 				armHold(status, send, Math.max(5, focus.holdSeconds || 30),
@@ -4828,7 +4842,8 @@ export function mountEditor(root, {
 			/* Restarted, not merely cleared and re-read: a read still in flight
 			 * would otherwise land afterwards and push the very peak that was
 			 * just discarded back into a fresh hold. */
-			focusHold = null; focusBest = null;
+			/* Findings belong to the filter they were measured under. */
+			focusHold = null; focusBest = null; focusOdd = null;
 			renderFocus();
 			startFocusPoll();
 		});
@@ -4864,6 +4879,26 @@ export function mountEditor(root, {
 	 * of the frame. Cleared whenever the lens or the filter moves under it. */
 	let focusOdd = null;
 
+	/* A finding is only about the grid it was measured on. Indices are read
+	 * back as a row and a column through the CURRENT width, so a camera that
+	 * changed shape between the sweep and now would have them pointing at
+	 * whatever happens to sit at that offset. */
+	function oddHere(s) {
+		if (!focusOdd) return null;
+		if (focusOdd.rows !== s.rows || focusOdd.cols !== s.cols) return null;
+		return focusOdd.idx;
+	}
+
+	function oddRing(svg, NS, x, y, w, h) {
+		const ring = document.createElementNS(NS, 'rect');
+		ring.setAttribute('x', x + 1.5);
+		ring.setAttribute('y', y + 1.5);
+		ring.setAttribute('width', Math.max(0, w - 3));
+		ring.setAttribute('height', Math.max(0, h - 3));
+		ring.setAttribute('class', 're-fz-odd');
+		svg.append(ring);
+	}
+
 	function drawCoarse(svg, s, W, H, NS) {
 		const c = coarsen(s, focusBlocks);
 		const top = c.best === null ? null : c.blocks[c.best].value;
@@ -4888,20 +4923,13 @@ export function mountEditor(root, {
 			}
 			svg.append(cell);
 
-			const odd = focusOdd && focusOdd.some((i) => {
+			const marked = oddHere(s);
+			const odd = marked && marked.some((i) => {
 				const r = (i / s.cols) | 0, cc = i % s.cols;
 				return r >= b.rowSpan[0] && r < b.rowSpan[1] &&
 					cc >= b.colSpan[0] && cc < b.colSpan[1];
 			});
-			if (odd) {
-				const ring = document.createElementNS(NS, 'rect');
-				ring.setAttribute('x', a0.x + 2);
-				ring.setAttribute('y', a0.y + 2);
-				ring.setAttribute('width', Math.max(0, w - 4));
-				ring.setAttribute('height', Math.max(0, h - 4));
-				ring.setAttribute('class', 're-fz-odd');
-				svg.append(ring);
-			}
+			if (odd) oddRing(svg, NS, a0.x, a0.y, w, h);
 
 			const label = document.createElementNS(NS, 'text');
 			label.setAttribute('x', a0.x + w / 2);
@@ -4970,6 +4998,20 @@ export function mountEditor(root, {
 				cell.setAttribute('fill-opacity', (0.08 + 0.62 * shade[i]).toFixed(3));
 			}
 			svg.append(cell);
+		}
+		/* The reason to switch to every zone is to see exactly which ones were
+		 * flagged, so this is the last view that should drop the rings -- and
+		 * it did, while the verdict went on saying they were on the picture. */
+		const marked = oddHere(s);
+		if (marked) {
+			for (const i of marked) {
+				const r = (i / s.cols) | 0, c = i % s.cols;
+				const a2 = stageCoords((c * W) / s.cols, (r * H) / s.rows);
+				const b2 = stageCoords(((c + 1) * W) / s.cols, ((r + 1) * H) / s.rows);
+				if (!a2 || !b2) continue;
+				oddRing(svg, NS, a2.x, a2.y,
+					Math.max(0, b2.x - a2.x), Math.max(0, b2.y - a2.y));
+			}
 		}
 		if (s.peakAt) {
 			const r = s.peakAt.row, c = s.peakAt.col;
