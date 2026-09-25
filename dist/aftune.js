@@ -141,6 +141,8 @@ export function summarise(zones, rows, cols, opts = {}) {
 		unlit: state.filter((s) => s === 'unlit').length,
 		clipped: state.filter((s) => s === 'clipped').length,
 		saturated: sat.filter(Boolean).length,
+		/* Per zone, for anything drawing the grid or reducing it further. */
+		satZone: sat,
 		/* The one that decides whether a comparison is worth anything: the
 		 * grid's own peak sitting at the ceiling is what makes a sweep flat.
 		 *
@@ -198,4 +200,136 @@ export function peakHold() {
 export function normalise(sum, ceiling) {
 	const top = ceiling || sum.peak || 1;
 	return sum.fv.map((v, i) => (sum.state[i] === 'measured' ? Math.min(1, v / top) : null));
+}
+
+/*
+ * A readable grid.
+ *
+ * 255 coloured cells show that there is a bright patch somewhere and say
+ * nothing about what anything reads. Someone calibrating autofocus wants a
+ * number they can compare between parts of the frame, which means far fewer
+ * cells and the value printed in each.
+ *
+ * The fine grid stays the measurement -- this only reduces it for display, so
+ * nothing here can change where the peak actually is.
+ *
+ * Blocks are sized by boundary rather than by a constant width, because
+ * neither 15 rows nor 17 columns divides evenly by anything an operator would
+ * want to look at: 3 across leaves columns of 5, 6 and 6. The value is the
+ * MEAN over the measured zones in the block, not the sum, so blocks of
+ * different sizes stay comparable -- and not the maximum, which is the
+ * reduction clamping already defeats.
+ */
+function bounds(len, n) {
+	const out = [];
+	for (let b = 0; b < n; b++)
+		out.push([Math.floor(b * len / n), Math.floor((b + 1) * len / n)]);
+	return out;
+}
+
+export function coarsen(s, n) {
+	if (!Number.isSafeInteger(n) || n <= 0)
+		throw new Error(`not a block count: ${n}`);
+	/* Asking for more blocks than there are zones would hand back empty cells
+	 * reported as "nothing measurable", which is a different claim entirely. */
+	const rowsN = Math.min(n, s.rows), colsN = Math.min(n, s.cols);
+	const rb = bounds(s.rows, rowsN), cb = bounds(s.cols, colsN);
+	const blocks = [];
+	for (let br = 0; br < rowsN; br++) {
+		for (let bc = 0; bc < colsN; bc++) {
+			const [r0, r1] = rb[br], [c0, c1] = cb[bc];
+			let sum = 0, measured = 0, saturated = 0, total = 0;
+			for (let r = r0; r < r1; r++) {
+				for (let c = c0; c < c1; c++) {
+					const i = r * s.cols + c;
+					total++;
+					if (s.state[i] !== 'measured') continue;
+					measured++;
+					sum += s.fv[i];
+				}
+			}
+			for (let r = r0; r < r1; r++)
+				for (let c = c0; c < c1; c++)
+					if (s.satZone && s.satZone[r * s.cols + c]) saturated++;
+			blocks.push({
+				row: br, col: bc, rowSpan: [r0, r1], colSpan: [c0, c1],
+				/* null, not 0. A block with nothing worth believing in it has
+				 * no value, and zero is a value -- one that sorts below every
+				 * real block and reads as "measured, and very soft". */
+				value: measured ? Math.round(sum / measured) : null,
+				measured, total, saturated,
+			});
+		}
+	}
+	let best = null;
+	for (const b of blocks)
+		if (b.value !== null && (best === null || b.value > blocks[best].value))
+			best = blocks.indexOf(b);
+	return { rows: rowsN, cols: colsN, blocks, best };
+}
+
+/*
+ * What a defocus sweep says about each zone SEPARATELY.
+ *
+ * A sweep walks the lens and reads the whole grid at every stop, so it already
+ * holds one focus curve per zone -- and the position where a zone peaks is the
+ * distance that part of the frame is at. The scene mostly agrees; anything
+ * that disagrees sharply is at a different distance from everything else.
+ *
+ * The common cause is nothing in the scene at all: dirt on the dome, a spider
+ * web, a leaf against the glass. Those sit a few millimetres from the lens, so
+ * they come into focus nowhere near where the picture does, and they are
+ * exactly what drags a cheap autofocus onto the glass and keeps it there. An
+ * operator cannot see this on a live image -- a smear reads as a soft patch --
+ * but across a sweep it is unmistakable.
+ *
+ * It is reported as "focuses at a different distance", which is what was
+ * measured. A near object that is genuinely part of the scene produces the
+ * same signature and is not a fault; naming the cause is the operator's job,
+ * and the two need looking at with the same eye anyway.
+ */
+export function sweepZones(frames, opts = {}) {
+	if (!Array.isArray(frames) || frames.length < 3)
+		throw new Error(`a sweep needs at least three readings, got ${frames && frames.length}`);
+	const n = frames[0].fv.length;
+	for (const f of frames)
+		if (f.fv.length !== n)
+			throw new Error('the grid changed shape during the sweep');
+
+	/* How much a zone has to move before its peak position means anything. A
+	 * zone reading the same at every position -- a blank wall, a patch of sky
+	 * -- has an argmax, and it is noise. Asking it where it focuses gets an
+	 * answer indistinguishable from a confident one. */
+	const swing = opts.swing !== undefined ? opts.swing : 0.25;
+	/* How far from the rest of the frame counts as a different distance, as a
+	 * fraction of the sweep. Below this it is the same subject and the usual
+	 * disagreement between parts of it. */
+	const apart = opts.apart !== undefined ? opts.apart : 0.3;
+
+	const peakAt = new Array(n).fill(null);
+	for (let i = 0; i < n; i++) {
+		let hi = -1, lo = Infinity, at = -1, ever = false;
+		for (let f = 0; f < frames.length; f++) {
+			if (frames[f].state[i] !== 'measured') continue;
+			ever = true;
+			const v = frames[f].fv[i];
+			if (v > hi) { hi = v; at = f; }
+			if (v < lo) lo = v;
+		}
+		/* Never measured, or never moved. No opinion either way. */
+		if (!ever || hi <= 0 || (hi - lo) / hi < swing) continue;
+		peakAt[i] = at;
+	}
+
+	const heard = peakAt.filter((v) => v !== null).sort((a, b) => a - b);
+	if (!heard.length) return { consensus: null, peakAt, suspect: [], heard: 0 };
+	/* Median, not mean. One smeared corner peaking at the far end of the sweep
+	 * drags a mean toward itself and then measures everything else against a
+	 * consensus it invented. */
+	const consensus = heard[heard.length >> 1];
+	const far = Math.max(1, Math.round((frames.length - 1) * apart));
+	const suspect = [];
+	for (let i = 0; i < n; i++)
+		if (peakAt[i] !== null && Math.abs(peakAt[i] - consensus) > far) suspect.push(i);
+	return { consensus, peakAt, suspect, heard: heard.length, far };
 }

@@ -15,7 +15,7 @@
 import { solveFromPatches, patchCentres, scoreCcm, CHART_COLS, CHART_ROWS } from './calibrate.js';
 import { parseIni, readColour, fitAwbCurve, gainsForCt, mergeCcmTables, colourFragment,
 	readDefectCorrection, enableDefectCorrection } from './iqprofile.js';
-import { summarise, peakHold, normalise } from './aftune.js';
+import { summarise, peakHold, normalise, coarsen, sweepZones } from './aftune.js';
 
 const CFA_NAMES = ['RGGB', 'GRBG', 'GBRG', 'BGGR'];
 const DEMOSAIC = [
@@ -4304,6 +4304,11 @@ export function mountEditor(root, {
 	 */
 	const SWEEP_STEPS = 8;
 	const SWEEP_SETTLE_MS = 700;
+	/* How long the lens is left alone after a step before the grid is read. A
+	 * host seam like intervalMs and moveRepeatMs: a motor that settles faster
+	 * than this is being waited on for nothing, and a test driving a fixture
+	 * has nothing to settle at all. */
+	const settleMs = () => (focus && focus.sweepSettleMs) || SWEEP_SETTLE_MS;
 	let sweepGen = 0;
 	/* A sweep in flight when the editor is torn down still has a return walk to
 	 * finish -- the lens is real and must go back -- but what it must NOT do is
@@ -4342,7 +4347,7 @@ export function mountEditor(root, {
 	async function sweepRun(say, onStep) {
 		const gen = ++sweepGen;
 		const mine = () => gen === sweepGen;
-		const vals = [];
+		const vals = [], frames = [];
 		let out = 0, failed = null, lost = 0, pinned = 0;
 		/* The poll is stopped for the duration: it and the sweep would be
 		 * asking the same camera for the same grid at once, and its answers
@@ -4350,6 +4355,8 @@ export function mountEditor(root, {
 		 * The manual controls go with it -- see ownLens. */
 		stopFocusPoll();
 		ownLens(true);
+		/* Last sweep's findings belong to last sweep's lens and filter. */
+		focusOdd = null;
 		try {
 			for (let i = 0; i <= SWEEP_STEPS; i++) {
 				if (!mine()) break;
@@ -4360,6 +4367,13 @@ export function mountEditor(root, {
 					 * pinned reading anywhere along it is enough to make the
 					 * spread an understatement. */
 					if (s.peakSaturated) pinned++;
+					/* Kept whole, not reduced to its peak. The sweep already
+					 * reads every zone at every position, so it holds one
+					 * focus curve per zone -- and where each zone peaks is the
+					 * distance that part of the frame is at. Throwing all but
+					 * the maximum away discards the only measurement that can
+					 * see dirt on the glass. */
+					frames.push({ fv: s.fv, state: s.state });
 				} catch (e) {
 					failed = e && e.message ? e.message : String(e);
 					break;
@@ -4375,7 +4389,7 @@ export function mountEditor(root, {
 					break;
 				}
 				out++;
-				await pause(SWEEP_SETTLE_MS);
+				await pause(settleMs());
 			}
 		} finally {
 			/* Every step taken is a step given back, and NOT conditional on the
@@ -4391,7 +4405,7 @@ export function mountEditor(root, {
 				 * end -- claiming the lens is back when a step was refused is
 				 * the one outcome worse than saying nothing. */
 				if (!(await moveOnce('near'))) lost++;
-				await pause(SWEEP_SETTLE_MS);
+				await pause(settleMs());
 				onStep(SWEEP_STEPS + i + 1, SWEEP_STEPS * 2);
 			}
 			await moveOnce('stop');
@@ -4410,8 +4424,16 @@ export function mountEditor(root, {
 		if (!mine()) return { stopped: true, lost: lost, back: back };
 		if (!vals.length) return { failed: 'nothing measurable along the sweep.' + back, lost: lost };
 		const hi = Math.max.apply(null, vals), lo = Math.min.apply(null, vals);
+		let odd = null;
+		/* Needs a sweep with a shape to it. A run cut short by a stop or a
+		 * refused move has too few positions for an argmax to mean anything. */
+		try { odd = sweepZones(frames); } catch (e) { odd = null; }
+		focusOdd = odd && odd.suspect.length ? odd.suspect : null;
+		drawFocusMarks();
 		return { hi: hi, lo: lo, ratio: lo > 0 ? hi / lo : null, n: vals.length,
-			lost: lost, back: back, pinned: pinned, steps: vals.length };
+			lost: lost, back: back, pinned: pinned, steps: vals.length,
+			odd: odd && odd.suspect.length ? odd.suspect.length : 0,
+			heard: odd ? odd.heard : 0 };
 	}
 
 
@@ -4699,12 +4721,28 @@ export function mountEditor(root, {
 					 * everywhere is worse than a quiet one that falls away,
 					 * and the peak alone cannot tell them apart -- which is
 					 * exactly the mistake this button exists to prevent. */
+					/* The finding that matters most for calibration, and the
+					 * one an operator cannot get from a live image: a smear on
+					 * the dome reads as a soft patch and nothing more. Across
+					 * a sweep it peaks at a lens position nowhere near the
+					 * rest of the frame, because it is a few millimetres away.
+					 * That is what drags a cheap autofocus onto the glass and
+					 * keeps it there. */
+					const aside = r.odd
+						? ' ' + r.odd + ' of the ' + r.heard + ' zones that ' +
+							'responded focus at a different distance from the rest ' +
+							'of the frame, ringed on the picture. Dirt on the dome, ' +
+							'a web or something up against the glass will do that, ' +
+							'and autofocus will chase it \u2014 check them before ' +
+							'trusting a calibration.'
+						: '';
 					say((r.ratio === null
 						? 'Highest ' + r.hi + ', lowest ' + r.lo + ' across the sweep.'
 						: 'Falls to 1/' + r.ratio.toFixed(1) + ' of its peak across the ' +
 							'sweep (' + r.hi + ' down to ' + r.lo + '). A filter worth ' +
-							'keeping falls away steeply; a loud one barely moves.') + r.back,
-						!!r.lost);
+							'keeping falls away steeply; a loud one barely moves.') +
+						r.back + aside,
+						!!r.lost || !!r.odd);
 				}).catch(function (e) {
 					busy(false);
 					say('Could not measure it: ' + (e && e.message ? e.message : e), true);
@@ -4759,6 +4797,28 @@ export function mountEditor(root, {
 			});
 		}
 
+		/* How coarse the readout is. The fine grid is still what gets measured
+		 * -- this only changes what is drawn over the picture. */
+		const grain = el('div', 're-seg');
+		grain.dataset.act = 'focus-grain';
+		[[3, '3\u00d73'], [4, '4\u00d74'], [0, 'All zones']].forEach(function (pair) {
+			const b = el('button', '', '');
+			b.type = 'button';
+			b.dataset.act = 'grain-' + pair[0];
+			b.textContent = pair[1];
+			b.setAttribute('aria-pressed', focusBlocks === pair[0] ? 'true' : 'false');
+			b.addEventListener('click', function () {
+				focusBlocks = pair[0];
+				[...grain.children].forEach(function (o) {
+					o.setAttribute('aria-pressed',
+						o === b ? 'true' : 'false');
+				});
+				drawFocusMarks();
+			});
+			grain.append(b);
+		});
+		row.append(grain);
+
 		const reset = el('button', 're-btn', '');
 		reset.dataset.act = 'focus-reset';
 		reset.textContent = 'Reset the best';
@@ -4795,6 +4855,87 @@ export function mountEditor(root, {
 	 * the mapping is arithmetic. A camera that cropped its AF window would need
 	 * the grid's own boundaries, and this would be wrong -- but it would be
 	 * wrong visibly, the grid sitting over part of the picture. */
+	/* How many blocks across the readable grid is reduced to; 0 is the full
+	 * measured grid. 255 coloured cells show that there is a bright patch
+	 * somewhere and say nothing about what any of it reads, and the first
+	 * person to calibrate autofocus with this said so. */
+	let focusBlocks = 3;
+	/* Zones the last sweep found focusing at a different distance from the rest
+	 * of the frame. Cleared whenever the lens or the filter moves under it. */
+	let focusOdd = null;
+
+	function drawCoarse(svg, s, W, H, NS) {
+		const c = coarsen(s, focusBlocks);
+		const top = c.best === null ? null : c.blocks[c.best].value;
+		for (const b of c.blocks) {
+			const a0 = stageCoords((b.colSpan[0] * W) / s.cols, (b.rowSpan[0] * H) / s.rows);
+			const b0 = stageCoords((b.colSpan[1] * W) / s.cols, (b.rowSpan[1] * H) / s.rows);
+			if (!a0 || !b0) continue;
+			const w = Math.max(0, b0.x - a0.x), h = Math.max(0, b0.y - a0.y);
+			const cell = document.createElementNS(NS, 'rect');
+			cell.setAttribute('x', a0.x);
+			cell.setAttribute('y', a0.y);
+			cell.setAttribute('width', w);
+			cell.setAttribute('height', h);
+			if (b.value === null) {
+				cell.setAttribute('class', 're-fz re-fz-none');
+			} else {
+				cell.setAttribute('class', 're-fz');
+				/* Against the best block, so the brightest cell is the one to
+				 * focus on rather than whatever the scale happens to reach. */
+				cell.setAttribute('fill-opacity',
+					(0.08 + 0.52 * (top ? b.value / top : 0)).toFixed(3));
+			}
+			svg.append(cell);
+
+			const odd = focusOdd && focusOdd.some((i) => {
+				const r = (i / s.cols) | 0, cc = i % s.cols;
+				return r >= b.rowSpan[0] && r < b.rowSpan[1] &&
+					cc >= b.colSpan[0] && cc < b.colSpan[1];
+			});
+			if (odd) {
+				const ring = document.createElementNS(NS, 'rect');
+				ring.setAttribute('x', a0.x + 2);
+				ring.setAttribute('y', a0.y + 2);
+				ring.setAttribute('width', Math.max(0, w - 4));
+				ring.setAttribute('height', Math.max(0, h - 4));
+				ring.setAttribute('class', 're-fz-odd');
+				svg.append(ring);
+			}
+
+			const label = document.createElementNS(NS, 'text');
+			label.setAttribute('x', a0.x + w / 2);
+			label.setAttribute('y', a0.y + h / 2);
+			label.setAttribute('class', 're-fz-num');
+			/* Scaled to the cell and clamped: a 5-block grid on a phone gets
+			 * cells too small for 13px, and a 2-block grid on a desktop would
+			 * otherwise print a number the size of a caption. */
+			label.setAttribute('font-size',
+				Math.max(9, Math.min(17, Math.round(Math.min(w / 4.2, h / 2.6)))));
+			/* Thin spaces every three digits. A six-figure number with no
+			 * grouping is exactly the thing this grid was asked to fix. */
+			label.textContent = b.value === null
+				? '\u2014' : String(b.value).replace(/\B(?=(\d{3})+(?!\d))/g, '\u2009');
+			svg.append(label);
+
+			if (c.best !== null && b === c.blocks[c.best] && b.value !== null) {
+				const pk = document.createElementNS(NS, 'rect');
+				pk.setAttribute('x', a0.x);
+				pk.setAttribute('y', a0.y);
+				pk.setAttribute('width', w);
+				pk.setAttribute('height', h);
+				pk.setAttribute('class', 're-fz-peak');
+				svg.append(pk);
+				const tag = document.createElementNS(NS, 'text');
+				tag.setAttribute('x', a0.x + w / 2);
+				tag.setAttribute('y', a0.y + h / 2 + Math.min(20, h / 3.4));
+				tag.setAttribute('class', 're-fz-tag');
+				tag.textContent = 'sharpest';
+				svg.append(tag);
+			}
+		}
+	}
+
 	function drawFocusMarks() {
 		focusMarks.replaceChildren();
 		if (mode !== 'focus' || !focusSum || !state.info) return;
@@ -4804,6 +4945,11 @@ export function mountEditor(root, {
 		const NS = 'http://www.w3.org/2000/svg';
 		const svg = document.createElementNS(NS, 'svg');
 		svg.setAttribute('class', 're-chart-svg');
+		if (focusBlocks) {
+			drawCoarse(svg, s, W, H, NS);
+			focusMarks.append(svg);
+			return;
+		}
 		for (let i = 0; i < s.fv.length; i++) {
 			const r = (i / s.cols) | 0, c = i % s.cols;
 			const a = stageCoords((c * W) / s.cols, (r * H) / s.rows);
