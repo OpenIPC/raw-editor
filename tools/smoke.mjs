@@ -1278,6 +1278,87 @@ console.log('\nfocus statistics: the grid a person focuses a lens by');
 		assert('a zero block count is refused', refused);
 	}
 
+	// A blank wall, a patch of sky, a smooth door: all report a small focus
+	// value wherever the lens is, because there is no detail there to measure.
+	// Shown as a bare small number it reads as "this part is soft", and the
+	// operator chases focus that was never the problem. Reported on the very
+	// first calibration: "на 9 квадрате не нашлось резких объектов и ему
+	// маленькую цифру дали".
+	{
+		const hold = A.peakHold();
+		const frame = (a, b) => A.summarise([zone({ h2: a }), zone({ h2: b })], 1, 2);
+		// Nothing has moved yet. "We have not looked" and "there is nothing
+		// there" are different answers and only one is the operator's problem.
+		let h = hold.push(frame(900, 500));
+		check('before the lens moves, nothing is claimed', A.zoneDetail(h), ['unknown', 'unknown']);
+
+		// Zone 0 responds as the lens sweeps; zone 1 never budges.
+		h = hold.push(frame(200, 500));
+		h = hold.push(frame(1400, 502));
+		const d = A.zoneDetail(h);
+		check('a zone that responded has something in it', d[0], 'some');
+		check('a zone that never moved has not', d[1], 'none');
+
+		// And it travels into the readable grid.
+		const s = A.summarise([zone({ h2: 1400 }), zone({ h2: 502 })], 1, 2);
+		const c = A.coarsen(s, 2, { detail: d });
+		check('the block carries it', [c.blocks[0].detail, c.blocks[1].detail], ['some', 'none']);
+
+		// One textured corner is enough to focus on, so a block is only called
+		// empty when every zone in it that could be measured agrees.
+		const wide = A.summarise([zone({ h2: 1400 }), zone({ h2: 502 })], 1, 2);
+		check('a block with one textured zone is not empty',
+			A.coarsen(wide, 1, { detail: d }).blocks[0].detail, 'some');
+
+		// Anything that is not one of the two real answers is "not looked at
+		// yet", not "nothing there". Read the other way round, a detail array
+		// that did not line up captioned every block on an unswept frame.
+		check('a short detail array leaves blocks unknown',
+			A.coarsen(s, 2, { detail: [] }).blocks[0].detail, 'unknown');
+		check('and so does no array at all', A.coarsen(s, 2).blocks[0].detail, 'unknown');
+
+		// A lit zone reading zero at every position is the emptiest zone there
+		// is. null is "never measured" and stays unknown; zero is a READING,
+		// and skipping it left the block most in need of the caption without
+		// one.
+		{
+			const h2 = A.peakHold();
+			const z = (a, b) => A.summarise([zone({ h2: a }), zone({ h2: b })], 1, 2);
+			h2.push(z(0, 900));
+			h2.push(z(0, 200));
+			const dz = A.zoneDetail(h2.push(z(0, 1500)));
+			check('a zone that reads zero throughout is empty, not unknown', dz[0], 'none');
+			check('while the one that moved is not', dz[1], 'some');
+		}
+
+		// The held record belongs to a SHAPE. Two grids of the same size and
+		// different shape put the same index somewhere else in the picture,
+		// and the overall range has to go with it -- it is the gate deciding
+		// whether the lens moved at all.
+		{
+			const h3 = A.peakHold();
+			const wide = A.summarise(grid(1, 4, (i) => zone({ h2: i ? 100 : 900 })), 1, 4);
+			const tall = A.summarise(grid(2, 2, (i) => zone({ h2: i ? 100 : 900 })), 2, 2);
+			h3.push(wide);
+			h3.push(A.summarise(grid(1, 4, () => zone({ h2: 100 })), 1, 4));
+			assert('the lens has visibly moved on the old shape',
+				A.zoneDetail(h3.push(wide)).some((d) => d !== 'unknown'));
+			// Same zone count, different shape: the record cannot carry over.
+			check('a reshaped grid starts the record again',
+				A.zoneDetail(h3.push(tall)), ['unknown', 'unknown', 'unknown', 'unknown']);
+		}
+
+		// An empty block can never be the sharpest: it has nothing in it that
+		// focus could sharpen, and naming it points the operator at the one
+		// part of the frame that can never answer.
+		const s2 = A.summarise([zone({ h2: 300 }), zone({ h2: 900 })], 1, 2);
+		const c2 = A.coarsen(s2, 2, { detail: ['some', 'none'] });
+		check('an empty block is never the sharpest', c2.best, 0);
+		// ...unless nothing has detail, when the alternative is naming none.
+		check('but with nothing to go on the plain maximum stands',
+			A.coarsen(s2, 2, { detail: ['none', 'none'] }).best, 1);
+	}
+
 	// Dirt on the dome focuses a few millimetres away, so across a sweep it
 	// peaks nowhere near where the picture does -- which is exactly what drags
 	// a cheap autofocus onto the glass. Invisible on a live image; unmistakable
@@ -1334,6 +1415,19 @@ console.log('\nfocus statistics: the grid a person focuses a lens by');
 			check('so it is not accused of focusing elsewhere', rp.suspect, []);
 			// ...and the rest of the frame still has its say.
 			check('while the others still agree', rp.consensus, 3);
+		}
+
+		// A lit zone whose response is zero at every position was measured and
+		// found empty, which is not the same as not being readable.
+		{
+			const zero = [0, 1, 2, 3, 4].map((p) => ({
+				fv: [0, curve(3)[p], curve(3)[p], curve(3)[p]],
+				state: Array(4).fill('measured'),
+				sat: Array(4).fill(false), rows: 1, cols: 4,
+			}));
+			const rz = A.sweepZones(zero);
+			check('a measured zero zone is flat, not unmeasured', rz.why[0], 'flat');
+			check('and it is counted as such', rz.flat, 1);
 		}
 
 		// Two grids of the same SIZE and different shape put the same index in

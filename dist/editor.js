@@ -15,7 +15,7 @@
 import { solveFromPatches, patchCentres, scoreCcm, CHART_COLS, CHART_ROWS } from './calibrate.js';
 import { parseIni, readColour, fitAwbCurve, gainsForCt, mergeCcmTables, colourFragment,
 	readDefectCorrection, enableDefectCorrection } from './iqprofile.js';
-import { summarise, peakHold, normalise, coarsen, sweepZones } from './aftune.js';
+import { summarise, peakHold, normalise, coarsen, sweepZones, zoneDetail } from './aftune.js';
 
 const CFA_NAMES = ['RGGB', 'GRBG', 'GBRG', 'BGGR'];
 const DEMOSAIC = [
@@ -4900,7 +4900,11 @@ export function mountEditor(root, {
 	}
 
 	function drawCoarse(svg, s, W, H, NS) {
-		const c = coarsen(s, focusBlocks);
+		/* focusBest, not focusHold: the holder accumulates, the push result is
+		 * what carries the record out. Handing it the holder got every block
+		 * captioned "nothing to focus on" on a frame nobody had swept. */
+		const c = coarsen(s, focusBlocks,
+			{ detail: focusBest ? zoneDetail(focusBest) : null });
 		const top = c.best === null ? null : c.blocks[c.best].value;
 		for (const b of c.blocks) {
 			const a0 = stageCoords((b.colSpan[0] * W) / s.cols, (b.rowSpan[0] * H) / s.rows);
@@ -4931,10 +4935,15 @@ export function mountEditor(root, {
 			});
 			if (odd) oddRing(svg, NS, a0.x, a0.y, w, h);
 
+			/* A block with nothing in it to focus on is not a soft block, and
+			 * a bare small number says the wrong one of those. The number is
+			 * still shown -- it is what the camera reported -- but muted and
+			 * captioned, so it stops reading as a verdict on focus. */
+			const empty = b.detail === 'none';
 			const label = document.createElementNS(NS, 'text');
 			label.setAttribute('x', a0.x + w / 2);
-			label.setAttribute('y', a0.y + h / 2);
-			label.setAttribute('class', 're-fz-num');
+			label.setAttribute('y', a0.y + (empty ? h / 2 - Math.min(9, h / 7) : h / 2));
+			label.setAttribute('class', empty ? 're-fz-num re-fz-dim' : 're-fz-num');
 			/* Scaled to the cell and clamped: a 5-block grid on a phone gets
 			 * cells too small for 13px, and a 2-block grid on a desktop would
 			 * otherwise print a number the size of a caption. */
@@ -4945,6 +4954,15 @@ export function mountEditor(root, {
 			label.textContent = b.value === null
 				? '\u2014' : String(b.value).replace(/\B(?=(\d{3})+(?!\d))/g, '\u2009');
 			svg.append(label);
+
+			if (empty) {
+				const cap = document.createElementNS(NS, 'text');
+				cap.setAttribute('x', a0.x + w / 2);
+				cap.setAttribute('y', a0.y + h / 2 + Math.min(12, h / 5));
+				cap.setAttribute('class', 're-fz-tag re-fz-dim');
+				cap.textContent = 'nothing to focus on';
+				svg.append(cap);
+			}
 
 			if (c.best !== null && b === c.blocks[c.best] && b.value !== null) {
 				const pk = document.createElementNS(NS, 'rect');
