@@ -1278,6 +1278,56 @@ console.log('\nfocus statistics: the grid a person focuses a lens by');
 		assert('a zero block count is refused', refused);
 	}
 
+	// A blank wall, a patch of sky, a smooth door: all report a small focus
+	// value wherever the lens is, because there is no detail there to measure.
+	// Shown as a bare small number it reads as "this part is soft", and the
+	// operator chases focus that was never the problem. Reported on the very
+	// first calibration: "на 9 квадрате не нашлось резких объектов и ему
+	// маленькую цифру дали".
+	{
+		const hold = A.peakHold();
+		const frame = (a, b) => A.summarise([zone({ h2: a }), zone({ h2: b })], 1, 2);
+		// Nothing has moved yet. "We have not looked" and "there is nothing
+		// there" are different answers and only one is the operator's problem.
+		let h = hold.push(frame(900, 500));
+		check('before the lens moves, nothing is claimed', A.zoneDetail(h), ['unknown', 'unknown']);
+
+		// Zone 0 responds as the lens sweeps; zone 1 never budges.
+		h = hold.push(frame(200, 500));
+		h = hold.push(frame(1400, 502));
+		const d = A.zoneDetail(h);
+		check('a zone that responded has something in it', d[0], 'some');
+		check('a zone that never moved has not', d[1], 'none');
+
+		// And it travels into the readable grid.
+		const s = A.summarise([zone({ h2: 1400 }), zone({ h2: 502 })], 1, 2);
+		const c = A.coarsen(s, 2, { detail: d });
+		check('the block carries it', [c.blocks[0].detail, c.blocks[1].detail], ['some', 'none']);
+
+		// One textured corner is enough to focus on, so a block is only called
+		// empty when every zone in it that could be measured agrees.
+		const wide = A.summarise([zone({ h2: 1400 }), zone({ h2: 502 })], 1, 2);
+		check('a block with one textured zone is not empty',
+			A.coarsen(wide, 1, { detail: d }).blocks[0].detail, 'some');
+
+		// Anything that is not one of the two real answers is "not looked at
+		// yet", not "nothing there". Read the other way round, a detail array
+		// that did not line up captioned every block on an unswept frame.
+		check('a short detail array leaves blocks unknown',
+			A.coarsen(s, 2, { detail: [] }).blocks[0].detail, 'unknown');
+		check('and so does no array at all', A.coarsen(s, 2).blocks[0].detail, 'unknown');
+
+		// An empty block can never be the sharpest: it has nothing in it that
+		// focus could sharpen, and naming it points the operator at the one
+		// part of the frame that can never answer.
+		const s2 = A.summarise([zone({ h2: 300 }), zone({ h2: 900 })], 1, 2);
+		const c2 = A.coarsen(s2, 2, { detail: ['some', 'none'] });
+		check('an empty block is never the sharpest', c2.best, 0);
+		// ...unless nothing has detail, when the alternative is naming none.
+		check('but with nothing to go on the plain maximum stands',
+			A.coarsen(s2, 2, { detail: ['none', 'none'] }).best, 1);
+	}
+
 	// Dirt on the dome focuses a few millimetres away, so across a sweep it
 	// peaks nowhere near where the picture does -- which is exactly what drags
 	// a cheap autofocus onto the glass. Invisible on a live image; unmistakable

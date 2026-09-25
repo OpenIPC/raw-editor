@@ -168,10 +168,13 @@ export function summarise(zones, rows, cols, opts = {}) {
  * maximum from a different picture is worse than no history.
  */
 export function peakHold() {
-	let best = null, bestOverall = 0;
+	let best = null, low = null, bestOverall = 0, lowOverall = null;
 	return {
 		push(sum) {
-			if (!best || best.length !== sum.fv.length) best = sum.fv.map(() => null);
+			if (!best || best.length !== sum.fv.length) {
+				best = sum.fv.map(() => null);
+				low = sum.fv.map(() => null);
+			}
 			for (let i = 0; i < sum.fv.length; i++) {
 				/* Only a zone that measured may set its own record. A blown
 				 * zone reports a huge response -- that is the whole reason the
@@ -182,11 +185,18 @@ export function peakHold() {
 				 * because 0 is a reading and "no reading" is not. */
 				if (sum.state[i] !== 'measured') continue;
 				if (best[i] === null || sum.fv[i] > best[i]) best[i] = sum.fv[i];
+				/* The other end of the same record. A zone's best alone cannot
+				 * say whether the zone ever RESPONDED to the lens moving, and
+				 * that is the difference between a part of the frame that is
+				 * out of focus and one with nothing in it to focus on. */
+				if (low[i] === null || sum.fv[i] < low[i]) low[i] = sum.fv[i];
 			}
 			if (sum.peak !== null && sum.peak > bestOverall) bestOverall = sum.peak;
-			return { best: best.slice(), bestOverall };
+			if (sum.peak !== null && (lowOverall === null || sum.peak < lowOverall))
+				lowOverall = sum.peak;
+			return { best: best.slice(), bestOverall, low: low.slice(), lowOverall };
 		},
-		reset() { best = null; bestOverall = 0; },
+		reset() { best = null; low = null; bestOverall = 0; lowOverall = null; },
 	};
 }
 
@@ -227,9 +237,13 @@ function bounds(len, n) {
 	return out;
 }
 
-export function coarsen(s, n) {
+export function coarsen(s, n, opts = {}) {
 	if (!Number.isSafeInteger(n) || n <= 0)
 		throw new Error(`not a block count: ${n}`);
+	/* Per-zone 'some' / 'none' / 'unknown', from zoneDetail or a sweep. A
+	 * block is only called empty when every zone in it that could be measured
+	 * agrees -- one textured corner is enough to focus on. */
+	const detail = opts.detail || null;
 	/* Asking for more blocks than there are zones would hand back empty cells
 	 * reported as "nothing measurable", which is a different claim entirely. */
 	const rowsN = Math.min(n, s.rows), colsN = Math.min(n, s.cols);
@@ -239,10 +253,21 @@ export function coarsen(s, n) {
 		for (let bc = 0; bc < colsN; bc++) {
 			const [r0, r1] = rb[br], [c0, c1] = cb[bc];
 			let sum = 0, measured = 0, saturated = 0, total = 0;
+			let withDetail = 0, knownDetail = 0;
 			for (let r = r0; r < r1; r++) {
 				for (let c = c0; c < c1; c++) {
 					const i = r * s.cols + c;
 					total++;
+					/* Only the two real answers count as knowing. Anything
+					 * else -- absent, short array, undefined -- is "not
+					 * looked at yet", not "nothing there". Read the other way
+					 * round, a detail array that did not line up captioned
+					 * every block on a frame nobody had swept. */
+					const d = detail ? detail[i] : undefined;
+					if (d === 'some' || d === 'none') {
+						knownDetail++;
+						if (d === 'some') withDetail++;
+					}
 					if (s.state[i] !== 'measured') continue;
 					measured++;
 					sum += s.fv[i];
@@ -258,14 +283,30 @@ export function coarsen(s, n) {
 				 * real block and reads as "measured, and very soft". */
 				value: measured ? Math.round(sum / measured) : null,
 				measured, total, saturated,
+				/* 'none' is a statement about the SCENE -- there is nothing in
+				 * this part of the frame to focus on -- and it is the reason a
+				 * block reads low far more often than bad focus is. 'unknown'
+				 * until the lens has moved enough to tell the two apart. */
+				detail: !knownDetail ? 'unknown' : (withDetail ? 'some' : 'none'),
 			});
 		}
 	}
-	let best = null;
-	for (const b of blocks)
-		if (b.value !== null && (best === null || b.value > blocks[best].value))
-			best = blocks.indexOf(b);
-	return { rows: rowsN, cols: colsN, blocks, best };
+	/* An empty block is never the sharpest. It cannot be: it has nothing in it
+	 * that focus could sharpen, and naming it would point the operator at the
+	 * one part of the frame that can never answer. Only if NOTHING has detail
+	 * does the plain maximum stand, because then the alternative is naming no
+	 * block at all on a frame that may simply not have been swept yet. */
+	const pick = (ok) => {
+		let at = null;
+		for (let i = 0; i < blocks.length; i++) {
+			const b = blocks[i];
+			if (b.value === null || !ok(b)) continue;
+			if (at === null || b.value > blocks[at].value) at = i;
+		}
+		return at;
+	};
+	const best = pick((b) => b.detail !== 'none');
+	return { rows: rowsN, cols: colsN, blocks, best: best !== null ? best : pick(() => true) };
 }
 
 /*
@@ -313,6 +354,7 @@ export function sweepZones(frames, opts = {}) {
 	const apart = opts.apart !== undefined ? opts.apart : 0.3;
 
 	const peakAt = new Array(n).fill(null);
+	const why = new Array(n).fill('unmeasured');
 	for (let i = 0; i < n; i++) {
 		let hi = -1, lo = Infinity, at = -1, ever = false, pinned = false;
 		for (let f = 0; f < frames.length; f++) {
@@ -331,15 +373,21 @@ export function sweepZones(frames, opts = {}) {
 		 * somewhere else on the strength of an artefact. `state` cannot carry
 		 * this: summarise keeps saturation separate on purpose, because a
 		 * pinned zone is still perfectly well exposed. */
-		if (pinned) continue;
-		/* Never measured, or never moved. No opinion either way. */
-		if (!ever || hi <= 0 || (hi - lo) / hi < swing) continue;
+		if (pinned) { why[i] = 'pinned'; continue; }
+		if (!ever || hi <= 0) { why[i] = 'unmeasured'; continue; }
+		/* Never moved: there is nothing in this zone to focus on. Reported as
+		 * its own answer, because a zone with no detail and a zone that is out
+		 * of focus produce the same small number and need opposite responses
+		 * -- point the camera somewhere with edges in it, or turn the lens. */
+		if ((hi - lo) / hi < swing) { why[i] = 'flat'; continue; }
+		why[i] = 'responded';
 		peakAt[i] = at;
 	}
 
 	const heard = peakAt.filter((v) => v !== null).sort((a, b) => a - b);
 	if (!heard.length)
-		return { consensus: null, peakAt, suspect: [], heard: 0, rows, cols };
+		return { consensus: null, peakAt, why, suspect: [], heard: 0, rows, cols,
+			flat: why.filter((w) => w === 'flat').length };
 	/* Median, not mean. One smeared corner peaking at the far end of the sweep
 	 * drags a mean toward itself and then measures everything else against a
 	 * consensus it invented. */
@@ -350,5 +398,43 @@ export function sweepZones(frames, opts = {}) {
 		if (peakAt[i] !== null && Math.abs(peakAt[i] - consensus) > far) suspect.push(i);
 	/* The shape travels with the finding. A consumer holding these indices
 	 * across a grid change would otherwise place them by the new width. */
-	return { consensus, peakAt, suspect, heard: heard.length, far, rows, cols };
+	return { consensus, peakAt, why, suspect, heard: heard.length, far, rows, cols,
+		flat: why.filter((w) => w === 'flat').length };
+}
+
+/*
+ * Which parts of the frame have anything in them to focus on.
+ *
+ * A blank wall, a patch of sky, a smooth painted door: all of them report a
+ * small focus value wherever the lens is, because focus statistics measure
+ * detail and there is none there to measure. Shown as a bare number that
+ * reads as "this part of the picture is soft", which sends an operator
+ * chasing focus that was never the problem. The first person to calibrate
+ * with this hit it immediately: "на 9 квадрате не нашлось резких объектов и
+ * ему маленькую цифру дали".
+ *
+ * A zone with detail in it RESPONDS when the lens moves; a zone without one
+ * does not. That is the whole test, and it needs the lens to have moved --
+ * which is why nothing is claimed until the frame as a whole has shown it
+ * has. Before then every zone is 'unknown', because "we have not looked yet"
+ * and "there is nothing there" are different answers and only one of them is
+ * the operator's problem.
+ */
+export function zoneDetail(hold, opts = {}) {
+	/* How much the frame overall has to have moved before this says anything.
+	 * Below it the lens has not been turned far enough to tell an empty zone
+	 * from one that simply has not been swept past focus yet. */
+	const moved = opts.moved !== undefined ? opts.moved : 0.2;
+	/* How much a zone has to move to count as having something in it. */
+	const detail = opts.detail !== undefined ? opts.detail : 0.15;
+	const n = hold && hold.best ? hold.best.length : 0;
+	const out = new Array(n).fill('unknown');
+	if (!n || !hold.bestOverall || hold.lowOverall === null) return out;
+	if ((hold.bestOverall - hold.lowOverall) / hold.bestOverall < moved) return out;
+	for (let i = 0; i < n; i++) {
+		const hi = hold.best[i], lo = hold.low[i];
+		if (hi === null || lo === null || hi <= 0) continue;
+		out[i] = (hi - lo) / hi < detail ? 'none' : 'some';
+	}
+	return out;
 }

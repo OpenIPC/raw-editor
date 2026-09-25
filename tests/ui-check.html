@@ -2011,6 +2011,56 @@ try {
 	t('the readable grid is handled', false, e.message);
 }
 
+/* A blank wall scores low wherever the lens is, and shown as a bare number it
+ * reads as "this part is out of focus" -- sending the operator after focus
+ * that was never the problem. Reported on the first real calibration. */
+try {
+	const R = 15, C = 17;
+	// The right-hand third responds to the lens; the left never changes.
+	const at = (step) => ({ rows: R, cols: C, zones: Array.from({ length: R * C }, (_, i) =>
+		[0, (i % C) >= 12 ? 20000 + step * 9000 : 5200, 0, 10, 1000, 0]) });
+	let step = 0;
+	const host = document.createElement('div');
+	document.body.append(host);
+	const ed = mountEditor(host, { base: '../dist/', styles: false, autoCapture: false,
+		focus: { intervalMs: 20, zones: () => Promise.resolve(at(step)) } });
+	const bytes = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
+	await ed.open(bytes, 'fixture.dng');
+	await new Promise((r) => setTimeout(r, 300));
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+	await new Promise((r) => setTimeout(r, 150));
+
+	const caps = () => [...host.querySelectorAll('.re-fz-tag')]
+		.filter((n) => /nothing to focus on/.test(n.textContent));
+	t('nothing is claimed before the lens has moved', caps().length === 0,
+		caps().length + ' captioned');
+
+	// Sweep the lens past focus. Only the right-hand third responds.
+	for (step = 1; step <= 4; step++) await new Promise((r) => setTimeout(r, 90));
+	step = 4;
+	await new Promise((r) => setTimeout(r, 250));
+	t('a block with nothing in it says so rather than scoring low',
+		caps().length > 0, caps().length + ' captioned');
+	t('and the block that responded is not captioned',
+		caps().length < 9, caps().length + ' of 9 captioned');
+	{
+		// The sharpest must be a block that could actually be sharpened.
+		const box = host.querySelector('.re-chart-svg').getBoundingClientRect();
+		const pk = host.querySelector('.re-fz-peak');
+		t('the sharpest block is one with something in it',
+			!!pk && pk.getBoundingClientRect().left > box.left + box.width * 0.5,
+			pk ? `${(pk.getBoundingClientRect().left - box.left).toFixed(0)}px` : 'none');
+	}
+	// The number is still shown -- it is what the camera reported -- but muted
+	// so it stops reading as a verdict on focus.
+	t('the number stays, dimmed rather than hidden',
+		[...host.querySelectorAll('.re-fz-num.re-fz-dim')].some((n) => /\d/.test(n.textContent)),
+		[...host.querySelectorAll('.re-fz-num.re-fz-dim')].map((n) => n.textContent).join('|'));
+	ed.destroy();
+} catch (e) {
+	t('the empty-block notice is handled', false, e.message);
+}
+
 /* The poll reads a camera over a network, so every one of these is a question
  * about time: two reads in flight at once, an answer that outlives the thing
  * that asked for it, and a frame replaced under a grid measured of another. */
