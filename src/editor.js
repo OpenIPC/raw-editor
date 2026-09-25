@@ -387,7 +387,9 @@ export function mountEditor(root, {
 		root.append(splash);
 		// Reveal on the sheet, or on the deadline. The interface being ugly is
 		// recoverable; the interface never appearing is not.
-		acquireStylesheet(base, startupTimeoutMs).then(reveal);
+		// And measure the bar the moment it is first seen, for a browser with
+		// no ResizeObserver, where nothing else would.
+		acquireStylesheet(base, startupTimeoutMs).then(reveal).then(() => moreBar());
 	}
 
 	const state = { info: null, probe: null, cfa: 0, demosaic: 3, black: 0, white: 1023,
@@ -842,6 +844,15 @@ export function mountEditor(root, {
 	if (typeof ResizeObserver === 'function') {
 		ro = new ResizeObserver(onResize);
 		ro.observe(canvas);
+		/* The bar's fade depends on what the bar holds, and the canvas says
+		 * nothing about that. It does fire at first layout even without a
+		 * frame -- measured at 400px, the fade was there before any frame or
+		 * scroll -- but the name and the chip grow when a frame lands, and
+		 * that is what pushes the tabs about and can tip a bar that fitted
+		 * into one that does not, with nothing on the canvas changing. */
+		ro.observe(top);
+		ro.observe(nameEl);
+		ro.observe(sensorChip);
 	}
 	window.addEventListener('resize', onResize);
 	/* A press that ends anywhere but on the button still has to stop the lens.
@@ -4096,10 +4107,15 @@ export function mountEditor(root, {
 	 * a 3x3 block's, and a record carried across would be a target in the
 	 * wrong units. */
 	function noteBlockBest(sum) {
-		if (!focusBlocks) return;
-		const c = coarsen(sum, focusBlocks, { detail: focusBest ? zoneDetail(focusBest) : null });
+		/* While every zone is drawn, the last block readout's record goes on
+		 * advancing, so coming back to it finds the best of everything read
+		 * since -- not a record frozen at the moment of the switch, which
+		 * would call a peak swept past under All zones "never seen". */
+		const g = focusBlocks || blockBestGrain;
+		if (!g) return;
+		const c = coarsen(sum, g, { detail: focusBest ? zoneDetail(focusBest) : null });
 		const v = c.best === null ? null : c.blocks[c.best].value;
-		if (blockBestGrain !== focusBlocks) { blockBest = null; blockBestGrain = focusBlocks; }
+		if (blockBestGrain !== g) { blockBest = null; blockBestGrain = g; }
 		if (v !== null && (blockBest === null || v > blockBest)) blockBest = v;
 	}
 
@@ -5435,6 +5451,11 @@ export function mountEditor(root, {
 		 * panel nobody is looking at. */
 		if (m !== 'focus') {
 			stopFocusPoll(); moveRelease(); sweepStop(); handStop();
+			/* Bumped here as well as by a release: a keyboard nudge holds
+			 * nothing, so leaving with one still unanswered left its
+			 * generation current, and its refusal -- arriving after the panel
+			 * had been rebuilt -- was written into the new panel's line. */
+			moveGen++;
 			focusStatus = null; moveSay = null; filterSatBox = null;
 		}
 		/* Anything a filter write has outstanding belonged to the panel that is

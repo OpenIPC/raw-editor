@@ -26,6 +26,17 @@ if (new URLSearchParams(location.search).get('narrow') === '1') {
 		capture: () => Promise.reject(new Error('none')),
 		focus: { intervalMs: 5000,
 			zones: () => Promise.resolve({ rows: 1, cols: 1, zones: [[0, 100, 0, 10, 1000, 0]] }) } });
+	// Before a frame, and before anything has scrolled. The fade was set by
+	// a scroll listener and by the canvas's resize observer, and with no
+	// frame the canvas has nothing to report -- so a bar that overflowed
+	// from the first paint wore no fade until something moved it.
+	await new Promise((r) => setTimeout(r, 400));
+	{
+		const bar = host.querySelector('.re-top');
+		t('the bar says there is more to the right from the start',
+			bar.scrollWidth <= bar.clientWidth + 1 || bar.classList.contains('re-more'),
+			`${bar.className} scrollWidth ${bar.scrollWidth} clientWidth ${bar.clientWidth}`);
+	}
 	const bytes = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
 	await ed.open(bytes, 'phone.dng');
 	await new Promise((r) => setTimeout(r, 400));
