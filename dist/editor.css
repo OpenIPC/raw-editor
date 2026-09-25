@@ -56,6 +56,9 @@
 	   buttons further from a finger-sized target exactly on the devices most
 	   likely to be touched. */
 	.re-btn { padding: 9px 11px; }
+	/* Near and Far keep their words: the rule above strips button labels to
+	   fit the top bar, and a focus bracket alone does not say which way. */
+	.re-btn.re-hold > span { display: inline; }
 }
 
 
@@ -154,6 +157,14 @@
 .re-btn:disabled { opacity: .45; cursor: default; }
 .re-btn.re-pri { background: #5c70e8; border-color: #5c70e8; color: #fff; }
 .re-btn.re-sm { padding: 4px 8px; font-size: 11px; }
+/* Near and Far. The one control here worked with a finger at the camera, so
+ * finger-sized at every width and not only under the phone rule: they were
+ * 32px on a desktop, the smallest thing on the panel. */
+.re-btn.re-hold { min-height: 44px; padding: 9px 14px; }
+/* A link in a panel. The accent is 3.5:1 on the raised panel, under the
+ * minimum for text, so links take a lighter tint of it (8:1). */
+.re-root a { color: #a9b8ff; }
+.re-root a:hover { color: #fff; }
 .re-chip { display: inline-flex; align-items: center; gap: 7px; padding: 4px 9px;
 	border: 1px solid #2c313d; border-radius: 7px; background: #232734; font-size: 11px; }
 .re-chip-k { font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
@@ -246,6 +257,16 @@
 	/* The bar gets somewhere to go rather than off the edge. */
 	.re-top { overflow-x: auto; scrollbar-width: none; }
 	.re-top::-webkit-scrollbar { display: none; }
+	/* Back is the way out, and a tapped tab scrolls itself into view and
+	   takes everything left of it off the screen -- seen with Back at
+	   x=-259 on a 390px phone. So it sticks to the left edge, with the bar's
+	   own colour behind it so the tabs pass underneath. */
+	.re-top > .re-back { position: sticky; left: 0; z-index: 1; background: #1c1f27;
+		box-shadow: 8px 0 8px -4px #1c1f27; }
+	/* With the scrollbar hidden nothing said there was more bar to the
+	   right. The editor sets re-more while there is; this fades that edge. */
+	.re-top.re-more { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+		mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
 	/* A finger, not a mouse: 44px is the guideline and the main tab bar was
 	   25. 12px text is 18px on a 1.5 line, so 13px of padding makes 44 with no
 	   border and 12px makes 44 with one. */

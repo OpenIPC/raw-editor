@@ -18,8 +18,25 @@ const t = (name, ok, detail = '') => results.push({ name, ok, detail });
 if (new URLSearchParams(location.search).get('narrow') === '1') {
 	const host = document.createElement('div');
 	document.body.append(host);
+	// Five tabs and a Capture button, which is what a camera's page carries and
+	// what overflows a 400px bar -- the sticky Back below is only exercised
+	// when there is somewhere for the bar to scroll to.
 	const ed = mountEditor(host, { base: '../dist/', autoCapture: false,
-		plates: { readerSupported: false, reader: () => Promise.reject(new Error('none')) } });
+		plates: { readerSupported: false, reader: () => Promise.reject(new Error('none')) },
+		capture: () => Promise.reject(new Error('none')),
+		focus: { intervalMs: 5000,
+			zones: () => Promise.resolve({ rows: 1, cols: 1, zones: [[0, 100, 0, 10, 1000, 0]] }) } });
+	// Before a frame, and before anything has scrolled. The fade was set by
+	// a scroll listener and by the canvas's resize observer, and with no
+	// frame the canvas has nothing to report -- so a bar that overflowed
+	// from the first paint wore no fade until something moved it.
+	await new Promise((r) => setTimeout(r, 400));
+	{
+		const bar = host.querySelector('.re-top');
+		t('the bar says there is more to the right from the start',
+			bar.scrollWidth <= bar.clientWidth + 1 || bar.classList.contains('re-more'),
+			`${bar.className} scrollWidth ${bar.scrollWidth} clientWidth ${bar.clientWidth}`);
+	}
 	const bytes = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
 	await ed.open(bytes, 'phone.dng');
 	await new Promise((r) => setTimeout(r, 400));
@@ -60,6 +77,32 @@ if (new URLSearchParams(location.search).get('narrow') === '1') {
 	t('and the bar is scrollable when its tabs do not fit',
 		top.scrollWidth <= top.clientWidth + 1 || getComputedStyle(top).overflowX === 'auto',
 		`scrollWidth ${top.scrollWidth}, clientWidth ${top.clientWidth}`);
+
+	/*
+	 * Back is the way out, and on a phone it was the first thing the scrolling
+	 * bar carried off the left edge: a tapped tab scrolls itself into view and
+	 * takes the exit with it. Seen on a 390px screen with Back at x=-259. So it
+	 * sticks -- and the bar says there is more to the right, because a hidden
+	 * scrollbar says nothing.
+	 */
+	if (top.scrollWidth > top.clientWidth + 1) {
+		top.scrollLeft = top.scrollWidth;
+		await new Promise((r) => setTimeout(r, 40));
+		const back = host.querySelector('.re-back');
+		const bb = back ? back.getBoundingClientRect() : null, tb = top.getBoundingClientRect();
+		t('Back stays on screen however far the bar is scrolled',
+			!!bb && bb.left >= tb.left - 1 && bb.right <= tb.right + 1,
+			bb ? `Back at ${bb.left.toFixed(0)}..${bb.right.toFixed(0)} of ` +
+				`${tb.left.toFixed(0)}..${tb.right.toFixed(0)}` : '(no .re-back)');
+		t('and at its end the bar claims nothing more to the right',
+			!top.classList.contains('re-more'));
+		top.scrollLeft = 0;
+		await new Promise((r) => setTimeout(r, 40));
+		t('but at its start it says there is', top.classList.contains('re-more'));
+	} else {
+		t('the bar overflows at 400px, so the sticky Back is exercised', false,
+			`scrollWidth ${top.scrollWidth}, clientWidth ${top.clientWidth}`);
+	}
 
 	const small = [...host.querySelectorAll('.re-top button, .re-insp button')]
 		.filter((b) => b.offsetParent !== null)
@@ -1988,6 +2031,22 @@ try {
 			pk.left > box.left + box.width * 0.5,
 			`peak at ${(pk.left - box.left).toFixed(0)}px of ${box.width.toFixed(0)}px`);
 	}
+	{
+		// One peak, one vocabulary. The status used to name a cell of the
+		// 15x17 grid -- "row 5, column 4" -- that this view does not draw, and
+		// quote its value, while the outlined block carried a different
+		// number: three figures on screen all called "sharpest".
+		const status = host.querySelector('[data-act="focus-status"]').textContent;
+		t('the panel names the block in the picture’s own words',
+			/Sharpest at top right: /.test(status), status.slice(0, 60));
+		const pk = host.querySelector('.re-fz-peak');
+		const cx = +pk.getAttribute('x') + (+pk.getAttribute('width')) / 2;
+		const drawn = nums().find((n) => Math.abs(+n.getAttribute('x') - cx) < 1);
+		const said = /Sharpest at [^:]+: (\d+)/.exec(status);
+		t('and reports the number drawn in it',
+			!!drawn && !!said && drawn.textContent.replace(/ /g, '') === said[1],
+			`drawn ${drawn ? drawn.textContent : '(none)'}, said ${said ? said[1] : '(none)'}`);
+	}
 
 	// The fine grid is still the measurement; this only changes what is drawn.
 	const grain = (label) => [...host.querySelectorAll('[data-act="focus-grain"] button')]
@@ -2061,6 +2120,51 @@ try {
 	t('the empty-block notice is handled', false, e.message);
 }
 
+/* Whose tab this is. An owner who wants a sharp picture focuses on the live
+ * page, where the picture moves; this tab tunes what the camera counts as
+ * sharp over a still. Titled "Focus" and offering the same Near and Far, it
+ * said neither, and the first thing it showed on a stock camera was a yellow
+ * warning about a gain. So it points the owner where to go, says what it is
+ * for, and does not draw a grid around a frame that has not arrived. */
+try {
+	const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+	const grid = { rows: 1, cols: 1, zones: [[0, 100, 0, 10, 1000, 0]] };
+	const mkS = (extra) => {
+		const host = document.createElement('div');
+		document.body.append(host);
+		const ed = mountEditor(host, { base: '../dist/', styles: false, autoCapture: false,
+			focus: Object.assign({ intervalMs: 5000, zones: () => Promise.resolve(grid) }, extra) });
+		[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+		return { host, ed };
+	};
+	const text = (g) => g.host.querySelector('.re-insp').textContent;
+
+	let g = mkS({ liveHref: '/cgi-bin/live.cgi' });
+	await pause(80);
+	const a = g.host.querySelector('.re-insp a');
+	t('the panel points an owner at the live page',
+		!!a && a.getAttribute('href') === '/cgi-bin/live.cgi' && /Live page/.test(a.textContent),
+		a ? a.outerHTML.slice(0, 80) : '(no link)');
+	t('and says what this tab is for instead',
+		/tunes what the camera counts as sharp/.test(text(g)), text(g).slice(0, 120));
+	t('a frame not yet captured is said, not drawn around',
+		/Waiting for a frame/.test(text(g)), text(g).slice(0, 160));
+	const bytes = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
+	await g.ed.open(bytes, 'fixture.dng');
+	await pause(300);
+	t('and the note goes when one arrives', !/Waiting for a frame/.test(text(g)),
+		text(g).slice(0, 160));
+	g.ed.destroy();
+
+	g = mkS({});
+	await pause(80);
+	t('no link without somewhere to send them', !g.host.querySelector('.re-insp a') &&
+		!/Live page/.test(text(g)), text(g).slice(0, 100));
+	g.ed.destroy();
+} catch (e) {
+	t('the signpost is handled', false, e.message);
+}
+
 /* The poll reads a camera over a network, so every one of these is a question
  * about time: two reads in flight at once, an answer that outlives the thing
  * that asked for it, and a frame replaced under a grid measured of another. */
@@ -2070,7 +2174,7 @@ try {
 	const HIGH = 773, MED = 429, LOW = 85;   // blend() of h2 = 900 / 500 / 100
 	const best = (el) => {
 		const s = el.querySelector('[data-act="focus-status"]');
-		const m = s && s.textContent.match(/best seen (\d+)/);
+		const m = s && s.textContent.match(/best so far (\d+)/);
 		return m ? +m[1] : null;
 	};
 	const toFocus = (el) => [...el.querySelectorAll('.re-seg button')]
@@ -2235,6 +2339,18 @@ try {
 	t('a motor grows both buttons', !!btn(g.host, 'near') && !!btn(g.host, 'far'));
 	t('and the panel says to hold them',
 		/Hold Near or Far/.test(notes(g.host)), notes(g.host).slice(0, 90));
+	// They were two plain words in a row of plain words. The Live page's pair
+	// carry an icon, a name and a hint; these are the same lens.
+	t('and the buttons say what they are',
+		/near/i.test(btn(g.host, 'near').getAttribute('aria-label') || '') &&
+		/far/i.test(btn(g.host, 'far').getAttribute('aria-label') || ''),
+		(btn(g.host, 'near').getAttribute('aria-label') || '(none)') + ' / ' +
+		(btn(g.host, 'far').getAttribute('aria-label') || '(none)'));
+	{
+		const say = g.host.querySelector('[data-act="focus-move-say"]');
+		t('and how to use them, beside them',
+			!!say && /Hold to move/.test(say.textContent), say ? say.textContent : '(none)');
+	}
 
 	// Held: it has to keep asking, or the camera stops on its own deadline.
 	down(btn(g.host, 'near'));
@@ -2334,6 +2450,14 @@ try {
 		await pause(200);
 		t('a rejected move stops the repeat rather than running to the cap',
 			calls <= 3, calls + ' calls');
+		// ...and says so. The hold used to let go in silence, so a lens the
+		// camera was not driving looked exactly like one that had reached its
+		// stop, and the host's reason for the refusal reached nobody.
+		{
+			const say = host.querySelector('[data-act="focus-move-say"]');
+			t('and the refusal is said beside the button',
+				!!say && /motor jammed/.test(say.textContent), say ? say.textContent : '(none)');
+		}
 		ed.destroy();
 	}
 
@@ -2624,6 +2748,22 @@ try {
 
 	g = await mk({});
 	t('a host that can tune grows the panel', !!q(g.host, 'af-apply'));
+	// Fourteen bare number boxes and four verbs are the engineer's half of the
+	// panel, and they sat directly under Near and Far at the same weight. The
+	// half an owner never needs is folded, and every box is named, so "lower
+	// the first gain" points at something.
+	{
+		const d = q(g.host, 'af-apply').closest('details');
+		t('the filter designer is folded away by default', !!d && !d.open,
+			d ? 'open=' + d.open : '(not in a details)');
+		const boxes = [...g.host.querySelectorAll('input[data-act^="af-"]')];
+		const nameless = boxes.filter((i) => !i.labels.length && !i.getAttribute('aria-label'));
+		t('and every input in it is named', boxes.length > 0 && nameless.length === 0,
+			nameless.map((i) => i.dataset.act).join(',') || `${boxes.length} named`);
+		t('Try it says how long the trial lasts',
+			/Try it for \d+ ?s/.test(q(g.host, 'af-apply').textContent),
+			q(g.host, 'af-apply').textContent);
+	}
 	// Read back, not assumed: the camera may be running a sensor profile's
 	// filter, and a panel that opened on defaults would offer to keep a filter
 	// the operator never chose.
@@ -2672,7 +2812,7 @@ try {
 	{
 		const best = (h) => {
 			const s = h.querySelector('[data-act="focus-status"]');
-			const m = s && s.textContent.match(/best seen (\d+)/);
+			const m = s && s.textContent.match(/best so far (\d+)/);
 			return m ? +m[1] : null;
 		};
 		const gg = await mk({ grid: { rows: 1, cols: 2,
@@ -3024,6 +3164,18 @@ try {
 	t('the live grid says when the counter is full',
 		/top of the camera/.test(g.host.textContent), '');
 	t('and that it is the sharpest zone', /the sharpest among them/.test(g.host.textContent), '');
+	// ...as a fact in the status line. The yellow box and the knob to turn
+	// belong beside the knob: on a stock camera this fired the moment the tab
+	// opened and read as "the camera is broken", telling an owner to lower a
+	// gain they had never seen, in a section below the fold.
+	t('said in the status line rather than as a warning over the grid',
+		/top of the camera/.test(g.host.querySelector('[data-act="focus-status"]').textContent) &&
+		!g.host.querySelector('[data-act="focus-grid-status"] .re-warn'),
+		g.host.querySelector('[data-act="focus-status"]').textContent.slice(-80));
+	t('and the warning sits beside the gain it names',
+		!!q(g.host, 'af-sat') && !!q(g.host, 'af-sat').querySelector('.re-warn') &&
+		/Scale/.test(q(g.host, 'af-sat').textContent),
+		q(g.host, 'af-sat') ? q(g.host, 'af-sat').textContent.slice(-70) : '(no af-sat)');
 	g.ed.destroy();
 
 	// Dirt on the dome sits a few millimetres from the lens, so across a sweep
@@ -3172,6 +3324,17 @@ try {
 		const g5 = await mk({ lens: true, settle: 30 });
 		t('a motorised camera is offered both', !!q(g5.host, 'af-measure') && !!q(g5.host, 'af-hand'),
 			`measure ${!!q(g5.host, 'af-measure')}, hand ${!!q(g5.host, 'af-hand')}`);
+		// The intro adapts to the motor; the sweep's own prompt did not, and
+		// told the owner of a sealed zoom block to turn a barrel they cannot
+		// reach.
+		q(g5.host, 'af-hand').click();
+		{
+			const s = q(g5.host, 'af-status').textContent;
+			t('and its hand sweep says to hold the buttons, not turn a barrel',
+				/Hold Far/.test(s) && !/Turn the lens/.test(s), s.slice(0, 80));
+		}
+		q(g5.host, 'af-hand-stop').click();
+		await pause(50);
 		g5.ed.destroy();
 	}
 
