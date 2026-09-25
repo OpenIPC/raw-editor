@@ -1944,6 +1944,73 @@ try {
 	t('the focus heatmap is handled', false, e.message);
 }
 
+/* A camera's real grid is 15x17. 255 coloured cells show that there is a
+ * bright patch somewhere and say nothing about what any of it reads -- which
+ * is what the first person to calibrate autofocus with this said. */
+try {
+	const R = 15, C = 17;
+	// Sharp down the right-hand third, soft elsewhere.
+	const big = { rows: R, cols: C, zones: Array.from({ length: R * C }, (_, i) =>
+		// Real magnitudes: a camera's h2 runs to five figures, which is the
+		// whole reason the number needs grouping to be readable at a glance.
+		[0, (i % C) >= 12 ? 60000 : 9000, 0, 10, 1000, 0]) };
+	const host = document.createElement('div');
+	document.body.append(host);
+	const ed = mountEditor(host, { base: '../dist/', styles: false, autoCapture: false,
+		focus: { intervalMs: 20, zones: () => Promise.resolve(big) } });
+	// The overlay is drawn over a frame, so there has to be one.
+	const bytes = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
+	await ed.open(bytes, 'fixture.dng');
+	await new Promise((r) => setTimeout(r, 300));
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+	await new Promise((r) => setTimeout(r, 200));
+
+	const nums = () => [...host.querySelectorAll('.re-fz-num')];
+	t('the readable grid is nine blocks, not 255 cells',
+		host.querySelectorAll('.re-fz, .re-fz-none').length === 9,
+		`${host.querySelectorAll('.re-fz, .re-fz-none').length} cells`);
+	t('and every block carries its number', nums().length === 9, `${nums().length} numbers`);
+	t('the numbers are digits, not colours',
+		nums().every((n) => /\d/.test(n.textContent)),
+		nums().map((n) => n.textContent).join(' | '));
+	t('and are grouped so six figures can be read',
+		nums().some((n) => /\u2009/.test(n.textContent)),
+		nums().map((n) => n.textContent).join(' | '));
+	t('the sharpest block is marked once',
+		host.querySelectorAll('.re-fz-peak').length === 1);
+	{
+		// The right-hand third is the sharp one, so the marked block must sit
+		// there -- a readout that names the wrong part of the frame is worse
+		// than none.
+		const box = host.querySelector('.re-chart-svg').getBoundingClientRect();
+		const pk = host.querySelector('.re-fz-peak').getBoundingClientRect();
+		t('and it is the sharp side of the frame',
+			pk.left > box.left + box.width * 0.5,
+			`peak at ${(pk.left - box.left).toFixed(0)}px of ${box.width.toFixed(0)}px`);
+	}
+
+	// The fine grid is still the measurement; this only changes what is drawn.
+	const grain = (label) => [...host.querySelectorAll('[data-act="focus-grain"] button')]
+		.find((b) => b.textContent.trim() === label);
+	grain('All zones').click();
+	await new Promise((r) => setTimeout(r, 80));
+	t('all zones brings back every cell',
+		host.querySelectorAll('.re-fz, .re-fz-none').length === R * C,
+		`${host.querySelectorAll('.re-fz, .re-fz-none').length} cells`);
+	t('and drops the numbers, which would not fit', nums().length === 0);
+	grain('4\u00d74').click();
+	await new Promise((r) => setTimeout(r, 80));
+	t('four across is sixteen blocks',
+		host.querySelectorAll('.re-fz, .re-fz-none').length === 16,
+		`${host.querySelectorAll('.re-fz, .re-fz-none').length} cells`);
+	grain('3\u00d73').click();
+	await new Promise((r) => setTimeout(r, 80));
+	t('and it goes back', nums().length === 9, `${nums().length} numbers`);
+	ed.destroy();
+} catch (e) {
+	t('the readable grid is handled', false, e.message);
+}
+
 /* The poll reads a camera over a network, so every one of these is a question
  * about time: two reads in flight at once, an answer that outlives the thing
  * that asked for it, and a frame replaced under a grid measured of another. */
@@ -2454,6 +2521,11 @@ try {
 				return Promise.resolve();
 			};
 			focus.moveRepeatMs = 20;
+			// Nothing to settle in a fixture, and at 700ms a real settle the
+			// sweep checks alone would outrun the page's whole time budget.
+			// Nothing to settle in a fixture; a test that has to ACT during a
+			// sweep asks for a slower one so there is a sweep to act on.
+			focus.sweepSettleMs = opts.settle !== undefined ? opts.settle : 30;
 		}
 		if (!opts.readOnly) {
 			focus.holdSeconds = opts.hold || 30;
@@ -2768,7 +2840,7 @@ try {
 	g.ed.destroy();
 
 	// Stopping half way is the case that most needs the lens returned.
-	g = await mk({ lens: true });
+	g = await mk({ lens: true, settle: 220 });
 	q(g.host, 'af-measure').click();
 	await pause(1600);
 	q(g.host, 'af-measure-stop').click();
@@ -2783,7 +2855,7 @@ try {
 	g.ed.destroy();
 
 	// Leaving the tab mid-sweep, which is the same problem without a button.
-	g = await mk({ lens: true });
+	g = await mk({ lens: true, settle: 220 });
 	q(g.host, 'af-measure').click();
 	await pause(1600);
 	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Preview').click();
@@ -2826,7 +2898,7 @@ try {
 
 	// Destroyed mid-sweep. The walk back still has to happen -- the lens is
 	// real -- but nothing may poll a panel that has been removed.
-	g = await mk({ lens: true });
+	g = await mk({ lens: true, settle: 220 });
 	q(g.host, 'af-measure').click();
 	await pause(1600);
 	g.ed.destroy();
@@ -2839,7 +2911,7 @@ try {
 
 	// Leave Focus and come straight back. The old sweep is still walking the
 	// lens home; a new one starting now sends `far` against its `near`.
-	g = await mk({ lens: true });
+	g = await mk({ lens: true, settle: 220 });
 	q(g.host, 'af-measure').click();
 	await pause(1600);
 	[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Preview').click();
@@ -2904,8 +2976,112 @@ try {
 	t('and that it is the sharpest zone', /the sharpest among them/.test(g.host.textContent), '');
 	g.ed.destroy();
 
+	// Dirt on the dome sits a few millimetres from the lens, so across a sweep
+	// it peaks nowhere near where the picture does. An operator cannot see it
+	// on a live image -- a smear reads as a soft patch -- and it is exactly
+	// what drags a cheap autofocus onto the glass and keeps it there.
+	g = await mk({ lens: true, sweepGrid: (pos) => ({ rows: 1, cols: 4, zones: [
+		// three zones agree focus is back at the start; one peaks at the far end
+		[0, Math.max(40, 4000 - pos * 460), 0, 4, 1000, 0],
+		[0, Math.max(40, 400 + pos * 460), 0, 4, 1000, 0],
+		[0, Math.max(40, 4000 - pos * 460), 0, 4, 1000, 0],
+		[0, Math.max(40, 4000 - pos * 460), 0, 4, 1000, 0]] }) });
+	q(g.host, 'af-measure').click();
+	for (let i = 0; i < 300 && q(g.host, 'af-measure').hidden; i++) await pause(100);
+	{
+		const s = q(g.host, 'af-status').textContent;
+		t('a zone focusing at another distance is called out',
+			/different distance/.test(s), s.slice(-140));
+		t('and the operator is told what it usually is',
+			/dirt|web|glass/i.test(s), s.slice(-140));
+	}
+	g.ed.destroy();
+
+	// ...and ringed on the picture, which needs a picture to ring it on.
+	g = await mk({ lens: true, sweepGrid: (pos) => ({ rows: 1, cols: 4, zones: [
+		[0, Math.max(40, 4000 - pos * 460), 0, 4, 1000, 0],
+		[0, Math.max(40, 400 + pos * 460), 0, 4, 1000, 0],
+		[0, Math.max(40, 4000 - pos * 460), 0, 4, 1000, 0],
+		[0, Math.max(40, 4000 - pos * 460), 0, 4, 1000, 0]] }) });
+	{
+		const bytes = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
+		await g.ed.open(bytes, 'fixture.dng');
+		await pause(300);
+		[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+		await pause(120);
+		q(g.host, 'af-measure').click();
+		for (let i = 0; i < 300 && q(g.host, 'af-measure').hidden; i++) await pause(100);
+		t('and it is ringed on the picture',
+			g.host.querySelectorAll('.re-fz-odd').length > 0,
+			g.host.querySelectorAll('.re-fz-odd').length + ' ringed');
+
+		// Switching to every zone is how you find out WHICH zone was flagged,
+		// so it is the last view that may drop the rings -- and it did, while
+		// the verdict went on saying they were on the picture.
+		const gr = (label) => [...g.host.querySelectorAll('[data-act="focus-grain"] button')]
+			.find((b) => b.textContent.trim() === label);
+		gr('All zones').click();
+		await pause(120);
+		t('and still ringed with every zone shown',
+			g.host.querySelectorAll('.re-fz-odd').length > 0,
+			g.host.querySelectorAll('.re-fz-odd').length + ' ringed');
+
+		// A finding belongs to the lens position it was measured at.
+		gr('3\u00d73').click();
+		await pause(80);
+		q(g.host, 'focus-far').dispatchEvent(new PointerEvent('pointerdown', { button: 0, bubbles: true }));
+		q(g.host, 'focus-far').dispatchEvent(new PointerEvent('pointerup', { button: 0, bubbles: true }));
+		await pause(150);
+		t('driving the lens by hand drops the old findings',
+			g.host.querySelectorAll('.re-fz-odd').length === 0,
+			g.host.querySelectorAll('.re-fz-odd').length + ' left');
+		// A new frame is a different scene; a ring left over from the last one
+		// points at a zone that no longer means anything.
+		q(g.host, 'af-measure').click();
+		for (let i = 0; i < 300 && q(g.host, 'af-measure').hidden; i++) await pause(100);
+		t('the findings come back', g.host.querySelectorAll('.re-fz-odd').length > 0);
+		await g.ed.open(bytes, 'fixture.dng');
+		await pause(300);
+		[...g.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+		await pause(150);
+		t('and a new frame drops them',
+			g.host.querySelectorAll('.re-fz-odd').length === 0,
+			g.host.querySelectorAll('.re-fz-odd').length + ' left');
+	}
+	g.ed.destroy();
+
+	// A host with nothing to settle said so, and `0 || 700` turned that into
+	// the full production wait twice per step -- 11s of doing nothing, in
+	// exactly the case that asked for none.
+	g = await mk({ lens: true, settle: 0 });
+	{
+		const began = Date.now();
+		q(g.host, 'af-measure').click();
+		for (let i = 0; i < 300 && q(g.host, 'af-measure').hidden; i++) await pause(50);
+		const took = Date.now() - began;
+		t('a settle of zero is a value, not an absence', took < 3000, took + 'ms');
+	}
+	g.ed.destroy();
+
+	// A scene that all sits at one distance must not be accused of anything --
+	// a warning that fires on every sweep is a warning nobody reads.
+	g = await mk({ lens: true, sweepGrid: (pos) => ({ rows: 1, cols: 4, zones: [
+		[0, Math.max(40, 4000 - pos * 460), 0, 4, 1000, 0],
+		[0, Math.max(40, 3000 - pos * 340), 0, 4, 1000, 0],
+		[0, Math.max(40, 3600 - pos * 400), 0, 4, 1000, 0],
+		[0, Math.max(40, 4000 - pos * 460), 0, 4, 1000, 0]] }) });
+	q(g.host, 'af-measure').click();
+	for (let i = 0; i < 300 && q(g.host, 'af-measure').hidden; i++) await pause(100);
+	{
+		const s = q(g.host, 'af-status').textContent;
+		t('a scene at one distance is not accused',
+			!/different distance/.test(s), s.slice(-100));
+		t('and nothing is ringed', g.host.querySelectorAll('.re-fz-odd').length === 0);
+	}
+	g.ed.destroy();
+
 	// Near and Far drive the same lens the sweep is driving.
-	g = await mk({ lens: true });
+	g = await mk({ lens: true, settle: 220 });
 	q(g.host, 'af-measure').click();
 	await pause(900);
 	t('the manual controls are held down for the sweep',

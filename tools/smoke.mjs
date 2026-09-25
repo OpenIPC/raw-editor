@@ -1243,6 +1243,115 @@ console.log('\nfocus statistics: the grid a person focuses a lens by');
 			!dark.peakSaturated);
 	}
 
+	// 255 coloured cells show that there is a bright patch somewhere and say
+	// nothing about what anything reads. Reduced for display only -- this must
+	// not be able to move where the peak actually is.
+	{
+		// A 2x4 grid, sharp down the right-hand side.
+		const s = A.summarise(grid(2, 4, (i) => zone({ h2: (i % 4) >= 2 ? 800 : 100 })), 2, 4);
+		const c = A.coarsen(s, 2);
+		check('two blocks across', c.cols, 2);
+		check('and two down', c.rows, 2);
+		check('the sharp side reads higher',
+			c.blocks[1].value > c.blocks[0].value, true);
+		check('the best block is on that side', c.blocks[c.best].col, 1);
+
+		// The mean, not the sum: 15 rows across 3 blocks divides evenly but 17
+		// columns does not, and a sum would rank the wider block higher for
+		// being wider.
+		const even = A.summarise(grid(1, 5, () => zone({ h2: 640 })), 1, 5);
+		const cc = A.coarsen(even, 2);
+		check('blocks of different widths still compare',
+			cc.blocks[0].value, cc.blocks[1].value);
+
+		// A block with nothing believable in it has no value. Zero is a value,
+		// and it sorts below every real block as though it had been measured.
+		const dark = A.summarise(grid(1, 2, (i) => (i
+			? zone({ h2: 800 }) : zone({ y: 0, h2: 800 }))), 1, 2);
+		check('an unmeasurable block is null, not zero', A.coarsen(dark, 2).blocks[0].value, null);
+
+		// More blocks than zones would hand back empty cells reported as
+		// "nothing measurable", which is a different claim entirely.
+		check('more blocks than zones is capped', A.coarsen(even, 99).cols, 5);
+		let refused = false;
+		try { A.coarsen(even, 0); } catch { refused = true; }
+		assert('a zero block count is refused', refused);
+	}
+
+	// Dirt on the dome focuses a few millimetres away, so across a sweep it
+	// peaks nowhere near where the picture does -- which is exactly what drags
+	// a cheap autofocus onto the glass. Invisible on a live image; unmistakable
+	// across a sweep.
+	{
+		// Five positions, four zones. Three agree that focus is at position 3;
+		// zone 1 peaks at position 0 and is at some quite different distance.
+		const curve = (peak) => [0, 1, 2, 3, 4].map((p) => 1000 - Math.abs(p - peak) * 240);
+		const scene = [curve(3), curve(0), curve(3), curve(3)];
+		const frames = [0, 1, 2, 3, 4].map((p) => ({
+			fv: scene.map((c) => c[p]),
+			state: scene.map(() => 'measured'),
+			sat: scene.map(() => false),
+			rows: 1, cols: 4,
+		}));
+		const r = A.sweepZones(frames);
+		check('the scene agrees where focus is', r.consensus, 3);
+		check('and the odd one out is named', r.suspect, [1]);
+
+		// A zone that never moves has an argmax and it is noise. Asking it
+		// where it focuses gets an answer indistinguishable from a real one.
+		const flat = frames.map((f) => ({ ...f, fv: [...f.fv.slice(0, 3), 500] }));
+		const rf = A.sweepZones(flat);
+		check('a zone that never moved is not accused', rf.suspect.includes(3), false);
+		check('and is not counted as having an opinion', rf.peakAt[3], null);
+
+		// Median, not mean: one smeared corner at the far end would drag a mean
+		// toward itself and then judge everything else against it.
+		const smear = [curve(4), curve(4), curve(0), curve(4), curve(4)];
+		const rs = A.sweepZones([0, 1, 2, 3, 4].map((p) => ({
+			fv: smear.map((c) => c[p]), state: smear.map(() => 'measured'),
+			sat: smear.map(() => false), rows: 1, cols: 5 })));
+		check('the consensus is the median', rs.consensus, 4);
+
+		let short = false;
+		try { A.sweepZones([{ fv: [1], state: ['measured'] }]); } catch { short = true; }
+		assert('a sweep too short to have a shape is refused', short);
+
+		// A clamped zone plateaus, so the FIRST ceiling reading wins its
+		// argmax -- and where the counter filled up is not where the lens was
+		// sharpest. Judged on that, the zone gets accused of focusing
+		// somewhere else on the strength of an artefact. `state` cannot carry
+		// this: a pinned zone is still perfectly well exposed.
+		{
+			const pin = [0, 1, 2, 3, 4].map((p) => ({
+				fv: scene.map((c) => c[p]),
+				state: scene.map(() => 'measured'),
+				// zone 1 is the outlier; say its counter was full throughout
+				sat: [false, true, false, false],
+				rows: 1, cols: 4,
+			}));
+			const rp = A.sweepZones(pin);
+			check('a clamped zone is given no peak position', rp.peakAt[1], null);
+			check('so it is not accused of focusing elsewhere', rp.suspect, []);
+			// ...and the rest of the frame still has its say.
+			check('while the others still agree', rp.consensus, 3);
+		}
+
+		// Two grids of the same SIZE and different shape put the same index in
+		// a different part of the picture, and a ring over the wrong zone is
+		// worse than no ring.
+		{
+			const one = (r, c) => ({ fv: [1, 2, 3, 4], state: Array(4).fill('measured'),
+				sat: Array(4).fill(false), rows: r, cols: c });
+			let reshaped = false;
+			try { A.sweepZones([one(1, 4), one(2, 2), one(1, 4)]); } catch { reshaped = true; }
+			assert('a grid that changed shape mid-sweep is refused', reshaped);
+		}
+
+		// The finding travels with the shape it was measured on, so a consumer
+		// cannot place it by some later grid's width.
+		check('a finding carries its own shape', [r.rows, r.cols], [1, 4]);
+	}
+
 	// A grid whose length disagrees with its shape would still draw -- shifted,
 	// every zone in the wrong place. Refused rather than rendered.
 	let threw = false;

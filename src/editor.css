@@ -86,6 +86,17 @@
 .re-fz-none { fill: none; stroke: rgba(255,255,255,.28); stroke-width: 1;
   stroke-dasharray: 3 3; }
 .re-fz-peak { fill: none; stroke: #fff; stroke-width: 2.5; paint-order: stroke; }
+/* The number in the block. Painted over a picture of unknown brightness, so it
+ * carries its own dark stroke rather than trusting the fill underneath. */
+.re-fz-num { fill: #fff; stroke: rgba(0,0,0,.72); stroke-width: 3; paint-order: stroke;
+	font: 600 13px ui-monospace, SFMono-Regular, Menlo, monospace;
+	text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
+.re-fz-tag { fill: #fff; stroke: rgba(0,0,0,.72); stroke-width: 2.5; paint-order: stroke;
+	font: 500 10px ui-sans-serif, system-ui, sans-serif;
+	text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
+/* A block focusing at a different distance from the rest of the frame. Dashed
+ * rather than solid so it cannot be mistaken for the peak outline. */
+.re-fz-odd { fill: none; stroke: #7fd4ff; stroke-width: 2; stroke-dasharray: 5 3; }
 .re-chart-grip { position: absolute; width: 18px; height: 18px; margin: -9px 0 0 -9px;
 	border: 2px solid #fff; border-radius: 50%; background: #5c70e8;
 	box-shadow: 0 1px 4px rgba(0,0,0,.5); cursor: grab; pointer-events: auto;
