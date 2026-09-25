@@ -67,6 +67,13 @@ const ICON = {
 		'<path d="M4 13.6v2.2h12v-2.2"/>', 15),
 	dropper: svg('<path d="M4 16h2.2l7-7"/><path d="M11.4 7.4 12.9 6l1.1 1.1 1.4-1.4' +
 		'a1.6 1.6 0 0 0-2.3-2.3l-1.4 1.4L10.6 3.7 9.2 5.1z"/>', 14),
+	/* The focus brackets the camera's own live page draws on its Near and Far,
+	 * so the same lens wears the same glyph on both: a wide subject for near,
+	 * a distant one for far. */
+	near: svg('<path d="M3.2 7V3.6h3.4M16.8 7V3.6h-3.4M3.2 13v3.4h3.4M16.8 13v3.4h-3.4"/>' +
+		'<circle cx="10" cy="10" r="3.1"/>', 15),
+	far: svg('<path d="M3.2 7V3.6h3.4M16.8 7V3.6h-3.4M3.2 13v3.4h3.4M16.8 13v3.4h-3.4"/>' +
+		'<circle cx="10" cy="10" r="1.4"/>', 15),
 };
 
 /*
@@ -300,7 +307,13 @@ export function mountEditor(root, {
 	 * These DO get a countdown, unlike `move`, and for a reason the lens
 	 * buttons do not have: a filter that measures the wrong thing looks like a
 	 * camera that will not focus, so there is nothing on screen to tell an
-	 * operator which change to undo. The clock undoes it for them. */
+	 * operator which change to undo. The clock undoes it for them.
+	 *
+	 * `liveHref`, optional, is where the host's live picture is. The panel
+	 * opens by sending an owner there: this tab drives the lens over a STILL
+	 * and exists to tune the filter, and titled "Focus" with a Near and a Far
+	 * of its own it read as the place to focus a camera. Without one the
+	 * sentence is simply not said. */
 	focus,
 	/* How long to wait for the module to arrive and answer. The camera's own
 	 * loader gives the CDN eight seconds; a test harness under a virtual clock
@@ -390,8 +403,18 @@ export function mountEditor(root, {
 
 	/* ---- chrome ---- */
 	const top = el('div', 're-top');
-	const backBtn = el('button', 're-btn re-sm', ICON.back);
+	const backBtn = el('button', 're-btn re-sm re-back', ICON.back);
 	backBtn.title = 'Back';
+	/* On a phone the bar scrolls, and a tab that was just tapped scrolls
+	 * itself into view -- taking everything left of it, Back included, off
+	 * the screen with no scrollbar to say so. Back is made sticky in the
+	 * stylesheet; this is the other half, a class while there is more bar to
+	 * the right, so the stylesheet can fade that edge. Toggled rather than
+	 * measured in CSS because nothing in CSS knows where a scroll is. */
+	const moreBar = () => {
+		top.classList.toggle('re-more', top.scrollLeft + top.clientWidth < top.scrollWidth - 1);
+	};
+	top.addEventListener('scroll', moreBar, { passive: true });
 	const nameEl = el('span', '', 'No frame');
 	nameEl.style.cssText = 'font-size:13px;font-weight:500';
 	const sensorChip = el('span', 're-chip');
@@ -814,7 +837,7 @@ export function mountEditor(root, {
 	 * window ever changing. Watching the element itself catches all of those,
 	 * where a window listener catches only the first.
 	 */
-	const onResize = () => { drawChart(); drawMarks(); drawFocusMarks(); };
+	const onResize = () => { drawChart(); drawMarks(); drawFocusMarks(); moreBar(); };
 	let ro = null;
 	if (typeof ResizeObserver === 'function') {
 		ro = new ResizeObserver(onResize);
@@ -3966,6 +3989,15 @@ export function mountEditor(root, {
 	 */
 	let focusSum = null, focusBest = null, focusErr = null;
 	let focusHold = null, focusTimer = null, focusStatus = null;
+	/* The line under Near and Far: how to use them, what they are doing, and
+	 * why the lens did not move when it did not. */
+	let moveSay = null;
+	/* The best BLOCK value seen since the hold was last cleared, in the
+	 * readout's own units. focusBest tracks the peak zone of the fine grid; a
+	 * 3x3 draws block means, and a "best so far" beside a block mean has to
+	 * be a block mean or the two numbers cannot be compared. Kept per readout
+	 * size, because a 4x4 block is not a 3x3 block. */
+	let blockBest = null, blockBestGrain = null;
 	/* Bumped whenever polling stops or restarts. A read already in flight
 	 * carries the number it started under, and an answer whose number has
 	 * moved on is dropped: it was measured of a poll that no longer exists --
@@ -3983,6 +4015,7 @@ export function mountEditor(root, {
 	 * lens can never be beaten, so it reads as "you are getting worse". */
 	function resetFocusState() {
 		focusSum = null; focusBest = null; focusErr = null; focusHold = null;
+		blockBest = null;
 		/* Measured against one scene, one lens position and one filter. A new
 		 * frame is none of those, and a ring left over from the last one
 		 * points at a zone that no longer means anything. */
@@ -4019,6 +4052,7 @@ export function mountEditor(root, {
 			focusErr = null;
 			if (!focusHold) focusHold = peakHold();
 			focusBest = focusHold.push(sum);
+			noteBlockBest(sum);
 			if (handFrames && handFrames.length < HAND_MAX) {
 				handFrames.push({ fv: sum.fv, state: sum.state, sat: sum.satZone,
 					rows: sum.rows, cols: sum.cols, peak: sum.peak,
@@ -4044,7 +4078,33 @@ export function mountEditor(root, {
 		loop();
 	}
 
+	/* Where a block sits, in the words the picture is read with. The 3x3 is
+	 * the default readout and gets plain names; anything finer is named by
+	 * row and column OF THAT READOUT, which is what is drawn. Naming a cell
+	 * of the measured 15x17 grid under a 3x3 -- "row 5, column 4" -- pointed
+	 * at nothing on screen. */
+	function placeName(row, col, rows, cols) {
+		if (rows === 3 && cols === 3) {
+			const v = ['top', '', 'bottom'][row], h = ['left', '', 'right'][col];
+			return v && h ? v + ' ' + h : (v || h || 'centre');
+		}
+		return 'row ' + (row + 1) + ', column ' + (col + 1);
+	}
+
+	/* The block record, advanced by a reading and by nothing else. A readout
+	 * change starts a fresh one at the next reading: a 4x4 block's mean is not
+	 * a 3x3 block's, and a record carried across would be a target in the
+	 * wrong units. */
+	function noteBlockBest(sum) {
+		if (!focusBlocks) return;
+		const c = coarsen(sum, focusBlocks, { detail: focusBest ? zoneDetail(focusBest) : null });
+		const v = c.best === null ? null : c.blocks[c.best].value;
+		if (blockBestGrain !== focusBlocks) { blockBest = null; blockBestGrain = focusBlocks; }
+		if (v !== null && (blockBest === null || v > blockBest)) blockBest = v;
+	}
+
 	function renderFocus() {
+		paintFilterSat();
 		if (!focusStatus) return;
 		focusStatus.replaceChildren();
 		if (focusErr) {
@@ -4060,37 +4120,57 @@ export function mountEditor(root, {
 			return;
 		}
 		const s = focusSum;
-		const at = s.peakAt
-			? `row ${s.peakAt.row + 1}, column ${s.peakAt.col + 1}`
-			: 'nowhere it could measure';
+		/*
+		 * The peak in the readout's own terms, so the panel and the picture
+		 * describe one thing. At 3x3 or 4x4 that is the outlined block -- its
+		 * mean, and where it sits; with every zone drawn it is the peak zone.
+		 * The line used to quote the fine peak under every readout, so the
+		 * outlined square said 14 793, the sentence said 56 099 at "row 5,
+		 * column 4", and a 4x4 said 24 553 of the same star chart: three
+		 * numbers on screen, all called sharpest.
+		 */
+		let where, value, best;
+		if (focusBlocks) {
+			const c = coarsen(s, focusBlocks, { detail: focusBest ? zoneDetail(focusBest) : null });
+			const b = c.best === null ? null : c.blocks[c.best];
+			where = b ? placeName(b.row, b.col, c.rows, c.cols) : 'nowhere it could measure';
+			value = b ? b.value : null;
+			/* Read, not updated, here: the record advances only when a reading
+			 * arrives. Advancing it on every render put the reading already on
+			 * screen straight back into a record that had just been cleared --
+			 * by Start over, or by a new filter -- so "best so far" was never
+			 * genuinely fresh. */
+			best = blockBestGrain === focusBlocks ? blockBest : null;
+		} else {
+			where = s.peakAt
+				? `row ${s.peakAt.row + 1}, column ${s.peakAt.col + 1} of the ` +
+					`${s.rows}×${s.cols} zones`
+				: 'nowhere it could measure';
+			value = s.peak;
+			best = focusBest ? focusBest.bestOverall : null;
+		}
 		const line = el('p', 're-note');
 		line.dataset.act = 'focus-status';
 		/* The held best, not this instant's -- the number a person turning a
 		 * barrel is trying to beat, and the one still on screen after they
-		 * have swept past it. */
+		 * have swept past it.
+		 *
+		 * A pinned counter is stated here as a count, beside the other things
+		 * the grid could not measure, and not as a warning. It is one -- a
+		 * value that has stopped being able to move looks exactly like a
+		 * sharp, steady picture -- but the thing to do about it is a gain in
+		 * the filter designer, so the warning and the instruction sit there,
+		 * next to the input they name. On a stock camera the yellow box fired
+		 * the moment the tab opened and read as "this camera is broken". */
 		line.textContent =
-			`Sharpest at ${at}: ${s.peak === null ? '—' : s.peak}` +
-			(focusBest ? `, best seen ${focusBest.bestOverall}` : '') + '. ' +
+			`Sharpest at ${where}: ${value === null ? '—' : value}` +
+			(best !== null ? `, best so far ${best}` : '') + '. ' +
 			`${s.measured} of ${s.rows * s.cols} zones measured` +
 			(s.unlit ? `, ${s.unlit} too dark` : '') +
-			(s.clipped ? `, ${s.clipped} blown out` : '') + '.';
+			(s.clipped ? `, ${s.clipped} blown out` : '') +
+			(s.saturated ? `, ${s.saturated} reading at the top of the camera’s counter` +
+				(s.peakSaturated ? ' (the sharpest among them)' : '') : '') + '.';
 		focusStatus.append(line);
-		/* A pinned counter is the one fault here that reads as a good result:
-		 * the number is large and steady, which looks like a sharp, stable
-		 * picture. It is neither -- it is a value that has stopped being able
-		 * to move, and every comparison made against it is worthless. */
-		if (s.saturated) {
-			const box = el('div', 're-notice re-warn', ICON.warn);
-			box.append(Object.assign(el('div'), {
-				textContent: `${s.saturated} zone${s.saturated === 1 ? ' is' : 's are'} ` +
-					'reading at the top of the camera\u2019s counter' +
-					(s.peakSaturated ? ', the sharpest among them' : '') +
-					'. The filter\u2019s gain is higher than the counter can hold, so ' +
-					'those readings cannot rise and a comparison between two of them ' +
-					'means nothing. Lower the first gain until this clears.',
-			}));
-			focusStatus.append(box);
-		}
 		if (!s.measured) {
 			const box = el('div', 're-notice re-warn', ICON.warn);
 			box.append(Object.assign(el('div'), {
@@ -4139,19 +4219,33 @@ export function mountEditor(root, {
 	 * window, raising an unhandled rejection each time round. */
 	function moveSend(verb, onFail) {
 		const gen = moveGen;
-		const fail = function () {
-			if (onFail && gen === moveGen) onFail();
+		const fail = function (e) {
+			if (onFail && gen === moveGen) onFail(e);
 		};
 		let p;
 		try {
 			p = focus.move(verb);
 		} catch (e) {
-			fail();
+			fail(e);
 			return;
 		}
 		if (p && typeof p.catch === 'function') {
 			p.catch(fail);
 		}
+	}
+
+	/* What the buttons are doing, said under them. A hold used to end in
+	 * silence when the camera refused it, so a lens the camera was not
+	 * driving looked exactly like one that had reached its stop, and the
+	 * host's reason -- a motor driver not loaded, a port shut -- reached
+	 * nobody. */
+	const HOLD_HINT = 'Hold to move the lens; let go to stop.';
+	function sayMove(text) {
+		if (moveSay) moveSay.textContent = text;
+	}
+	function moveRefused(e) {
+		sayMove('The lens did not move: ' +
+			(e && e.message ? e.message : (e || 'the camera refused')) + '.');
 	}
 
 	/* A release from a pointer that never owned the hold is somebody else's
@@ -4173,6 +4267,9 @@ export function mountEditor(root, {
 		moveVerb = null;
 		movePointer = null;
 		moveGen++;
+		/* Back to the hint, unless a refusal has just been written there: that
+		 * is the one thing worth leaving on screen after the button comes up. */
+		if (moveSay && /^Moving/.test(moveSay.textContent)) sayMove(HOLD_HINT);
 		/* Told to stop even though it would time out anyway: the deadline is
 		 * the fallback, not the plan, and a lens that keeps creeping after the
 		 * button came up reads as a broken control. A stop that itself fails
@@ -4182,7 +4279,7 @@ export function mountEditor(root, {
 
 	function moveAsk() {
 		if (!moveVerb) return;
-		moveSend(moveVerb, moveRelease);
+		moveSend(moveVerb, function (e) { moveRefused(e); moveRelease(); });
 	}
 
 	/* The sweep needs to KNOW whether a move happened, where the hold-to-run
@@ -4244,6 +4341,7 @@ export function mountEditor(root, {
 			moveTimer = setInterval(moveAsk, (focus && focus.moveRepeatMs) || 250);
 			moveGiveUp = setTimeout(moveRelease,
 				(focus && focus.moveMaxMs) || MOVE_MAX_MS);
+			sayMove(verb === 'near' ? 'Moving nearer…' : 'Moving further away…');
 			moveAsk();
 			if (ev && ev.preventDefault) ev.preventDefault();
 		};
@@ -4262,7 +4360,7 @@ export function mountEditor(root, {
 			if (ev.repeat) return;
 			if (lensOwned) return;
 			ev.preventDefault();
-			moveSend(verb, null);
+			moveSend(verb, moveRefused);
 		});
 	}
 
@@ -4550,15 +4648,44 @@ export function mountEditor(root, {
 		return new Promise(function (r) { setTimeout(r, ms); });
 	}
 
-	function buildFilterDesigner(panel) {
-		const box = el('div', 're-panel');
-		box.style.marginTop = '10px';
-		box.append(Object.assign(el('div', 're-shead'), {
-			innerHTML: '<h3 class="re-cap">Filter</h3><span class="re-rule"></span>',
+	/* The counter warning's home: beside the gain it tells the operator to
+	 * lower. Set by the designer, cleared with it, painted by renderFocus. */
+	let filterSatBox = null;
+
+	function paintFilterSat() {
+		if (!filterSatBox) return;
+		filterSatBox.replaceChildren();
+		const s = focusSum;
+		if (!s || !s.saturated) return;
+		/* A pinned counter is the one fault here that reads as a good result:
+		 * the number is large and steady, which looks like a sharp, stable
+		 * picture. It is neither -- it is a value that has stopped being able
+		 * to move, and every comparison made against it is worthless. */
+		const box = el('div', 're-notice re-warn', ICON.warn);
+		box.append(Object.assign(el('div'), {
+			textContent: `${s.saturated} zone${s.saturated === 1 ? ' is' : 's are'} ` +
+				'reading at the top of the camera’s counter' +
+				(s.peakSaturated ? ', the sharpest among them' : '') +
+				'. The filter’s gain is higher than the counter can hold, so ' +
+				'those readings cannot rise and a comparison between two of them ' +
+				'means nothing. Lower Scale, the first of the gains, until this clears.',
 		}));
+		filterSatBox.append(box);
+	}
+
+	/*
+	 * Folded away by default. Fourteen number boxes and four verbs are the
+	 * engineer's half of the panel, and they sat directly under Near and Far
+	 * at the same weight, with the fold of a laptop screen landing exactly on
+	 * the first row of bare numbers. An owner never needs any of it; the
+	 * operator who does knows to open it.
+	 */
+	function buildFilterDesigner(panel) {
+		const hold = Math.max(5, focus.holdSeconds || 30);
+		const box = el('div');
 		box.append(Object.assign(el('p', 're-note'), {
 			textContent: 'What the camera counts as detail. Change it, watch the ' +
-				'squares, and keep it if the sharpest zone reads higher than it did.',
+				'squares, and keep it if the sharpest block reads higher than it did.',
 		}));
 
 		const status = el('div');
@@ -4566,20 +4693,35 @@ export function mountEditor(root, {
 		 * the grid's own above it; both are notices and both can be warnings. */
 		status.dataset.act = 'af-status';
 		box.append(status);
+		filterSatBox = el('div');
+		filterSatBox.dataset.act = 'af-sat';
+		filterSatBox.style.cssText = 'margin-top:7px';
+		box.append(filterSatBox);
 		const rows = el('div');
 		box.append(rows);
 
 		/* The ranges are the camera's register fields, and the panel refuses
 		 * out of range rather than letting the camera refuse silently: these
 		 * are written into a few bits each and nothing downstream checks. */
+		/* Every box named. Seven bare numbers in a row were this panel's own
+		 * "row 5, column 4": the counter warning says "lower Scale", and there
+		 * has to be a box on screen that says Scale. */
 		const FIELDS = [
 			{ k: 'gain', label: 'Gains', n: 7, lo: -511, hi: 511, first: [0, 255],
-			  hint: 'An input scale, then three pairs — one per section.' },
+			  names: ['Scale', '1a', '1b', '2a', '2b', '3a', '3b'],
+			  said: ['input scale', 'section 1, first', 'section 1, second',
+				'section 2, first', 'section 2, second', 'section 3, first',
+				'section 3, second'],
+			  hint: 'Scale is the input gain; then two coefficients per section.' },
 			{ k: 'shift', label: 'Shifts', n: 4, lo: 0, hi: 7,
+			  names: ['1', '2', '3', '4'],
+			  said: ['stage 1', 'stage 2', 'stage 3', 'stage 4'],
 			  hint: 'How far each stage divides its result down.' },
 			{ k: 'coring', label: 'Coring', n: 3, lo: 0, hi: 2047, slope: [1, 15],
-			  hint: 'Threshold, slope, limit. A high threshold throws away the ' +
-				'small detail that coming into focus produces.' },
+			  names: ['Threshold', 'Slope', 'Limit'],
+			  said: ['threshold', 'slope', 'limit'],
+			  hint: 'A high threshold throws away the small detail that coming ' +
+				'into focus produces.' },
 		];
 		const inputs = {};
 		let enables = [];
@@ -4589,12 +4731,16 @@ export function mountEditor(root, {
 			row.style.cssText = 'margin-top:9px';
 			row.append(Object.assign(el('div', 're-cap'), { textContent: f.label }));
 			const line = el('div');
-			line.style.cssText = 'display:flex;gap:5px;flex-wrap:wrap;margin-top:4px';
+			line.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-top:4px';
 			inputs[f.k] = [];
 			for (let i = 0; i < f.n; i++) {
+				const lab = el('label');
+				lab.style.cssText = 'display:flex;flex-direction:column;gap:2px';
+				lab.append(Object.assign(el('span', 're-note'), { textContent: f.names[i] }));
 				const inp = el('input', 're-in');
 				inp.type = 'number';
 				inp.dataset.act = 'af-' + f.k + '-' + i;
+				inp.setAttribute('aria-label', f.label.replace(/s$/, '') + ': ' + f.said[i]);
 				inp.style.cssText = 'width:64px';
 				/* Per-slot bounds where a slot differs from its neighbours: the
 				 * first gain is an unsigned input scale, not a coefficient, and
@@ -4608,10 +4754,11 @@ export function mountEditor(root, {
 				inp.min = String(lo);
 				inp.max = String(hi);
 				inputs[f.k].push(inp);
-				line.append(inp);
+				lab.append(inp);
+				line.append(lab);
 			}
 			row.append(line);
-			row.append(Object.assign(el('span', 'hint'), { textContent: f.hint }));
+			row.append(Object.assign(el('div', 're-note'), { textContent: f.hint }));
 			return row;
 		};
 		FIELDS.forEach((f) => rows.append(mkRow(f)));
@@ -4631,12 +4778,13 @@ export function mountEditor(root, {
 			const cb = el('input');
 			cb.type = 'checkbox';
 			cb.dataset.act = 'af-enable-' + i;
+			cb.setAttribute('aria-label', 'Section ' + (i + 1));
 			lab.append(cb, Object.assign(el('span'), { textContent: String(i + 1) }));
 			enLine.append(lab);
 			return cb;
 		});
 		enRow.append(enLine);
-		enRow.append(Object.assign(el('span', 'hint'), {
+		enRow.append(Object.assign(el('div', 're-note'), {
 			textContent: 'Section 3 reads higher as the picture blurs, so leaving ' +
 				'it off is most of why this filter tracks focus at all.',
 		}));
@@ -4646,7 +4794,9 @@ export function mountEditor(root, {
 		acts.style.cssText = 'display:flex;gap:8px;margin-top:10px;flex-wrap:wrap';
 		const send = el('button', 're-btn re-pri', '');
 		send.dataset.act = 'af-apply';
-		send.textContent = 'Try it';
+		/* The trial's length is on the button. "Try it" alone did not say the
+		 * camera would be written to, nor that it would be put back. */
+		send.textContent = 'Try it for ' + hold + 's';
 		send.disabled = true;
 		const back = el('button', 're-btn', '');
 		back.dataset.act = 'af-reload';
@@ -4686,6 +4836,17 @@ export function mountEditor(root, {
 			acts.append(hand, handDone);
 		}
 		box.append(acts);
+		/* What each verb costs, before it is pressed. Measure it drives the
+		 * lens for several seconds; the sentence saying it would be put back
+		 * used to appear only after the click. */
+		box.append(Object.assign(el('div', 're-note'), {
+			style: 'margin-top:6px',
+			textContent: 'Try it puts the filter on the camera for ' + hold + ' seconds ' +
+				'and takes it back unless you keep it.' +
+				(measure ? ' Measure it moves the lens out and back, eight steps ' +
+					'each way, and reports how sharply the filter peaks.' : '') +
+				' Measure by hand does the same while you move the lens yourself.',
+		}));
 
 		const say = (msg, warn) => {
 			status.replaceChildren();
@@ -4784,10 +4945,10 @@ export function mountEditor(root, {
 				 * with what this one reads -- different filters count detail
 				 * differently, so the number to beat has to start again. */
 				/* Findings belong to the filter they were measured under. */
-				focusHold = null; focusBest = null; focusOdd = null;
+				focusHold = null; focusBest = null; focusOdd = null; blockBest = null;
 				renderFocus();
 				startFocusPoll();
-				armHold(status, send, Math.max(5, focus.holdSeconds || 30),
+				armHold(status, send, hold,
 					'Applied to the camera.', {
 						revert: () => focus.revertFilters(),
 						keep: focus.keepFilters
@@ -4822,10 +4983,17 @@ export function mountEditor(root, {
 				/* Findings from the last sweep describe the lens where it was. */
 				focusOdd = null;
 				handFrames = [];
+				/* In the motor's terms where there is one. The intro adapts;
+				 * this did not, and told the owner of a sealed zoom block to
+				 * turn a barrel they cannot reach. */
+				const how = typeof focus.move === 'function'
+					? 'Hold Far until the picture is well out of focus, then hold ' +
+						'Near right through focus to the other end.'
+					: 'Turn the lens slowly from one end of its travel to the ' +
+						'other, right through focus.';
 				const tick = () => {
 					const n = handFrames ? handFrames.length : 0;
-					say('Turn the lens slowly from one end of its travel to the ' +
-						'other, right through focus. Keep going \u2014 ' + n +
+					say(how + ' Keep going \u2014 ' + n +
 						' reading' + (n === 1 ? '' : 's') + ' so far.');
 				};
 				tick();
@@ -4890,7 +5058,7 @@ export function mountEditor(root, {
 		}
 
 		load();
-		panel.append(box);
+		panel.append(foldout('Tune the focus filter (advanced)', (body) => body.append(box)));
 	}
 
 	function buildFocus() {
@@ -4899,48 +5067,100 @@ export function mountEditor(root, {
 		 * last one made are detached and must not be kept -- disabling a node
 		 * nobody can see is a leak that also hides a bug. */
 		motorBtns = [];
+		moveSay = null;
+		filterSatBox = null;
 		const panel = el('div', 're-panel');
 		panel.append(Object.assign(el('div', 're-shead'), {
 			innerHTML: '<h3 class="re-cap">Focus</h3><span class="re-rule"></span>',
 		}));
-		/* Says what to actually DO, and that differs: a camera with a motor is
-		 * focused from this panel, one without is focused at the camera. Telling
-		 * someone to turn a lens they could drive from here, or to hold a button
-		 * that is not on screen, is worse than saying nothing. */
-		const drive = focus && typeof focus.move === 'function'
-			? 'Hold Near or Far until the bright patch is where you want it sharp.'
-			: 'Turn the lens until the bright patch is where you want it sharp.';
-		panel.append(Object.assign(el('p', 're-note'), {
-			textContent: 'Each square is one of the camera\'s focus zones, brightest where ' +
-				'the picture has the most detail. ' + drive + ' The picture behind is the ' +
-				'frame you captured — the squares are live.',
-		}));
+		const motor = focus && typeof focus.move === 'function';
+		/*
+		 * Whose panel this is, before anything else. An owner who wants a
+		 * sharp picture focuses on the live page, where the picture moves;
+		 * this one drives the lens over a STILL and exists to tune the filter.
+		 * Titled Focus and carrying a Near and a Far of its own it read as the
+		 * place to focus a camera, and the first thing it then showed on a
+		 * stock camera was a warning about a gain. So the live page comes
+		 * first, when the host has said where it is, and what this tab is for
+		 * comes second.
+		 *
+		 * The rest says what to actually DO, and that differs: a camera with a
+		 * motor is focused from this panel, one without is focused at the
+		 * camera. Telling someone to turn a lens they could drive from here,
+		 * or to hold a button that is not on screen, is worse than saying
+		 * nothing.
+		 */
+		const intro = el('p', 're-note');
+		if (focus && focus.liveHref) {
+			intro.append(motor
+				? 'To focus the camera, use the lens controls on the '
+				: 'To focus the camera by eye, watch the ');
+			const a = el('a', '', 'Live page');
+			a.href = focus.liveHref;
+			intro.append(a, motor ? '. ' : ' while you turn the lens. ');
+		}
+		intro.append('This tab tunes what the camera counts as sharp. Each square is ' +
+			'one of its focus zones, brightest where the picture has the most ' +
+			'detail; the squares are live, the picture behind is the still frame ' +
+			'you captured. ' + (motor
+			? 'Hold Near or Far to move the lens and watch the numbers.'
+			: 'Turn the lens and watch the numbers.'));
+		panel.append(intro);
+		/* Reachable before a frame exists -- the tab is built at mount and the
+		 * first capture takes seconds -- and the readings are live either way.
+		 * Said, rather than left as a panel beside an empty stage. Gone with
+		 * the next rebuild, which opening a frame triggers. */
+		if (!state.info) {
+			panel.append(Object.assign(el('p', 're-note'), {
+				textContent: 'Waiting for a frame to draw the zones over. The readings ' +
+					'below are live already.',
+			}));
+		}
 		focusStatus = el('div');
+		focusStatus.dataset.act = 'focus-grid-status';
 		panel.append(focusStatus);
-
-		const row = el('div');
-		row.style.cssText = 'display:flex;gap:8px;margin-top:9px;flex-wrap:wrap';
 
 		/* Only where there is a motor to drive. Same rule the Capture button and
 		 * the Plates tab follow: a control that can never work is worse than
 		 * none, and most cameras focus by hand. */
-		if (focus && typeof focus.move === 'function') {
-			[['near', 'Near'], ['far', 'Far']].forEach(function (pair) {
-				const b = el('button', 're-btn', '');
-				b.dataset.act = 'focus-' + pair[0];
-				b.textContent = pair[1];
-				b.disabled = lensOwned;
-				holdToRun(b, pair[0]);
-				motorBtns.push(b);
-				row.append(b);
-			});
+		if (motor) {
+			const row = el('div');
+			row.style.cssText = 'display:flex;gap:8px;margin-top:9px;flex-wrap:wrap';
+			/* The live page's pair, on the same lens: an icon, a name a screen
+			 * reader can say, and a hint. Two bare words in a row of bare words
+			 * did not look like something to hold. */
+			[['near', 'Near', 'Focus near', 'Pull focus nearer'],
+				['far', 'Far', 'Focus far', 'Push focus further away']]
+				.forEach(function (t) {
+					const b = el('button', 're-btn re-hold', ICON[t[0]]);
+					b.dataset.act = 'focus-' + t[0];
+					b.append(Object.assign(el('span'), { textContent: t[1] }));
+					b.setAttribute('aria-label', t[2]);
+					b.title = t[3] + ' — hold to move, let go to stop';
+					b.disabled = lensOwned;
+					holdToRun(b, t[0]);
+					motorBtns.push(b);
+					row.append(b);
+				});
+			panel.append(row);
+			moveSay = el('p', 're-note');
+			moveSay.dataset.act = 'focus-move-say';
+			moveSay.setAttribute('role', 'status');
+			moveSay.style.cssText = 'margin:5px 0 0';
+			moveSay.textContent = HOLD_HINT;
+			panel.append(moveSay);
 		}
 
+		const row = el('div');
+		row.style.cssText = 'display:flex;gap:8px;margin-top:9px;flex-wrap:wrap;align-items:center';
 		/* How coarse the readout is. The fine grid is still what gets measured
-		 * -- this only changes what is drawn over the picture. */
+		 * -- this only changes what is drawn over the picture. Captioned: a
+		 * bare 3x3 / 4x4 / All zones wedged between Far and a reset button was
+		 * a control with no name. */
+		row.append(Object.assign(el('span', 're-cap'), { textContent: 'Readout' }));
 		const grain = el('div', 're-seg');
 		grain.dataset.act = 'focus-grain';
-		[[3, '3\u00d73'], [4, '4\u00d74'], [0, 'All zones']].forEach(function (pair) {
+		[[3, '3×3'], [4, '4×4'], [0, 'All zones']].forEach(function (pair) {
 			const b = el('button', '', '');
 			b.type = 'button';
 			b.dataset.act = 'grain-' + pair[0];
@@ -4952,6 +5172,9 @@ export function mountEditor(root, {
 					o.setAttribute('aria-pressed',
 						o === b ? 'true' : 'false');
 				});
+				/* The status line speaks in the readout's terms, so it moves
+				 * with the readout. */
+				renderFocus();
 				drawFocusMarks();
 			});
 			grain.append(b);
@@ -4960,7 +5183,8 @@ export function mountEditor(root, {
 
 		const reset = el('button', 're-btn', '');
 		reset.dataset.act = 'focus-reset';
-		reset.textContent = 'Reset the best';
+		reset.textContent = 'Start over';
+		reset.title = 'Forget the best so far and measure afresh';
 		/* A held peak from before the lens moved, or from another scene, is a
 		 * target that can never be beaten and reads as "you are getting worse". */
 		reset.addEventListener('click', () => {
@@ -4968,7 +5192,7 @@ export function mountEditor(root, {
 			 * would otherwise land afterwards and push the very peak that was
 			 * just discarded back into a fresh hold. */
 			/* Findings belong to the filter they were measured under. */
-			focusHold = null; focusBest = null; focusOdd = null;
+			focusHold = null; focusBest = null; focusOdd = null; blockBest = null;
 			renderFocus();
 			startFocusPoll();
 		});
@@ -5209,7 +5433,10 @@ export function mountEditor(root, {
 		abandonHold();
 		/* A poll that outlived its tab would keep a camera answering for a
 		 * panel nobody is looking at. */
-		if (m !== 'focus') { stopFocusPoll(); moveRelease(); sweepStop(); handStop(); focusStatus = null; }
+		if (m !== 'focus') {
+			stopFocusPoll(); moveRelease(); sweepStop(); handStop();
+			focusStatus = null; moveSay = null; filterSatBox = null;
+		}
 		/* Anything a filter write has outstanding belonged to the panel that is
 		 * going. Its answer must not come back and arm a trial here. */
 		filterGen++;
