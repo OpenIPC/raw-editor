@@ -15,7 +15,8 @@
 import { solveFromPatches, patchCentres, scoreCcm, CHART_COLS, CHART_ROWS } from './calibrate.js';
 import { parseIni, readColour, fitAwbCurve, gainsForCt, mergeCcmTables, colourFragment,
 	readDefectCorrection, enableDefectCorrection } from './iqprofile.js';
-import { summarise, peakHold, normalise, coarsen, sweepZones, zoneDetail } from './aftune.js';
+import { summarise, peakHold, normalise, coarsen, sweepZones, zoneDetail,
+	sweptOneWay } from './aftune.js';
 
 const CFA_NAMES = ['RGGB', 'GRBG', 'GBRG', 'BGGR'];
 const DEMOSAIC = [
@@ -4018,6 +4019,11 @@ export function mountEditor(root, {
 			focusErr = null;
 			if (!focusHold) focusHold = peakHold();
 			focusBest = focusHold.push(sum);
+			if (handFrames && handFrames.length < HAND_MAX) {
+				handFrames.push({ fv: sum.fv, state: sum.state, sat: sum.satZone,
+					rows: sum.rows, cols: sum.cols, peak: sum.peak,
+					pinned: sum.peakSaturated });
+			}
 		}
 		renderFocus();
 		drawFocusMarks();
@@ -4355,6 +4361,95 @@ export function mountEditor(root, {
 		return p;
 	}
 
+	/* One verdict, whichever drove the lens. A hand sweep and a motor sweep
+	 * measure the same thing and must not be able to word it differently. */
+	function sayVerdict(say, r) {
+		if (r.pinned) {
+			say('Cannot say. The sharpest zone was at the top of the ' +
+				'camera\u2019s counter for ' + r.pinned + ' of the ' +
+				r.steps + ' readings, so it had no room to fall and the ' +
+				'spread would be an understatement of nothing. Lower the ' +
+				'first gain until the grid stops reading at the ceiling, ' +
+				'then measure again.' + r.back, true);
+			return;
+		}
+		/* The finding that matters most for calibration, and the one an
+		 * operator cannot get from a live image: a smear on the dome reads as
+		 * a soft patch and nothing more. Across a sweep it peaks at a lens
+		 * position nowhere near the rest of the frame, because it is a few
+		 * millimetres away. That is what drags a cheap autofocus onto the
+		 * glass and keeps it there. */
+		const aside = r.odd
+			? ' ' + r.odd + ' of the ' + r.heard + ' zones that ' +
+				'responded focus at a different distance from the rest ' +
+				'of the frame, ringed on the picture. Dirt on the dome, ' +
+				'a web or something up against the glass will do that, ' +
+				'and autofocus will chase it \u2014 check them before ' +
+				'trusting a calibration.'
+			: '';
+		/* The ratio, not the peak. A filter that reads loudly everywhere is
+		 * worse than a quiet one that falls away, and the peak alone cannot
+		 * tell them apart -- which is the mistake this exists to prevent. */
+		say((r.ratio === null
+			? 'Highest ' + r.hi + ', lowest ' + r.lo + ' across the sweep.'
+			: 'Falls to 1/' + r.ratio.toFixed(1) + ' of its peak across the ' +
+				'sweep (' + r.hi + ' down to ' + r.lo + '). A filter worth ' +
+				'keeping falls away steeply; a loud one barely moves.') +
+			r.back + aside,
+			!!r.lost || !!r.odd);
+	}
+
+	/* Least a hand sweep can be judged on. Three is enough for sweepZones to
+	 * have a shape, but a ratio taken from three readings of a barrel someone
+	 * nudged is not a measurement of anything. */
+	const HAND_MIN = 8;
+	/* How far the reading must travel before the sweep counts as a sweep. The
+	 * operator may have turned nothing, turned it the wrong way, or turned it
+	 * within the depth of field -- and a ratio computed from that would read
+	 * as "this filter cannot see focus" when the lens simply did not move. */
+	const HAND_MOVED = 0.2;
+
+	function handVerdict(frames) {
+		if (!frames || frames.length < HAND_MIN)
+			return { failed: 'only ' + (frames ? frames.length : 0) + ' readings; ' +
+				'turn the lens right through focus, slowly, so there is a curve to measure' };
+		const vals = frames.map((f) => f.peak).filter((v) => v !== null);
+		if (!vals.length) return { failed: 'nothing measurable along the sweep' };
+		const hi = Math.max.apply(null, vals), lo = Math.min.apply(null, vals);
+		if (hi <= 0 || (hi - lo) / hi < HAND_MOVED)
+			return { failed: 'the reading barely changed, so the lens does not look ' +
+				'like it moved through focus. Turn it from one end of its travel to ' +
+				'the other' };
+		/* Shape first. sweepZones refuses a grid that changed mid-sweep, and
+		 * the ratio is no better off: peaks taken over different zone sizes
+		 * are not comparable numbers, so reporting one while quietly dropping
+		 * the zone findings would hand back the half that is just as wrong. */
+		const shape = frames[0].rows + 'x' + frames[0].cols;
+		if (frames.some((f) => f.rows + 'x' + f.cols !== shape))
+			return { failed: 'the camera changed its zone grid part way through, so ' +
+				'the readings are not measurements of the same thing' };
+		const pinned = frames.filter((f) => f.pinned).length;
+		/* Which way the lens went is the whole basis for calling a zone
+		 * distant, and a hand is free to turn back. The ratio does not care
+		 * -- highest over lowest is the same whatever order they arrived in
+		 * -- so a wandering sweep keeps its ratio and loses only the claim it
+		 * can no longer support. */
+		const oneWay = sweptOneWay(frames.map((f) => f.peak));
+		let odd = null;
+		if (oneWay) { try { odd = sweepZones(frames); } catch (e) { odd = null; } }
+		return {
+			hi: hi, lo: lo, ratio: lo > 0 ? hi / lo : null, steps: vals.length,
+			pinned: pinned, back: oneWay ? '' :
+				' Zones at a different distance are not reported: the reading rose ' +
+				'and fell more than once, so the lens looks like it was turned back ' +
+				'and forth rather than swept one way.',
+			odd: odd && odd.suspect.length ? odd.suspect.length : 0,
+			heard: odd ? odd.heard : 0,
+			suspect: odd && odd.suspect.length
+				? { idx: odd.suspect, rows: odd.rows, cols: odd.cols } : null,
+		};
+	}
+
 	async function sweepRun(say, onStep) {
 		const gen = ++sweepGen;
 		const mine = () => gen === sweepGen;
@@ -4368,6 +4463,7 @@ export function mountEditor(root, {
 		ownLens(true);
 		/* Last sweep's findings belong to last sweep's lens and filter. */
 		focusOdd = null;
+		handStop();
 		try {
 			for (let i = 0; i <= SWEEP_STEPS; i++) {
 				if (!mine()) break;
@@ -4571,6 +4667,24 @@ export function mountEditor(root, {
 			stop.hidden = true;
 			acts.append(measure, stop);
 		}
+		/* The operator can always be the motor, and on some lenses should be.
+		 * Measure it takes eight fixed steps, which is a guess at how far this
+		 * lens has to travel to leave focus -- on an 85H50AI those eight steps
+		 * moved the reading 3% while the full travel moved it fourfold, so the
+		 * automatic sweep had nothing to measure. A hand covers the whole
+		 * range. The only thing it loses is evenly spaced travel, and a median
+		 * consensus never depended on that. */
+		let hand = null, handDone = null;
+		{
+			hand = el('button', 're-btn', '');
+			hand.dataset.act = 'af-hand';
+			hand.textContent = 'Measure by hand';
+			handDone = el('button', 're-btn', '');
+			handDone.dataset.act = 'af-hand-stop';
+			handDone.textContent = 'Done';
+			handDone.hidden = true;
+			acts.append(hand, handDone);
+		}
 		box.append(acts);
 
 		const say = (msg, warn) => {
@@ -4687,16 +4801,61 @@ export function mountEditor(root, {
 			});
 		});
 
+		if (hand) {
+			let ticker = null;
+			const busy = (on) => {
+				hand.hidden = on;
+				handDone.hidden = !on;
+				send.disabled = on;
+				back.disabled = on;
+				if (measure) measure.disabled = on;
+			};
+			const finish = () => {
+				if (ticker) { clearInterval(ticker); ticker = null; }
+				busy(false);
+			};
+			hand.addEventListener('click', function () {
+				if (busyHolding(status)) return;
+				if (sweepping()) return;
+				busy(true);
+				handCancel = finish;
+				/* Findings from the last sweep describe the lens where it was. */
+				focusOdd = null;
+				handFrames = [];
+				const tick = () => {
+					const n = handFrames ? handFrames.length : 0;
+					say('Turn the lens slowly from one end of its travel to the ' +
+						'other, right through focus. Keep going \u2014 ' + n +
+						' reading' + (n === 1 ? '' : 's') + ' so far.');
+				};
+				tick();
+				ticker = setInterval(tick, 400);
+			});
+			handDone.addEventListener('click', function () {
+				const frames = handFrames;
+				handFrames = null;
+				handCancel = null;
+				finish();
+				const r = handVerdict(frames);
+				if (r.failed) { say('Could not measure it: ' + r.failed + '.', true); return; }
+				focusOdd = r.suspect;
+				drawFocusMarks();
+				sayVerdict(say, r);
+			});
+		}
+
 		if (measure) {
 			const busy = (on) => {
 				measure.hidden = on;
 				stop.hidden = !on;
 				send.disabled = on;
 				back.disabled = on;
+				if (hand) hand.disabled = on;
 			};
 			stop.addEventListener('click', function () { sweepStop(); });
 			measure.addEventListener('click', function () {
 				if (busyHolding(status)) return;
+				if (sweepping()) return;
 				busy(true);
 				runSweep(say, function (i, n) {
 					say('Walking the lens and reading as it goes — ' + i + ' of ' + n +
@@ -4722,41 +4881,7 @@ export function mountEditor(root, {
 					 * Measured on an 85H50AI: a bank whose own sum moved 2.6x
 					 * across the sweep reported 1/1.0, because its peak zone
 					 * never left 65535. */
-					if (r.pinned) {
-						say('Cannot say. The sharpest zone was at the top of the ' +
-							'camera\u2019s counter for ' + r.pinned + ' of the ' +
-							r.steps + ' readings, so it had no room to fall and the ' +
-							'spread would be an understatement of nothing. Lower the ' +
-							'first gain until the grid stops reading at the ceiling, ' +
-							'then measure again.' + r.back, true);
-						return;
-					}
-					/* The ratio, not the peak. A filter that reads loudly
-					 * everywhere is worse than a quiet one that falls away,
-					 * and the peak alone cannot tell them apart -- which is
-					 * exactly the mistake this button exists to prevent. */
-					/* The finding that matters most for calibration, and the
-					 * one an operator cannot get from a live image: a smear on
-					 * the dome reads as a soft patch and nothing more. Across
-					 * a sweep it peaks at a lens position nowhere near the
-					 * rest of the frame, because it is a few millimetres away.
-					 * That is what drags a cheap autofocus onto the glass and
-					 * keeps it there. */
-					const aside = r.odd
-						? ' ' + r.odd + ' of the ' + r.heard + ' zones that ' +
-							'responded focus at a different distance from the rest ' +
-							'of the frame, ringed on the picture. Dirt on the dome, ' +
-							'a web or something up against the glass will do that, ' +
-							'and autofocus will chase it \u2014 check them before ' +
-							'trusting a calibration.'
-						: '';
-					say((r.ratio === null
-						? 'Highest ' + r.hi + ', lowest ' + r.lo + ' across the sweep.'
-						: 'Falls to 1/' + r.ratio.toFixed(1) + ' of its peak across the ' +
-							'sweep (' + r.hi + ' down to ' + r.lo + '). A filter worth ' +
-							'keeping falls away steeply; a loud one barely moves.') +
-						r.back + aside,
-						!!r.lost || !!r.odd);
+					sayVerdict(say, r);
 				}).catch(function (e) {
 					busy(false);
 					say('Could not measure it: ' + (e && e.message ? e.message : e), true);
@@ -4878,6 +5003,29 @@ export function mountEditor(root, {
 	/* Zones the last sweep found focusing at a different distance from the rest
 	 * of the frame. Cleared whenever the lens or the filter moves under it. */
 	let focusOdd = null;
+	/* While the operator sweeps the lens by hand, every live reading is kept.
+	 * sweepZones never needed lens POSITIONS -- it works from the order the
+	 * readings arrived in and takes a median consensus -- so a hand on the
+	 * barrel is as good a sweep as a motor, only less evenly spaced, which is
+	 * exactly what a median is robust to. Capped because a sweep the operator
+	 * walked away from would otherwise grow for as long as the page is open. */
+	const HAND_MAX = 400;
+	let handFrames = null;
+	/* Set by the panel that owns the running hand sweep, so leaving Focus or
+	 * tearing the editor down can end it. Without this the ticker kept firing
+	 * and the live poll kept filling a collection whose Done button had been
+	 * removed from the document. */
+	let handCancel = null;
+
+	function handStop() {
+		handFrames = null;
+		if (handCancel) { const c = handCancel; handCancel = null; c(); }
+	}
+
+	/* One lens, one measurement. The two sweeps drive the same camera and the
+	 * hand one depends on the live poll that the motor one stops, so either
+	 * running means neither may start. */
+	function sweepping() { return handFrames !== null || sweepBusy !== null; }
 
 	/* A finding is only about the grid it was measured on. Indices are read
 	 * back as a row and a column through the CURRENT width, so a camera that
@@ -5061,7 +5209,7 @@ export function mountEditor(root, {
 		abandonHold();
 		/* A poll that outlived its tab would keep a camera answering for a
 		 * panel nobody is looking at. */
-		if (m !== 'focus') { stopFocusPoll(); moveRelease(); sweepStop(); focusStatus = null; }
+		if (m !== 'focus') { stopFocusPoll(); moveRelease(); sweepStop(); handStop(); focusStatus = null; }
 		/* Anything a filter write has outstanding belonged to the panel that is
 		 * going. Its answer must not come back and arm a trial here. */
 		filterGen++;
@@ -5358,6 +5506,7 @@ export function mountEditor(root, {
 			stopFocusPoll();
 			moveRelease();
 			sweepStop();
+			handStop();
 			// The walk back still has to happen -- the lens is real -- but
 			// nothing after it may touch a panel that is being removed.
 			sweepClosed = true;

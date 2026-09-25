@@ -3130,6 +3130,212 @@ try {
 	}
 	g.ed.destroy();
 
+	// No motor: the operator is the motor. Same measurement, same verdict --
+	// the only thing a hand loses is evenly spaced travel, which a median
+	// consensus does not care about.
+	{
+		let pos = 0;
+		const g2 = await mk({ sweepGrid: () => ({ rows: 1, cols: 4, zones: [
+			// three zones peak early, one peaks late: a smear on the glass
+			[0, Math.max(40, 4000 - pos * 300), 0, 4, 1000, 0],
+			[0, Math.max(40, 300 + pos * 300), 0, 4, 1000, 0],
+			[0, Math.max(40, 4000 - pos * 300), 0, 4, 1000, 0],
+			[0, Math.max(40, 4000 - pos * 300), 0, 4, 1000, 0]] }) });
+		t('a camera with no motor is offered a hand sweep', !!q(g2.host, 'af-hand'));
+		t('and not the motor one', !q(g2.host, 'af-measure'));
+
+		q(g2.host, 'af-hand').click();
+		t('the button gives way to Done', q(g2.host, 'af-hand').hidden &&
+			!q(g2.host, 'af-hand-stop').hidden);
+		t('and it says what to do with the lens',
+			/Turn the lens slowly/.test(q(g2.host, 'af-status').textContent),
+			q(g2.host, 'af-status').textContent.slice(0, 60));
+
+		// The operator turns the barrel right through focus.
+		for (pos = 0; pos <= 12; pos++) await pause(60);
+		q(g2.host, 'af-hand-stop').click();
+		await pause(120);
+		{
+			const s = q(g2.host, 'af-status').textContent;
+			t('a hand sweep reports the same falls-to ratio',
+				/Falls to 1\/\d/.test(s), s.slice(0, 70));
+			t('and finds the zone at another distance',
+				/different distance/.test(s), s.slice(-90));
+			t('the button comes back', !q(g2.host, 'af-hand').hidden);
+		}
+		g2.ed.destroy();
+	}
+
+	// A motor does not take the choice away. Measure it guesses how far this
+	// lens must travel; a hand knows.
+	{
+		const g5 = await mk({ lens: true, settle: 30 });
+		t('a motorised camera is offered both', !!q(g5.host, 'af-measure') && !!q(g5.host, 'af-hand'),
+			`measure ${!!q(g5.host, 'af-measure')}, hand ${!!q(g5.host, 'af-hand')}`);
+		g5.ed.destroy();
+	}
+
+	// ...and what it finds is drawn on the picture, not just described.
+	{
+		let pos = 0;
+		const g6 = await mk({ sweepGrid: () => ({ rows: 1, cols: 4, zones: [
+			[0, Math.max(40, 4000 - pos * 300), 0, 4, 1000, 0],
+			[0, Math.max(40, 300 + pos * 300), 0, 4, 1000, 0],
+			[0, Math.max(40, 4000 - pos * 300), 0, 4, 1000, 0],
+			[0, Math.max(40, 4000 - pos * 300), 0, 4, 1000, 0]] }) });
+		const bytes = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
+		await g6.ed.open(bytes, 'fixture.dng');
+		await pause(300);
+		[...g6.host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Focus').click();
+		await pause(120);
+		q(g6.host, 'af-hand').click();
+		for (pos = 0; pos <= 12; pos++) await pause(60);
+		q(g6.host, 'af-hand-stop').click();
+		await pause(150);
+		t('a hand sweep rings what it found, on the picture',
+			g6.host.querySelectorAll('.re-fz-odd').length > 0,
+			g6.host.querySelectorAll('.re-fz-odd').length + ' ringed');
+		g6.ed.destroy();
+	}
+
+	// Two sweeps, one lens. The hand sweep lives off the live poll that the
+	// motor sweep stops, so either running means neither may start.
+	{
+		const g7 = await mk({ lens: true, settle: 220 });
+		q(g7.host, 'af-hand').click();
+		await pause(80);
+		t('a running hand sweep greys out the motor one',
+			q(g7.host, 'af-measure').disabled === true);
+		q(g7.host, 'af-measure').click();
+		await pause(200);
+		t('and clicking it anyway starts nothing',
+			!q(g7.host, 'af-hand-stop').hidden && g7.seen.moves.length === 0,
+			`${g7.seen.moves.length} moves`);
+		q(g7.host, 'af-hand-stop').click();
+		await pause(120);
+
+		// The other way round, and past the disabled attribute: a rebuild can
+		// clear `disabled`, so the handler has to refuse on its own.
+		q(g7.host, 'af-measure').click();
+		await pause(150);
+		const handBtn = q(g7.host, 'af-hand');
+		handBtn.disabled = false;
+		handBtn.click();
+		await pause(150);
+		t('and a hand sweep cannot start inside a motor one',
+			q(g7.host, 'af-hand-stop').hidden === true);
+		q(g7.host, 'af-measure-stop').click();
+		for (let i = 0; i < 100 && q(g7.host, 'af-measure').hidden; i++) await pause(100);
+		await pause(100);
+		g7.ed.destroy();
+	}
+
+	// A hand sweep is a timer and a growing array with no owner once the panel
+	// is gone. Leaving Focus has to end it, not merely hide its Done button.
+	{
+		const g8 = await mk({});
+		q(g8.host, 'af-hand').click();
+		await pause(200);
+		// Held directly: leaving Focus detaches the panel, so querying the live
+		// DOM afterwards finds nothing either way and proves nothing.
+		const oldDone = q(g8.host, 'af-hand-stop');
+		const oldHand = q(g8.host, 'af-hand');
+		t('the sweep is running', oldDone.hidden === false && oldHand.hidden === true);
+		[...g8.host.querySelectorAll('.re-seg button')]
+			.find((b) => b.textContent.trim() !== 'Focus').click();
+		await pause(300);
+		t('leaving Focus ends the hand sweep, not just its panel',
+			oldDone.hidden === true && oldHand.hidden === false,
+			`done hidden ${oldDone.hidden}, hand hidden ${oldHand.hidden}`);
+		g8.ed.destroy();
+	}
+
+	// A grid that changed shape part way makes the peaks incomparable, and a
+	// ratio taken across it is the same wrong answer as the zone findings.
+	{
+		let wide = false;
+		const g9 = await mk({});
+		g9.seen.setGrid({ rows: 1, cols: 4, zones: [
+			[0, 900, 0, 9, 1000, 0], [0, 300, 0, 9, 1000, 0],
+			[0, 600, 0, 9, 1000, 0], [0, 120, 0, 9, 1000, 0]] });
+		q(g9.host, 'af-hand').click();
+		for (let i = 0; i < 6; i++) await pause(60);
+		g9.seen.setGrid({ rows: 2, cols: 2, zones: [
+			[0, 90, 0, 9, 1000, 0], [0, 4000, 0, 9, 1000, 0],
+			[0, 60, 0, 9, 1000, 0], [0, 120, 0, 9, 1000, 0]] });
+		for (let i = 0; i < 8; i++) await pause(60);
+		q(g9.host, 'af-hand-stop').click();
+		await pause(120);
+		const s = q(g9.host, 'af-status').textContent;
+		t('a grid that changed shape is refused, not rated',
+			/changed its zone grid/.test(s) && !/Falls to/.test(s), s.slice(0, 90));
+		g9.ed.destroy();
+	}
+
+	// A hand is free to turn back, and then reading order is no longer lens
+	// order -- the same position is visited at several indices, so two zones
+	// peaking at different indices may be at the same distance after all. The
+	// ratio survives that; the distance claim does not.
+	{
+		let step = 0;
+		const g10 = await mk({ sweepGrid: () => {
+			// forward through focus, back out, forward again
+			const path = [0,1,2,3,4,5,6,5,4,3,2,1,0,1,2,3,4,5,6];
+			const at = path[Math.min(step, path.length - 1)];
+			return { rows: 1, cols: 4, zones: [
+				[0, Math.max(40, 300 + at * 600), 0, 4, 1000, 0],
+				[0, Math.max(40, 3600 - at * 560), 0, 4, 1000, 0],
+				[0, Math.max(40, 300 + at * 600), 0, 4, 1000, 0],
+				[0, Math.max(40, 300 + at * 600), 0, 4, 1000, 0]] };
+		} });
+		q(g10.host, 'af-hand').click();
+		for (step = 0; step < 19; step++) await pause(60);
+		q(g10.host, 'af-hand-stop').click();
+		await pause(150);
+		const s = q(g10.host, 'af-status').textContent;
+		t('a lens turned back and forth still gets its ratio',
+			/Falls to 1\/\d/.test(s), s.slice(0, 60));
+		// The explanation SAYS "at a different distance" while declining to
+		// report any, so the negative has to test the claim, not the phrase.
+		t('but not a claim about distance it cannot support',
+			/turned back and forth/.test(s) && !/ringed on the picture/.test(s),
+			s.slice(-110));
+		t('and nothing is ringed on the picture',
+			g10.host.querySelectorAll('.re-fz-odd').length === 0);
+		g10.ed.destroy();
+	}
+
+	// A lens nobody turned must not be reported as a measurement: the ratio
+	// would read "this filter cannot see focus" when nothing moved at all.
+	{
+		const g3 = await mk({ sweepGrid: () => ({ rows: 1, cols: 4, zones: [
+			[0, 900, 0, 9, 1000, 0], [0, 880, 0, 9, 1000, 0],
+			[0, 910, 0, 9, 1000, 0], [0, 895, 0, 9, 1000, 0]] }) });
+		q(g3.host, 'af-hand').click();
+		for (let i = 0; i < 14; i++) await pause(60);
+		q(g3.host, 'af-hand-stop').click();
+		await pause(120);
+		const s = q(g3.host, 'af-status').textContent;
+		t('a lens that never moved is said so, not scored',
+			/does not look like it moved|barely changed/.test(s) && !/Falls to/.test(s),
+			s.slice(0, 90));
+		g3.ed.destroy();
+	}
+
+	// Stopped too early there is no curve to measure, and three readings of a
+	// nudged barrel is not a measurement of anything.
+	{
+		const g4 = await mk({});
+		q(g4.host, 'af-hand').click();
+		await pause(120);
+		q(g4.host, 'af-hand-stop').click();
+		await pause(100);
+		const s = q(g4.host, 'af-status').textContent;
+		t('too few readings is refused, not averaged',
+			/readings/.test(s) && !/Falls to/.test(s), s.slice(0, 90));
+		g4.ed.destroy();
+	}
+
 	// Near and Far drive the same lens the sweep is driving.
 	g = await mk({ lens: true, settle: 220 });
 	q(g.host, 'af-measure').click();

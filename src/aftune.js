@@ -361,10 +361,9 @@ export function sweepZones(frames, opts = {}) {
 	 * -- has an argmax, and it is noise. Asking it where it focuses gets an
 	 * answer indistinguishable from a confident one. */
 	const swing = opts.swing !== undefined ? opts.swing : 0.25;
-	/* How far from the rest of the frame counts as a different distance, as a
-	 * fraction of the sweep. Below this it is the same subject and the usual
-	 * disagreement between parts of it. */
-	const apart = opts.apart !== undefined ? opts.apart : 0.3;
+	/* How many times the scene's own disagreement a zone has to exceed before
+	 * it counts as being at a different distance. */
+	const apart = opts.apart !== undefined ? opts.apart : 3;
 
 	const peakAt = new Array(n).fill(null);
 	const why = new Array(n).fill('unmeasured');
@@ -410,7 +409,28 @@ export function sweepZones(frames, opts = {}) {
 	 * drags a mean toward itself and then measures everything else against a
 	 * consensus it invented. */
 	const consensus = heard[heard.length >> 1];
-	const far = Math.max(1, Math.round((frames.length - 1) * apart));
+	/* How far out is far, measured against how tightly the SCENE agrees --
+	 * not against the number of readings.
+	 *
+	 * Every zone is sampled at the same instants, so their peak ORDER means
+	 * something however fast the lens was moving. What does not survive uneven
+	 * travel is a threshold set as a fixed fraction of the reading count: an
+	 * operator who slows down through focus piles most of the readings there,
+	 * which spreads the normal zones out in index and makes a fixed fraction
+	 * either blind or trigger-happy. The median absolute deviation of the
+	 * zones that responded absorbs exactly that, because it is measured in the
+	 * same distorted units as the thing being judged.
+	 *
+	 * The fraction stays as a FLOOR, so a scene where every zone agrees to the
+	 * frame does not start flagging its own noise. */
+	const dev = heard.map((v) => Math.abs(v - consensus)).sort((a, b) => a - b);
+	const mad = dev[dev.length >> 1];
+	/* The floor is two readings, NOT a fraction of how many were taken. A
+	 * fraction looks prudent and is the bug: a long sweep gets a large floor,
+	 * so the more carefully someone measures the blinder this gets. Two
+	 * readings is only there to stop a scene that agrees to the frame from
+	 * flagging its own noise. */
+	const far = Math.max(2, Math.round(apart * mad));
 	const suspect = [];
 	for (let i = 0; i < n; i++)
 		if (peakAt[i] !== null && Math.abs(peakAt[i] - consensus) > far) suspect.push(i);
@@ -460,4 +480,37 @@ export function zoneDetail(hold, opts = {}) {
 		out[i] = (hi === 0 || (hi - lo) / hi < detail) ? 'none' : 'some';
 	}
 	return out;
+}
+
+/*
+ * Did the lens go one way?
+ *
+ * Everything sweepZones concludes about DISTANCE rests on one assumption: that
+ * reading order is lens order. A motor guarantees it. A hand does not -- an
+ * operator who turns forward, back, and forward again visits the same position
+ * at three different indices, and two zones peaking at different indices may
+ * be at the same distance after all. Uneven speed is survivable, and the
+ * median absolute deviation handles it; going BACK is not, because it breaks
+ * the mapping rather than stretching it.
+ *
+ * Detected from the scene's own curve rather than from any position the
+ * readings do not carry: swept once through focus, the overall reading rises
+ * and falls once. Crossing the halfway mark upwards more than once means the
+ * lens came back. The ratio is unharmed either way -- highest over lowest does
+ * not care what order they arrived in -- so only the distance findings are
+ * withheld.
+ */
+export function sweptOneWay(peaks) {
+	const v = peaks.filter((p) => typeof p === 'number' && isFinite(p));
+	if (v.length < 4) return false;
+	const hi = Math.max.apply(null, v), lo = Math.min.apply(null, v);
+	if (hi <= lo) return false;
+	/* Half way up the range: high enough that noise around the trough does not
+	 * register as the lens turning round, low enough to catch a real second
+	 * excursion. */
+	const mid = lo + (hi - lo) / 2;
+	let ups = 0;
+	for (let i = 1; i < v.length; i++)
+		if (v[i - 1] < mid && v[i] >= mid) ups++;
+	return ups <= 1;
 }
