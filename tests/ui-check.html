@@ -3139,7 +3139,7 @@ try {
 		const s = q(g.host, 'af-status').textContent;
 		t('a sweep over a pinned peak refuses to give a ratio',
 			/Cannot say/.test(s) && !/Falls to/.test(s), s.slice(0, 80));
-		t('and says which knob fixes it', /first gain/.test(s), s.slice(0, 120));
+		t('and says which knob fixes it, by the name on the box', /Lower Scale/.test(s), s.slice(0, 120));
 	}
 	g.ed.destroy();
 
