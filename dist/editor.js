@@ -4482,9 +4482,9 @@ export function mountEditor(root, {
 			say('Cannot say. The sharpest zone was at the top of the ' +
 				'camera\u2019s counter for ' + r.pinned + ' of the ' +
 				r.steps + ' readings, so it had no room to fall and the ' +
-				'spread would be an understatement of nothing. Lower the ' +
-				'first gain until the grid stops reading at the ceiling, ' +
-				'then measure again.' + r.back, true);
+				'spread would be an understatement of nothing. Lower Scale, ' +
+				'the first of the gains, until the grid stops reading at the ' +
+				'ceiling, then measure again.' + r.back, true);
 			return;
 		}
 		/* The finding that matters most for calibration, and the one an
