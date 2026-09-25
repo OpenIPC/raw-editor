@@ -15,7 +15,8 @@
 import { solveFromPatches, patchCentres, scoreCcm, CHART_COLS, CHART_ROWS } from './calibrate.js';
 import { parseIni, readColour, fitAwbCurve, gainsForCt, mergeCcmTables, colourFragment,
 	readDefectCorrection, enableDefectCorrection } from './iqprofile.js';
-import { summarise, peakHold, normalise, coarsen, sweepZones, zoneDetail } from './aftune.js';
+import { summarise, peakHold, normalise, coarsen, sweepZones, zoneDetail,
+	sweptOneWay } from './aftune.js';
 
 const CFA_NAMES = ['RGGB', 'GRBG', 'GBRG', 'BGGR'];
 const DEMOSAIC = [
@@ -4428,11 +4429,20 @@ export function mountEditor(root, {
 			return { failed: 'the camera changed its zone grid part way through, so ' +
 				'the readings are not measurements of the same thing' };
 		const pinned = frames.filter((f) => f.pinned).length;
+		/* Which way the lens went is the whole basis for calling a zone
+		 * distant, and a hand is free to turn back. The ratio does not care
+		 * -- highest over lowest is the same whatever order they arrived in
+		 * -- so a wandering sweep keeps its ratio and loses only the claim it
+		 * can no longer support. */
+		const oneWay = sweptOneWay(frames.map((f) => f.peak));
 		let odd = null;
-		try { odd = sweepZones(frames); } catch (e) { odd = null; }
+		if (oneWay) { try { odd = sweepZones(frames); } catch (e) { odd = null; } }
 		return {
 			hi: hi, lo: lo, ratio: lo > 0 ? hi / lo : null, steps: vals.length,
-			pinned: pinned, back: '',
+			pinned: pinned, back: oneWay ? '' :
+				' Zones at a different distance are not reported: the reading rose ' +
+				'and fell more than once, so the lens looks like it was turned back ' +
+				'and forth rather than swept one way.',
 			odd: odd && odd.suspect.length ? odd.suspect.length : 0,
 			heard: odd ? odd.heard : 0,
 			suspect: odd && odd.suspect.length

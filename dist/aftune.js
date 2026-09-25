@@ -481,3 +481,36 @@ export function zoneDetail(hold, opts = {}) {
 	}
 	return out;
 }
+
+/*
+ * Did the lens go one way?
+ *
+ * Everything sweepZones concludes about DISTANCE rests on one assumption: that
+ * reading order is lens order. A motor guarantees it. A hand does not -- an
+ * operator who turns forward, back, and forward again visits the same position
+ * at three different indices, and two zones peaking at different indices may
+ * be at the same distance after all. Uneven speed is survivable, and the
+ * median absolute deviation handles it; going BACK is not, because it breaks
+ * the mapping rather than stretching it.
+ *
+ * Detected from the scene's own curve rather than from any position the
+ * readings do not carry: swept once through focus, the overall reading rises
+ * and falls once. Crossing the halfway mark upwards more than once means the
+ * lens came back. The ratio is unharmed either way -- highest over lowest does
+ * not care what order they arrived in -- so only the distance findings are
+ * withheld.
+ */
+export function sweptOneWay(peaks) {
+	const v = peaks.filter((p) => typeof p === 'number' && isFinite(p));
+	if (v.length < 4) return false;
+	const hi = Math.max.apply(null, v), lo = Math.min.apply(null, v);
+	if (hi <= lo) return false;
+	/* Half way up the range: high enough that noise around the trough does not
+	 * register as the lens turning round, low enough to catch a real second
+	 * excursion. */
+	const mid = lo + (hi - lo) / 2;
+	let ups = 0;
+	for (let i = 1; i < v.length; i++)
+		if (v[i - 1] < mid && v[i] >= mid) ups++;
+	return ups <= 1;
+}

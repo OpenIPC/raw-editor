@@ -3272,6 +3272,39 @@ try {
 		g9.ed.destroy();
 	}
 
+	// A hand is free to turn back, and then reading order is no longer lens
+	// order -- the same position is visited at several indices, so two zones
+	// peaking at different indices may be at the same distance after all. The
+	// ratio survives that; the distance claim does not.
+	{
+		let step = 0;
+		const g10 = await mk({ sweepGrid: () => {
+			// forward through focus, back out, forward again
+			const path = [0,1,2,3,4,5,6,5,4,3,2,1,0,1,2,3,4,5,6];
+			const at = path[Math.min(step, path.length - 1)];
+			return { rows: 1, cols: 4, zones: [
+				[0, Math.max(40, 300 + at * 600), 0, 4, 1000, 0],
+				[0, Math.max(40, 3600 - at * 560), 0, 4, 1000, 0],
+				[0, Math.max(40, 300 + at * 600), 0, 4, 1000, 0],
+				[0, Math.max(40, 300 + at * 600), 0, 4, 1000, 0]] };
+		} });
+		q(g10.host, 'af-hand').click();
+		for (step = 0; step < 19; step++) await pause(60);
+		q(g10.host, 'af-hand-stop').click();
+		await pause(150);
+		const s = q(g10.host, 'af-status').textContent;
+		t('a lens turned back and forth still gets its ratio',
+			/Falls to 1\/\d/.test(s), s.slice(0, 60));
+		// The explanation SAYS "at a different distance" while declining to
+		// report any, so the negative has to test the claim, not the phrase.
+		t('but not a claim about distance it cannot support',
+			/turned back and forth/.test(s) && !/ringed on the picture/.test(s),
+			s.slice(-110));
+		t('and nothing is ringed on the picture',
+			g10.host.querySelectorAll('.re-fz-odd').length === 0);
+		g10.ed.destroy();
+	}
+
 	// A lens nobody turned must not be reported as a measurement: the ratio
 	// would read "this filter cannot see focus" when nothing moved at all.
 	{

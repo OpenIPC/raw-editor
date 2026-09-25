@@ -1481,6 +1481,23 @@ console.log('\nfocus statistics: the grid a person focuses a lens by');
 		check('a finding carries its own shape', [r.rows, r.cols], [1, 4]);
 	}
 
+	// Everything sweepZones says about DISTANCE rests on reading order being
+	// lens order. A motor guarantees that; a hand can turn back, and then the
+	// same position is visited at several indices.
+	{
+		const rise = (n, pk) => Array.from({ length: n }, (_, i) => 1000 - Math.abs(i - pk) * 90);
+		assert('one pass through focus is a sweep', A.sweptOneWay(rise(20, 10)));
+		// Forward, back, forward: the reading climbs, falls, and climbs again.
+		const there = rise(14, 7), andBack = rise(14, 7).slice().reverse();
+		assert('there and back again is not', !A.sweptOneWay(there.concat(andBack, there)));
+		// Noise around the trough must not read as the lens turning round.
+		const noisy = rise(20, 10).map((v, i) => v + (i % 2 ? 12 : -12));
+		assert('a wobble on the way is still one sweep', A.sweptOneWay(noisy));
+		// Too short to have a shape, and a flat line, say nothing rather than yes.
+		assert('three readings are not a sweep', !A.sweptOneWay([100, 200, 150]));
+		assert('a flat reading is not a sweep', !A.sweptOneWay([500, 500, 500, 500, 500]));
+	}
+
 	// A grid whose length disagrees with its shape would still draw -- shifted,
 	// every zone in the wrong place. Refused rather than rendered.
 	let threw = false;
