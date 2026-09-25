@@ -168,12 +168,23 @@ export function summarise(zones, rows, cols, opts = {}) {
  * maximum from a different picture is worse than no history.
  */
 export function peakHold() {
-	let best = null, low = null, bestOverall = 0, lowOverall = null;
+	let best = null, low = null, bestOverall = 0, lowOverall = null, shape = null;
 	return {
 		push(sum) {
-			if (!best || best.length !== sum.fv.length) {
+			/* Shape, not length. Two grids of the same size and different
+			 * shape put the same index in a different part of the picture, so
+			 * a record kept across the change describes the wrong zones -- and
+			 * the overall extrema have to go with it, because they are the
+			 * gate that decides whether the lens has moved at all. Clearing
+			 * only the per-zone arrays left that gate holding a range measured
+			 * on a camera that no longer exists. */
+			const sig = sum.rows + 'x' + sum.cols;
+			if (!best || best.length !== sum.fv.length || shape !== sig) {
 				best = sum.fv.map(() => null);
 				low = sum.fv.map(() => null);
+				bestOverall = 0;
+				lowOverall = null;
+				shape = sig;
 			}
 			for (let i = 0; i < sum.fv.length; i++) {
 				/* Only a zone that measured may set its own record. A blown
@@ -196,7 +207,9 @@ export function peakHold() {
 				lowOverall = sum.peak;
 			return { best: best.slice(), bestOverall, low: low.slice(), lowOverall };
 		},
-		reset() { best = null; low = null; bestOverall = 0; lowOverall = null; },
+		reset() {
+			best = null; low = null; bestOverall = 0; lowOverall = null; shape = null;
+		},
 	};
 }
 
@@ -374,7 +387,12 @@ export function sweepZones(frames, opts = {}) {
 		 * this: summarise keeps saturation separate on purpose, because a
 		 * pinned zone is still perfectly well exposed. */
 		if (pinned) { why[i] = 'pinned'; continue; }
-		if (!ever || hi <= 0) { why[i] = 'unmeasured'; continue; }
+		/* `ever` is the whole question of whether anything was measured here.
+		 * A zero maximum is an ANSWER to that, not an absence of one, and
+		 * calling it unmeasured told the operator the zone could not be read
+		 * when in fact it was read and had nothing in it. */
+		if (!ever) { why[i] = 'unmeasured'; continue; }
+		if (hi === 0) { why[i] = 'flat'; continue; }
 		/* Never moved: there is nothing in this zone to focus on. Reported as
 		 * its own answer, because a zone with no detail and a zone that is out
 		 * of focus produce the same small number and need opposite responses
@@ -433,8 +451,13 @@ export function zoneDetail(hold, opts = {}) {
 	if ((hold.bestOverall - hold.lowOverall) / hold.bestOverall < moved) return out;
 	for (let i = 0; i < n; i++) {
 		const hi = hold.best[i], lo = hold.low[i];
-		if (hi === null || lo === null || hi <= 0) continue;
-		out[i] = (hi - lo) / hi < detail ? 'none' : 'some';
+		/* null is "never measured" and stays unknown. Zero is a READING, and
+		 * a lit zone that reads zero at every lens position is the emptiest
+		 * zone there is -- skipping it left the one block most in need of the
+		 * caption without it. The accumulators cannot go negative, so hi === 0
+		 * means lo === 0 too and there is no swing to divide for. */
+		if (hi === null || lo === null) continue;
+		out[i] = (hi === 0 || (hi - lo) / hi < detail) ? 'none' : 'some';
 	}
 	return out;
 }
