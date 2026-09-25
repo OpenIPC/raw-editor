@@ -3198,6 +3198,80 @@ try {
 		g6.ed.destroy();
 	}
 
+	// Two sweeps, one lens. The hand sweep lives off the live poll that the
+	// motor sweep stops, so either running means neither may start.
+	{
+		const g7 = await mk({ lens: true, settle: 220 });
+		q(g7.host, 'af-hand').click();
+		await pause(80);
+		t('a running hand sweep greys out the motor one',
+			q(g7.host, 'af-measure').disabled === true);
+		q(g7.host, 'af-measure').click();
+		await pause(200);
+		t('and clicking it anyway starts nothing',
+			!q(g7.host, 'af-hand-stop').hidden && g7.seen.moves.length === 0,
+			`${g7.seen.moves.length} moves`);
+		q(g7.host, 'af-hand-stop').click();
+		await pause(120);
+
+		// The other way round, and past the disabled attribute: a rebuild can
+		// clear `disabled`, so the handler has to refuse on its own.
+		q(g7.host, 'af-measure').click();
+		await pause(150);
+		const handBtn = q(g7.host, 'af-hand');
+		handBtn.disabled = false;
+		handBtn.click();
+		await pause(150);
+		t('and a hand sweep cannot start inside a motor one',
+			q(g7.host, 'af-hand-stop').hidden === true);
+		q(g7.host, 'af-measure-stop').click();
+		for (let i = 0; i < 100 && q(g7.host, 'af-measure').hidden; i++) await pause(100);
+		await pause(100);
+		g7.ed.destroy();
+	}
+
+	// A hand sweep is a timer and a growing array with no owner once the panel
+	// is gone. Leaving Focus has to end it, not merely hide its Done button.
+	{
+		const g8 = await mk({});
+		q(g8.host, 'af-hand').click();
+		await pause(200);
+		// Held directly: leaving Focus detaches the panel, so querying the live
+		// DOM afterwards finds nothing either way and proves nothing.
+		const oldDone = q(g8.host, 'af-hand-stop');
+		const oldHand = q(g8.host, 'af-hand');
+		t('the sweep is running', oldDone.hidden === false && oldHand.hidden === true);
+		[...g8.host.querySelectorAll('.re-seg button')]
+			.find((b) => b.textContent.trim() !== 'Focus').click();
+		await pause(300);
+		t('leaving Focus ends the hand sweep, not just its panel',
+			oldDone.hidden === true && oldHand.hidden === false,
+			`done hidden ${oldDone.hidden}, hand hidden ${oldHand.hidden}`);
+		g8.ed.destroy();
+	}
+
+	// A grid that changed shape part way makes the peaks incomparable, and a
+	// ratio taken across it is the same wrong answer as the zone findings.
+	{
+		let wide = false;
+		const g9 = await mk({});
+		g9.seen.setGrid({ rows: 1, cols: 4, zones: [
+			[0, 900, 0, 9, 1000, 0], [0, 300, 0, 9, 1000, 0],
+			[0, 600, 0, 9, 1000, 0], [0, 120, 0, 9, 1000, 0]] });
+		q(g9.host, 'af-hand').click();
+		for (let i = 0; i < 6; i++) await pause(60);
+		g9.seen.setGrid({ rows: 2, cols: 2, zones: [
+			[0, 90, 0, 9, 1000, 0], [0, 4000, 0, 9, 1000, 0],
+			[0, 60, 0, 9, 1000, 0], [0, 120, 0, 9, 1000, 0]] });
+		for (let i = 0; i < 8; i++) await pause(60);
+		q(g9.host, 'af-hand-stop').click();
+		await pause(120);
+		const s = q(g9.host, 'af-status').textContent;
+		t('a grid that changed shape is refused, not rated',
+			/changed its zone grid/.test(s) && !/Falls to/.test(s), s.slice(0, 90));
+		g9.ed.destroy();
+	}
+
 	// A lens nobody turned must not be reported as a measurement: the ratio
 	// would read "this filter cannot see focus" when nothing moved at all.
 	{

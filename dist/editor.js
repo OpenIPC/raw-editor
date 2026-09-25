@@ -4419,6 +4419,14 @@ export function mountEditor(root, {
 			return { failed: 'the reading barely changed, so the lens does not look ' +
 				'like it moved through focus. Turn it from one end of its travel to ' +
 				'the other' };
+		/* Shape first. sweepZones refuses a grid that changed mid-sweep, and
+		 * the ratio is no better off: peaks taken over different zone sizes
+		 * are not comparable numbers, so reporting one while quietly dropping
+		 * the zone findings would hand back the half that is just as wrong. */
+		const shape = frames[0].rows + 'x' + frames[0].cols;
+		if (frames.some((f) => f.rows + 'x' + f.cols !== shape))
+			return { failed: 'the camera changed its zone grid part way through, so ' +
+				'the readings are not measurements of the same thing' };
 		const pinned = frames.filter((f) => f.pinned).length;
 		let odd = null;
 		try { odd = sweepZones(frames); } catch (e) { odd = null; }
@@ -4445,6 +4453,7 @@ export function mountEditor(root, {
 		ownLens(true);
 		/* Last sweep's findings belong to last sweep's lens and filter. */
 		focusOdd = null;
+		handStop();
 		try {
 			for (let i = 0; i <= SWEEP_STEPS; i++) {
 				if (!mine()) break;
@@ -4789,10 +4798,17 @@ export function mountEditor(root, {
 				handDone.hidden = !on;
 				send.disabled = on;
 				back.disabled = on;
+				if (measure) measure.disabled = on;
+			};
+			const finish = () => {
+				if (ticker) { clearInterval(ticker); ticker = null; }
+				busy(false);
 			};
 			hand.addEventListener('click', function () {
 				if (busyHolding(status)) return;
+				if (sweepping()) return;
 				busy(true);
+				handCancel = finish;
 				/* Findings from the last sweep describe the lens where it was. */
 				focusOdd = null;
 				handFrames = [];
@@ -4806,10 +4822,10 @@ export function mountEditor(root, {
 				ticker = setInterval(tick, 400);
 			});
 			handDone.addEventListener('click', function () {
-				if (ticker) { clearInterval(ticker); ticker = null; }
 				const frames = handFrames;
 				handFrames = null;
-				busy(false);
+				handCancel = null;
+				finish();
 				const r = handVerdict(frames);
 				if (r.failed) { say('Could not measure it: ' + r.failed + '.', true); return; }
 				focusOdd = r.suspect;
@@ -4824,10 +4840,12 @@ export function mountEditor(root, {
 				stop.hidden = !on;
 				send.disabled = on;
 				back.disabled = on;
+				if (hand) hand.disabled = on;
 			};
 			stop.addEventListener('click', function () { sweepStop(); });
 			measure.addEventListener('click', function () {
 				if (busyHolding(status)) return;
+				if (sweepping()) return;
 				busy(true);
 				runSweep(say, function (i, n) {
 					say('Walking the lens and reading as it goes — ' + i + ' of ' + n +
@@ -4983,6 +5001,21 @@ export function mountEditor(root, {
 	 * walked away from would otherwise grow for as long as the page is open. */
 	const HAND_MAX = 400;
 	let handFrames = null;
+	/* Set by the panel that owns the running hand sweep, so leaving Focus or
+	 * tearing the editor down can end it. Without this the ticker kept firing
+	 * and the live poll kept filling a collection whose Done button had been
+	 * removed from the document. */
+	let handCancel = null;
+
+	function handStop() {
+		handFrames = null;
+		if (handCancel) { const c = handCancel; handCancel = null; c(); }
+	}
+
+	/* One lens, one measurement. The two sweeps drive the same camera and the
+	 * hand one depends on the live poll that the motor one stops, so either
+	 * running means neither may start. */
+	function sweepping() { return handFrames !== null || sweepBusy !== null; }
 
 	/* A finding is only about the grid it was measured on. Indices are read
 	 * back as a row and a column through the CURRENT width, so a camera that
@@ -5166,7 +5199,7 @@ export function mountEditor(root, {
 		abandonHold();
 		/* A poll that outlived its tab would keep a camera answering for a
 		 * panel nobody is looking at. */
-		if (m !== 'focus') { stopFocusPoll(); moveRelease(); sweepStop(); focusStatus = null; }
+		if (m !== 'focus') { stopFocusPoll(); moveRelease(); sweepStop(); handStop(); focusStatus = null; }
 		/* Anything a filter write has outstanding belonged to the panel that is
 		 * going. Its answer must not come back and arm a trial here. */
 		filterGen++;
@@ -5463,6 +5496,7 @@ export function mountEditor(root, {
 			stopFocusPoll();
 			moveRelease();
 			sweepStop();
+			handStop();
 			// The walk back still has to happen -- the lens is real -- but
 			// nothing after it may touch a panel that is being removed.
 			sweepClosed = true;

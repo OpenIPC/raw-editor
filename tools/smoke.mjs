@@ -1385,6 +1385,41 @@ console.log('\nfocus statistics: the grid a person focuses a lens by');
 		check('a zone that never moved is not accused', rf.suspect.includes(3), false);
 		check('and is not counted as having an opinion', rf.peakAt[3], null);
 
+		// How far out is "far" is measured against how tightly the scene agrees,
+		// not against the number of readings. A hand that slows down through
+		// focus piles most readings there and spreads the normal zones out in
+		// index; a threshold set as a fixed fraction of the count then either
+		// goes blind or starts flagging the scene itself.
+		{
+			// Seven zones that all peak within a frame or two of each other,
+			// plus one far away -- across MANY readings, so a fixed 30%-of-count
+			// threshold (here ~11 frames) would miss an outlier 6 frames out.
+			const n = 38;
+			const tight = (pk) => Array.from({ length: n }, (_, p) => 1000 - Math.abs(p - pk) * 60);
+			const zs = [18, 19, 18, 20, 18, 19, 18, 25].map(tight);
+			const fr = Array.from({ length: n }, (_, p) => ({
+				fv: zs.map((c) => Math.max(10, c[p])),
+				state: zs.map(() => 'measured'),
+				sat: zs.map(() => false), rows: 1, cols: 8,
+			}));
+			const rr = A.sweepZones(fr);
+			check('a tight scene makes a modest outlier visible', rr.suspect, [7]);
+		}
+
+		// ...but a scene that genuinely disagrees is not turned into outliers.
+		{
+			const n = 38;
+			const spread = [6, 12, 18, 24, 30, 14, 22, 16].map(
+				(pk) => Array.from({ length: n }, (_, p) => 1000 - Math.abs(p - pk) * 60));
+			const fr = Array.from({ length: n }, (_, p) => ({
+				fv: spread.map((c) => Math.max(10, c[p])),
+				state: spread.map(() => 'measured'),
+				sat: spread.map(() => false), rows: 1, cols: 8,
+			}));
+			assert('a scene spread over many distances is not all outliers',
+				A.sweepZones(fr).suspect.length <= 2);
+		}
+
 		// Median, not mean: one smeared corner at the far end would drag a mean
 		// toward itself and then judge everything else against it.
 		const smear = [curve(4), curve(4), curve(0), curve(4), curve(4)];
