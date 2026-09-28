@@ -8,6 +8,21 @@ import { mountEditor } from '../dist/editor.js';
 const results = [];
 const t = (name, ok, detail = '') => results.push({ name, ok, detail });
 
+/* A frame Calibrate can measure without a drag: a chart drawn exactly under
+ * the default corners (the middle third, as defaultCorners puts them). It has
+ * to be a chart -- the solver refuses patches that do not fit one, which is
+ * what fixture.dng's middle third is (OpenIPC/raw-editor#42) -- and it
+ * carries fixture.dng's own ColorMatrix1, so the light can be named. */
+async function calibrationChart() {
+	const W = 640, H = 480;
+	const corners = [[W * 0.3, H * 0.35], [W * 0.7, H * 0.35], [W * 0.7, H * 0.72], [W * 0.3, H * 0.72]];
+	const matrices = [{ illuminant: 17, matrix: [1.120947, -0.41217, -0.39907, -0.212967, 1.211035,
+		0.065135, -0.054979, 0.354551, 0.849321] }];
+	const url = '/__chart.dng?corners=' + encodeURIComponent(JSON.stringify(corners)) +
+		'&matrices=' + encodeURIComponent(JSON.stringify(matrices));
+	return new Uint8Array(await (await fetch(url)).arrayBuffer());
+}
+
 /*
  * The phone pass.
  *
@@ -653,8 +668,23 @@ try {
 			`dragged to ${dragged}, now ${host.querySelector('.re-chart-grip[data-corner="0"]').style.left}, default ${atDefault}`);
 		t('with the previous result cleared rather than left to be applied',
 			!host.querySelector('[data-act="apply-to-camera"]'));
-		// Back to the frame the rest of this block measures.
+		// A frame with no chart in it, measured anyway: the answer is a refusal
+		// on the panel, and nothing to send to a camera. Before the solver had
+		// a limit on the fit this was a matrix that, applied, turned a camera's
+		// picture into amplified noise (OpenIPC/raw-editor#42).
 		await ed.open(new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer()), 'fixture.dng');
+		await new Promise((r) => setTimeout(r, 400));
+		host.querySelector('[data-act="measure"]').click();
+		let said = '';
+		for (let i = 0; i < 100 && !said; i++) {
+			await new Promise((r) => setTimeout(r, 100));
+			said = [...host.querySelectorAll('.re-warn')].map((w) => w.textContent).join(' | ');
+		}
+		t('measuring a frame with no chart in it is refused on the panel',
+			/not on a colour chart/.test(said), said.slice(0, 160) || '(nothing said)');
+		t('and offers nothing to write to the camera', !host.querySelector('[data-act="apply-to-camera"]'));
+		// Back to a frame the rest of this block can measure.
+		await ed.open(await calibrationChart(), 'chart.dng');
 		await new Promise((r) => setTimeout(r, 400));
 	}
 
@@ -668,8 +698,8 @@ try {
 		const txt = host.querySelector('.re-note')?.parentElement?.textContent || '';
 		const res = [...host.querySelectorAll('p.re-note')].map((p) => p.textContent).join(' | ');
 		t('the result reports ΔE2000', /Mean ΔE2000 \d+\.\d\d, worst \d+\.\d\d/.test(res), res.slice(0, 160) || txt.slice(0, 80));
-		// fixture.dng is off a real camera and carries its ColorMatrix1/2, so
-		// the light can be named.
+		// The chart frame carries a real camera's ColorMatrix1, so the light
+		// can be named.
 		const light = host.querySelector('[data-role="light"]');
 		t('and names the light off the camera\'s own matrices',
 			!!light && /about \d{4,5} K/.test(light.textContent), light?.textContent || '(no light line)');
@@ -1571,7 +1601,7 @@ try {
 			keep: async () => { seen.push('keep'); throw new Error('the camera answered 500.'); },
 		},
 	});
-	await ed.open(new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer()), 'fixture.dng');
+	await ed.open(await calibrationChart(), 'chart.dng');
 	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent === 'Calibrate').click();
 	await new Promise((r) => setTimeout(r, 300));
 	host.querySelector('[data-act="measure"]').click();

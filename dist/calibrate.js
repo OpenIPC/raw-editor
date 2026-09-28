@@ -427,6 +427,20 @@ const CLIP_LIMIT = 0.02;
 const MIN_PATCHES = 12;
 
 /*
+ * How far from the chart a fit may land and still be a fit to the chart.
+ *
+ * Rows that sum to one are guaranteed by construction, so they say nothing
+ * about whether the patches were a chart. The error does. The real chart in
+ * tests/chart-on-wood.dng fits at a mean of 4.77 ΔE2000, and a chart drawn by
+ * tools/make-chart.mjs at 7.47 -- it is drawn from the 8-bit sRGB values, not
+ * the Lab ones it is scored against. Patches off that frame's wood, and off a
+ * camera's plain wall with no chart on it, fit at 19 to 26 wherever the
+ * corners were put -- and applied to the camera, a matrix solved from that
+ * wall turned its picture into amplified noise (OpenIPC/raw-editor#42).
+ */
+const MAX_MEAN_DELTA_E = 12;
+
+/*
  * Score a camera-to-display matrix on the chart, the way solveFromPatches
  * scores its own: white-balanced camera values through the matrix, one
  * exposure scale fitted so a matrix is not blamed for the exposure, ΔE2000
@@ -557,6 +571,9 @@ export function solveFromPatches(measured, opts = {}) {
 		deltaE(apply3(LINEAR_SRGB_TO_XYZ50, pred(p, i)), CHART_XYZ50[i])), 0) /
 		errs.filter((e) => e !== null).length;
 	fit.patches = weights.reduce((s, w) => s + w, 0);
+	if (!(fit.meanDeltaE <= MAX_MEAN_DELTA_E))
+		throw new Error(`these patches fit the chart at a mean of ${fit.meanDeltaE.toFixed(1)} ΔE2000, ` +
+			`and a chart fits under ${MAX_MEAN_DELTA_E} — the corners are not on a colour chart`);
 
 	/*
 	 * ColorMatrix1 maps XYZ *under the light the chart was lit by* to the
