@@ -48,7 +48,7 @@ function invert3(h) {
 
 export function makeChartFrame({ width = 640, height = 480, corners,
 	background = [700, 900, 600], gap = 0.12, surround = 120, noise = 6, seed = 7,
-	saturated = null } = {}) {
+	saturated = null, colorMatrices = [] } = {}) {
 	if (!corners) throw new Error('corners are the point of this');
 	const H = homography(corners), Hi = invert3(H);
 	const rgb = new Float64Array(width * height * 3);
@@ -94,5 +94,5 @@ export function makeChartFrame({ width = 640, height = 480, corners,
 			const v = rgb[(y * width + x) * 3 + p] + rnd() * noise * 2;
 			px[y * width + x] = Math.max(0, Math.min(4095, Math.round(v)));
 		}
-	return { bytes: makeDng({ width, height, pixels: px, black: 0, white: 4095 }), corners };
+	return { bytes: makeDng({ width, height, pixels: px, black: 0, white: 4095, colorMatrices }), corners };
 }

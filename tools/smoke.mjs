@@ -776,6 +776,37 @@ console.log('\na chart on a textured wall is still a chart');
 	const hand = [[192.4, 203.4], [577.5, 185.2], [594.2, 443.1], [208.4, 468.8]];
 	const err = ch ? Math.max(...ch.corners.map((p, i) => Math.hypot(p[0] - hand[i][0], p[1] - hand[i][1]))) : Infinity;
 	assert('where it actually is', err < 6, err.toFixed(1) + ' px from the hand-placed corners');
+
+	/*
+	 * What the solver is told on this frame decides what a camera is sent.
+	 * The chart fits well; the wood around it does not fit at all, and before
+	 * a limit on the fit error it solved anyway -- rows summing to one, as
+	 * they always do -- into a matrix that, applied to a camera, turned the
+	 * picture into amplified noise (OpenIPC/raw-editor#42).
+	 */
+	const { solveFromPatches, patchCentres } = await import('../src/calibrate.js');
+	const measure = (corners) => {
+		const patches = [], clipped = [];
+		for (const c of patchCentres(corners)) {
+			const got = e.samplePatch(c.x, c.y, Math.max(4, Math.round(c.radius)));
+			patches.push(got.raw);
+			clipped.push(got.clipped || 0);
+		}
+		return solveFromPatches(patches, { clipped, colorMatrices: info.colorMatrices });
+	};
+	let onChart = null, onChartErr = '';
+	try { onChart = measure(ch.corners); } catch (x) { onChartErr = x.message; }
+	assert('the chart itself still calibrates', !!onChart && onChart.fit.meanDeltaE < 10,
+		onChart ? onChart.fit.meanDeltaE.toFixed(2) + ' ΔE2000' : onChartErr);
+	// The editor's default corners, the middle third of the frame: on this
+	// frame that is mostly boards and the shelf, not the chart.
+	const W = info.width, H = info.height;
+	let offChart = '';
+	try {
+		measure([[W * 0.3, H * 0.35], [W * 0.7, H * 0.35], [W * 0.7, H * 0.72], [W * 0.3, H * 0.72]]);
+	} catch (x) { offChart = x.message; }
+	assert('the wood beside it is refused, not solved', /not on a colour chart/.test(offChart),
+		offChart || 'a matrix came back');
 }
 
 console.log('\nthe camera profile: its AWB curve, its matrices, and a new set built from lights');
@@ -1157,6 +1188,14 @@ console.log('\nthe chart is found where it was drawn');
 		engine.open(readFileSync(new URL(`../tests/${f}`, import.meta.url)));
 		assert(`${f} has no chart in it, and none is reported`, engine.detectChart() === null);
 	}
+
+	// A chart hanging off the bottom edge: the detector sees 18 cells and
+	// extrapolates the lattice to corners below the frame. The cells there
+	// have nothing under them to measure, and a lattice with corners off the
+	// frame is also what the detector made of a plain wall (two corners past
+	// the frame's far edge) -- so it is not reported.
+	engine.open(makeChartFrame({ corners: [[120, 250], [520, 250], [520, 520], [120, 520]] }).bytes);
+	assert('a chart cut off by the frame edge is not reported', engine.detectChart() === null);
 }
 
 console.log('\nhostile metadata stays data');

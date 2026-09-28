@@ -80,9 +80,12 @@ const server = createServer(async (req, res) => {
 	if (req.url.startsWith('/__chart.dng')) {
 		const q = new URL(req.url, 'http://x').searchParams;
 		const corners = JSON.parse(q.get('corners'));
+		// A camera's own ColorMatrix1/2, when the check needs the light named
+		// off them the way a real frame's are.
+		const colorMatrices = JSON.parse(q.get('matrices') || '[]');
 		const { makeChartFrame } = await import('./make-chart.mjs');
 		res.writeHead(200, { 'content-type': 'application/octet-stream' });
-		res.end(makeChartFrame({ corners }).bytes);
+		res.end(makeChartFrame({ corners, colorMatrices }).bytes);
 		return;
 	}
 	const p = join(ROOT, normalize(decodeURIComponent(req.url.split('?')[0])));

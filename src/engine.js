@@ -269,10 +269,16 @@ export class Engine {
 		const found = x.detect_chart(cfa, this.chartPtr);
 		if (found <= 0) return null;
 		const f = new Float32Array(x.memory.buffer, this.chartPtr, 8);
-		return {
-			corners: [[f[0], f[1]], [f[2], f[3]], [f[4], f[5]], [f[6], f[7]]],
-			cells: found,
-		};
+		const corners = [[f[0], f[1]], [f[2], f[3]], [f[4], f[5]], [f[6], f[7]]];
+		// A lattice whose corners the detector had to extrapolate off the frame
+		// is not a chart that can be measured -- the cells past the edge have
+		// nothing under them -- and on a frame with no chart at all it is what a
+		// fit to the wall looks like: a plain red wall came back as 19 cells
+		// with corners at (2170, 1986) on a 1920x1080 frame, and the matrix
+		// solved from it wrecked the camera's picture (OpenIPC/raw-editor#42).
+		if (corners.some(([cx, cy]) => !(cx >= 0 && cy >= 0 && cx <= i.width && cy <= i.height)))
+			return null;
+		return { corners, cells: found };
 	}
 
 	histogram() {
