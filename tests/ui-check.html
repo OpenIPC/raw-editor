@@ -707,7 +707,7 @@ try {
 		// it -- not left for the operator to find in the video afterwards.
 		const noise = host.querySelector('[data-role="noise"]');
 		t('and says how much noisier than today the picture would be',
-			!!noise && /\d\.\d\d× the noise of the camera's picture today/.test(noise.textContent),
+			!!noise && /\d\.\d\d× the noise of the camera's picture as it is now/.test(noise.textContent),
 			noise?.textContent || '(no noise line)');
 	}
 

@@ -634,6 +634,14 @@ export function solveFromPatches(measured, opts = {}) {
 			q = levenberg(held, q);
 			if (noiseGain(ccmFrom(q), neutral).every((v, r) => v <= budget[r] * 1.005)) break;
 		}
+		/* Checked, not assumed: the steepest penalty can still leave a row
+		 * over a budget no row-sums-to-one matrix can meet, and a matrix
+		 * reported as held must be one. */
+		const reached = noiseGain(ccmFrom(q), neutral);
+		const over = Math.max(...reached.map((v, r) => v / budget[r]));
+		if (over > 1.005)
+			throw new Error(`no colour matrix fits this chart within the noise allowed — the ` +
+				`closest is ${over.toFixed(2)}× over it`);
 		if (q !== p) {
 			ccmOut = ccmFrom(q);
 			const errsHeld = balanced.map((_, i) => weights[i] ?

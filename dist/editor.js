@@ -2860,26 +2860,35 @@ export function mountEditor(root, {
 		 * profile cannot be read, or a light that cannot be named, is solved
 		 * free, and the result says so rather than implying it was checked.
 		 */
-		let why = null;
+		let own = null, why = null;
 		if (!(calibrate && calibrate.baseline)) why = 'no-baseline';
 		else if (!free.light) why = 'no-light';
 		else {
+			/* Only reading the camera's profile may fall back to an unheld fit.
+			 * A budget that cannot be met is an answer, and it is shown as one. */
 			try {
-				const own = readColour(parseIni(await calibrate.baseline())).ccm;
-				if (!own) why = 'no-baseline';
-				else {
-					const at = vendorCcmAt(own, free.light.cct);
-					const budget = noiseGain(at, free.neutral).map((v) => v * NOISE_HEADROOM);
-					const held = solveFromPatches(patches, { ...opts, noiseBudget: budget });
-					held.noise.camera = noiseGain(at, free.neutral);
-					return held;
-				}
+				own = readColour(parseIni(await calibrate.baseline())).ccm;
 			} catch {
-				why = 'no-baseline';
+				own = null;
 			}
+			if (!own) why = 'no-baseline';
 		}
-		free.noise.unchecked = why;
-		return free;
+		if (!own) {
+			free.noise.unchecked = why;
+			return free;
+		}
+		/* The camera's matrix at this light, through the white balance the
+		 * camera itself chose for this frame -- its picture as it is, rather
+		 * than as it would be with the chart's balance. */
+		const at = vendorCcmAt(own, free.light.cct);
+		const shot = state.info && state.info.neutral;
+		const camNeutral = shot && shot.every((v) => v > 0) ? shot : free.neutral;
+		const camera = noiseGain(at, camNeutral);
+		const held = solveFromPatches(patches, {
+			...opts, noiseBudget: camera.map((v) => v * NOISE_HEADROOM),
+		});
+		held.noise.camera = camera;
+		return held;
 	}
 
 	/* The panel, and the way back.
@@ -3098,11 +3107,12 @@ export function mountEditor(root, {
 			if (nz && nz.camera) {
 				const now = worst(nz.gain, nz.camera);
 				n.textContent = nz.held
-					? `Kept to ${now.toFixed(2)}× the noise of the camera's picture today. ` +
+					? `Kept to ${now.toFixed(2)}× the noise of the camera's picture as it is now — ` +
+						'a calibration saved earlier counts as "now". ' +
 						`Matching the chart as closely as possible would fit at ΔE2000 ` +
 						`${nz.free.fit.meanDeltaE.toFixed(2)} and make the video ` +
 						`${worst(nz.free.gain, nz.camera).toFixed(1)}× as noisy.`
-					: `${now.toFixed(2)}× the noise of the camera's picture today, ` +
+					: `${now.toFixed(2)}× the noise of the camera's picture as it is now, ` +
 						`inside the ${NOISE_HEADROOM}× allowed.`;
 			} else {
 				n.textContent = 'Not checked against the camera\'s own colour, so how much ' +

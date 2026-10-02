@@ -705,6 +705,13 @@ console.log('\ncalibration recovers a matrix it was not given');
 		assert('and what the chart alone wanted comes back beside it',
 			held.noise.held && held.noise.free.fit.meanDeltaE === free.fit.meanDeltaE);
 
+		// A budget no matrix whose rows sum to one can meet is refused, not
+		// returned over budget and labelled held.
+		let impossible = '';
+		try { solveFromPatches(SC2239_LAMP, { noiseBudget: [0.1, 0.1, 0.1] }); }
+		catch (e) { impossible = e.message; }
+		assert('an impossible budget is refused', /within the noise allowed/.test(impossible), impossible);
+
 		// A budget the free fit already meets changes nothing.
 		const slack = solveFromPatches(SC2239_LAMP, { noiseBudget: free.noise.gain.map((v) => v * 2) });
 		assert('a budget already met leaves the fit alone',
