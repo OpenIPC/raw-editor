@@ -758,6 +758,28 @@ console.log('\na chart beside a blown-out window is still a chart');
 		ch ? ch.cells + ' cells' : 'nothing');
 }
 
+console.log('\na chart beside a deep shadow, with noise that grows with the light');
+{
+	/*
+	 * A sensor's noise is mostly shot noise, larger where there is more
+	 * light, and a real frame has shadows. The flatness threshold is one
+	 * number taken from the frame's quietest tenth, which is then its darkest
+	 * tenth -- and that sat under the noise on the bright patches, which
+	 * shattered. A lab gk7605v100 + SC2239 under window light lost the chart
+	 * in plain view that way. Here a third of the frame is shadow; before the
+	 * luma was square-rooted this frame reported no chart at all.
+	 */
+	const { makeChartFrame } = await import('./make-chart.mjs');
+	const truth = [[300, 120], [600, 120], [600, 320], [300, 320]];
+	const e = await instantiate(readFileSync(new URL('../dist/engine.wasm', import.meta.url)));
+	e.open(makeChartFrame({ corners: truth, noise: 1, shot: 1, background: [2000, 2600, 1800],
+		dark: [0, 0, 192, 480, 20] }).bytes);
+	const ch = e.detectChart();
+	assert('a chart beside a shadow is found', !!ch && ch.cells === 24, ch ? ch.cells + ' cells' : 'nothing');
+	const err = ch ? Math.max(...ch.corners.map((p, i) => Math.hypot(p[0] - truth[i][0], p[1] - truth[i][1]))) : Infinity;
+	assert('where it was drawn', err < 6, err.toFixed(1) + ' px from the corners that drew it');
+}
+
 console.log('\na chart on a textured wall is still a chart');
 {
 	/*

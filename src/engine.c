@@ -930,6 +930,25 @@ static i32 chart_downscale(i32 cfa, int *dw, int *dh, int *scale) {
         if (!g_ds || !g_lab || !g_stack) { g_ds = 0; return ERR_SIZE; }
         g_ds_cap = (i32)need;
     }
+    /*
+     * Square-rooted above the black level, so noise is the same size at every
+     * brightness.
+     *
+     * A sensor's noise is mostly shot noise, whose spread grows with the
+     * square root of the signal; the flatness threshold below is one number
+     * for the whole frame, taken from its quietest tenth -- which is its
+     * darkest tenth. On a lab gk7605v100 + SC2239 under window light that put
+     * the threshold at 10.9 counts, under the noise of the chart's own bright
+     * patches: they shattered into specks, 9 of the 24 survived as patches,
+     * 18 are needed, and a chart in plain view was reported as no chart. The
+     * same chart under a lamp, with brighter shadows, came out at 18.8 and
+     * was found. After the root the threshold lands at 1.6 to 1.7 on all three
+     * frames taken of it and 22 or 23 patches survive in each (Anscombe's
+     * transform, without its constant scale -- the threshold is relative).
+     * Nothing downstream needs the linear value: the ramp test only asks
+     * which way the greys fall, and a root keeps the order.
+     */
+    const int per_pos = F.nblack == 4 && F.rep_rows == 2 && F.rep_cols == 2;
     for (int y = 0; y < oh; y++)
         for (int x = 0; x < ow; x++) {
             double sum = 0; int n = 0;
@@ -938,10 +957,12 @@ static i32 chart_downscale(i32 cfa, int *dw, int *dh, int *scale) {
                     const int px = x * sc + bx, py = y * sc + by;
                     if (px >= w || py >= h) continue;
                     if (plane_at(cfa, px, py) != 1) continue;   /* greens carry the luma */
-                    sum += F.raw[py * w + px];
+                    const i32 b = per_pos ? F.black4[((py & 1) << 1) | (px & 1)] : F.black;
+                    sum += (double)F.raw[py * w + px] - (double)b;
                     n++;
                 }
-            g_ds[y * ow + x] = n ? (float)(sum / n) : 0.f;
+            const double v = n ? sum / n : 0.0;
+            g_ds[y * ow + x] = (float)(2.0 * __builtin_sqrt((v > 0.0 ? v : 0.0) + 0.375));
         }
     *dw = ow; *dh = oh; *scale = sc;
     return ERR_OK;
