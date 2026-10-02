@@ -703,6 +703,12 @@ try {
 		const light = host.querySelector('[data-role="light"]');
 		t('and names the light off the camera\'s own matrices',
 			!!light && /about \d{4,5} K/.test(light.textContent), light?.textContent || '(no light line)');
+		// The camera's own matrix was readable, so the noise is stated against
+		// it -- not left for the operator to find in the video afterwards.
+		const noise = host.querySelector('[data-role="noise"]');
+		t('and says how much noisier than today the picture would be',
+			!!noise && /\d\.\d\d× the noise of the camera's picture as it is now/.test(noise.textContent),
+			noise?.textContent || '(no noise line)');
 	}
 
 	send.click();
@@ -1612,6 +1618,13 @@ try {
 		await new Promise((r) => setTimeout(r, 100));
 	host.querySelector('[data-act="keep"]').click();
 	await new Promise((r) => setTimeout(r, 600));
+	// No baseline() here, so nothing to hold the noise against -- and the
+	// result must say that, not imply it was checked.
+	{
+		const noise = host.querySelector('[data-role="noise"]');
+		t('without the camera\'s own colour, the noise is called unchecked',
+			!!noise && /^Not checked/.test(noise.textContent), noise?.textContent || '(no noise line)');
+	}
 	const said = host.querySelector('[data-act="hold"]').textContent;
 	t('a confirmation that did not reach the camera is not reported as kept',
 		!/^Kept\./.test(said.trim()) && /did not reach/.test(said), said.slice(0, 90));

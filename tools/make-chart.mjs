@@ -48,7 +48,7 @@ function invert3(h) {
 
 export function makeChartFrame({ width = 640, height = 480, corners,
 	background = [700, 900, 600], gap = 0.12, surround = 120, noise = 6, seed = 7,
-	saturated = null, colorMatrices = [] } = {}) {
+	saturated = null, colorMatrices = [], shot = 0, dark = null } = {}) {
 	if (!corners) throw new Error('corners are the point of this');
 	const H = homography(corners), Hi = invert3(H);
 	const rgb = new Float64Array(width * height * 3);
@@ -85,13 +85,28 @@ export function makeChartFrame({ width = 640, height = 480, corners,
 			for (let x = sx; x < sx + sw && x < width; x++)
 				rgb[(y * width + x) * 3] = rgb[(y * width + x) * 3 + 1] = rgb[(y * width + x) * 3 + 2] = 1e6;
 	}
+	// A region in deep shadow: lit so little that it has almost no noise.
+	// With shot noise on, a frame like this one has its quietest tenth in the
+	// dark and its loudest in the bright patches -- which is every real frame.
+	if (dark) {
+		const [dx, dy, dw, dh, level] = dark;
+		for (let y = dy; y < dy + dh && y < height; y++)
+			for (let x = dx; x < dx + dw && x < width; x++)
+				rgb[(y * width + x) * 3] = rgb[(y * width + x) * 3 + 1] = rgb[(y * width + x) * 3 + 2] = level;
+	}
 	let s = seed;
 	const rnd = () => ((s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff - 0.5);
 	const px = new Uint16Array(width * height);
 	for (let y = 0; y < height; y++)
 		for (let x = 0; x < width; x++) {
 			const p = (y % 2 === 0) ? (x % 2 === 0 ? 0 : 1) : (x % 2 === 0 ? 1 : 2);
-			const v = rgb[(y * width + x) * 3 + p] + rnd() * noise * 2;
+			const base = rgb[(y * width + x) * 3 + p];
+			// `shot` is the variance per count of signal: a sensor's noise grows
+			// with the square root of what it collected. Four uniforms make it
+			// close enough to Gaussian with the same variance.
+			const sd = shot ? Math.sqrt(shot * base) : 0;
+			const g = shot ? (rnd() + rnd() + rnd() + rnd()) * Math.sqrt(3) : 0;
+			const v = base + rnd() * noise * 2 + g * sd;
 			px[y * width + x] = Math.max(0, Math.min(4095, Math.round(v)));
 		}
 	return { bytes: makeDng({ width, height, pixels: px, black: 0, white: 4095, colorMatrices }), corners };

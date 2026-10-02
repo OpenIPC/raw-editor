@@ -666,6 +666,58 @@ console.log('\ncalibration recovers a matrix it was not given');
 
 	check('the chart is 24 patches', CHART_SRGB.length, 24);
 
+	/*
+	 * The noise a matrix costs. These 24 patches are what a lab gk7605v100 +
+	 * SC2239 measured off a chart under a 2330 K lamp, and the matrix beside
+	 * them is the one that camera ran at that light. Fitted free, the green
+	 * row amplified noise 2.2 times as much as that matrix -- and the
+	 * camera's video showed it, 2.2 to 2.6 times the chroma noise.
+	 */
+	{
+		const { noiseGain, NOISE_HEADROOM } = await import('../src/calibrate.js');
+		const SC2239_LAMP = [[166.15, 153.5, 59.53], [397.58, 397.49, 148.76], [191.03, 282.94, 145.5],
+			[120.94, 164.23, 55.41], [351.42, 446.54, 201.8], [260.18, 464.5, 197.93],
+			[561.4, 425.78, 136.32], [136.28, 204.11, 136.13], [441.78, 295.12, 118.77],
+			[106.99, 121.47, 62.11], [285.99, 411.7, 117.5], [522.06, 463.38, 136.64],
+			[57.66, 88.11, 71.75], [152.88, 248.85, 87.56], [355.54, 197.73, 76.88],
+			[520.53, 548.39, 155.57], [309.23, 256.11, 122.67], [117.77, 235.67, 130.99],
+			[503.42, 596.72, 243.61], [405.13, 478.44, 200.57], [373.29, 442.86, 188.86],
+			[204.4, 240.21, 103.45], [123.09, 143.95, 61.96], [43.89, 46.89, 19.94]];
+		// imx307.ini's 2525 K table, which is what that camera ran: sign-magnitude, 256 = 1.
+		const CAMERA = [535, 33043, 32772, 32860, 400, 32820, 32778, 32969, 467]
+			.map((v) => (v & 0x8000 ? -(v & 0x7fff) : v) / 256);
+		const free = solveFromPatches(SC2239_LAMP);
+		const own = noiseGain(CAMERA, free.neutral);
+		const ratio = Math.max(...free.noise.gain.map((v, k) => v / own[k]));
+		assert('fitted free, the matrix is much noisier than the camera\'s', ratio > 2,
+			ratio.toFixed(2) + '×');
+		check('and says it was not held', free.noise.held, false);
+
+		const budget = own.map((v) => v * NOISE_HEADROOM);
+		const held = solveFromPatches(SC2239_LAMP, { noiseBudget: budget });
+		const over = Math.max(...held.noise.gain.map((v, k) => v / budget[k]));
+		assert('held, no channel is over its budget', over <= 1.005, over.toFixed(4) + ' of budget');
+		assert('and it costs some accuracy, not all of it',
+			held.fit.meanDeltaE > free.fit.meanDeltaE && held.fit.meanDeltaE < 9,
+			`${free.fit.meanDeltaE.toFixed(2)} -> ${held.fit.meanDeltaE.toFixed(2)} ΔE2000`);
+		assert('every row still sums to one, so grey stays grey',
+			[0, 1, 2].every((r) => Math.abs(held.ccm[r * 3] + held.ccm[r * 3 + 1] + held.ccm[r * 3 + 2] - 1) < 1e-9));
+		assert('and what the chart alone wanted comes back beside it',
+			held.noise.held && held.noise.free.fit.meanDeltaE === free.fit.meanDeltaE);
+
+		// A budget no matrix whose rows sum to one can meet is refused, not
+		// returned over budget and labelled held.
+		let impossible = '';
+		try { solveFromPatches(SC2239_LAMP, { noiseBudget: [0.1, 0.1, 0.1] }); }
+		catch (e) { impossible = e.message; }
+		assert('an impossible budget is refused', /within the noise allowed/.test(impossible), impossible);
+
+		// A budget the free fit already meets changes nothing.
+		const slack = solveFromPatches(SC2239_LAMP, { noiseBudget: free.noise.gain.map((v) => v * 2) });
+		assert('a budget already met leaves the fit alone',
+			!slack.noise.held && slack.ccm.every((v, k) => v === free.ccm[k]));
+	}
+
 	// CIEDE2000 against the 34 pairs Sharma, Wu and Dalal published with their
 	// implementation notes, to their four decimals. Pairs 7-16 are the ones
 	// that catch the hue-mean and zero-chroma special cases.
@@ -756,6 +808,28 @@ console.log('\na chart beside a blown-out window is still a chart');
 	const ch = e.detectChart();
 	assert('a chart beside a clipped region is found', !!ch && ch.cells === 24,
 		ch ? ch.cells + ' cells' : 'nothing');
+}
+
+console.log('\na chart beside a deep shadow, with noise that grows with the light');
+{
+	/*
+	 * A sensor's noise is mostly shot noise, larger where there is more
+	 * light, and a real frame has shadows. The flatness threshold is one
+	 * number taken from the frame's quietest tenth, which is then its darkest
+	 * tenth -- and that sat under the noise on the bright patches, which
+	 * shattered. A lab gk7605v100 + SC2239 under window light lost the chart
+	 * in plain view that way. Here a third of the frame is shadow; before the
+	 * luma was square-rooted this frame reported no chart at all.
+	 */
+	const { makeChartFrame } = await import('./make-chart.mjs');
+	const truth = [[300, 120], [600, 120], [600, 320], [300, 320]];
+	const e = await instantiate(readFileSync(new URL('../dist/engine.wasm', import.meta.url)));
+	e.open(makeChartFrame({ corners: truth, noise: 1, shot: 1, background: [2000, 2600, 1800],
+		dark: [0, 0, 192, 480, 20] }).bytes);
+	const ch = e.detectChart();
+	assert('a chart beside a shadow is found', !!ch && ch.cells === 24, ch ? ch.cells + ' cells' : 'nothing');
+	const err = ch ? Math.max(...ch.corners.map((p, i) => Math.hypot(p[0] - truth[i][0], p[1] - truth[i][1]))) : Infinity;
+	assert('where it was drawn', err < 6, err.toFixed(1) + ' px from the corners that drew it');
 }
 
 console.log('\na chart on a textured wall is still a chart');
