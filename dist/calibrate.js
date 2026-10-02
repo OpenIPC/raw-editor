@@ -469,12 +469,48 @@ function summarise(errs, k) {
 }
 
 /*
+ * How much a live matrix amplifies the sensor's noise, per output channel.
+ *
+ * Each output is a weighted sum of the three white-balanced inputs, so its
+ * noise grows with the length of that row of weights -- with the white
+ * balance gains folded in, because they multiply the noise before the matrix
+ * sees it. A row of [1, 0, 0] passes red's noise through unchanged; a row
+ * that subtracts its neighbours to buy saturation amplifies all three.
+ *
+ * This is the cost a chart fit never sees. The 24 patches are averages, so
+ * their noise is gone before the solver looks at them, and the fit is free to
+ * buy accuracy with amplification. On a lab gk7605v100 + SC2239 under a
+ * 2330 K lamp it did: the fit took mean ΔE2000 from 8.9 to 5.7 with a green
+ * row that amplified 3.73 against the 1.69 the camera ran before, and the
+ * camera's video carried 2.2 to 2.6 times the chroma noise on flat surfaces,
+ * measured over 40 frames against the matrix it replaced.
+ */
+export function noiseGain(ccm, neutral) {
+	const g = [1 / neutral[0], 1 / neutral[1], 1 / neutral[2]];
+	return [0, 1, 2].map((r) =>
+		Math.hypot(ccm[r * 3] * g[0], ccm[r * 3 + 1] * g[1], ccm[r * 3 + 2] * g[2]));
+}
+
+/*
+ * How much noisier than the camera's own matrix a calibration may make the
+ * picture, by default. Measured on the same camera, same light, same chart:
+ * held at 1.25 times, video chroma noise rose 0 to 30 per cent instead of 2.2
+ * to 2.6 times, and the chart's colour error came out at 10.4 against 10.8
+ * for the unheld matrix -- the amplification bought almost nothing the
+ * picture shows. Held at 1.0 the error was 12.9, and the camera's own 14.0.
+ */
+export const NOISE_HEADROOM = 1.25;
+
+/*
  * measured: 24 camera RGB triples, black-subtracted, in chart order.
  * opts.clipped: per patch, the fraction of it the sampler found clipped.
  * opts.colorMatrices: the DNG's ColorMatrix1/2 with their illuminants, so the
  *   light can be named.
  * opts.cct: the light's temperature, when someone knows it better than the
  *   camera does.
+ * opts.noiseBudget: the most each output channel may amplify the sensor's
+ *   noise, as noiseGain() measures it. The fit is held under it, and what the
+ *   chart alone would have asked for comes back as `noise.free`.
  *
  * Returns the white balance the neutral row implies, both matrices, the light,
  * and how well the result actually fits -- because a solve always returns
@@ -576,6 +612,46 @@ export function solveFromPatches(measured, opts = {}) {
 			`and a chart fits under ${MAX_MEAN_DELTA_E} — the corners are not on a colour chart`);
 
 	/*
+	 * Held under the noise budget, when there is one. The chart has been
+	 * judged above on the free fit -- whether these are a chart's patches does
+	 * not depend on how much noise the answer may cost.
+	 *
+	 * The budget is a penalty on each row's excess, made steeper until it
+	 * holds: a fixed weight left rows a few per cent over, and "a few per cent
+	 * over" is not a limit. Started from the free fit, which is the nearest
+	 * answer and the one a slack budget returns unchanged.
+	 */
+	let ccmOut = ccm, fitOut = fit, noise = null;
+	const free = noiseGain(ccm, neutral);
+	if (opts.noiseBudget) {
+		const budget = opts.noiseBudget;
+		if (budget.length !== 3 || budget.some((v) => !(v > 0)))
+			throw new Error('a noise budget is three positive numbers');
+		let q = p;
+		for (let mu = 30; free.some((v, r) => v > budget[r]) && mu <= 3e5; mu *= 10) {
+			const held = (x) => residual(x).concat(noiseGain(ccmFrom(x), neutral)
+				.map((v, r) => mu * Math.max(0, v - budget[r])));
+			q = levenberg(held, q);
+			if (noiseGain(ccmFrom(q), neutral).every((v, r) => v <= budget[r] * 1.005)) break;
+		}
+		if (q !== p) {
+			ccmOut = ccmFrom(q);
+			const errsHeld = balanced.map((_, i) => weights[i] ?
+				deltaE2000(lab(apply3(LINEAR_SRGB_TO_XYZ50, apply3(ccmOut, balanced[i])
+					.map((v) => v * Math.exp(q[6])))), CHART_LAB50[i]) : null);
+			fitOut = summarise(errsHeld, Math.exp(q[6]));
+			fitOut.patches = fit.patches;
+			fitOut.meanDeltaE76 = errsHeld.reduce((s, e, i) => s + (e === null ? 0 :
+				deltaE(apply3(LINEAR_SRGB_TO_XYZ50, apply3(ccmOut, balanced[i])
+					.map((v) => v * Math.exp(q[6]))), CHART_XYZ50[i])), 0) / fit.patches;
+		}
+		noise = { gain: noiseGain(ccmOut, neutral), budget: budget.slice(),
+			held: q !== p, free: q !== p ? { ccm, fit, gain: free } : null };
+	} else {
+		noise = { gain: free, budget: null, held: false, free: null };
+	}
+
+	/*
 	 * ColorMatrix1 maps XYZ *under the light the chart was lit by* to the
 	 * camera. The reference is D50, so it is carried to that light first --
 	 * without this the matrix claims a D50 calibration for a frame shot under
@@ -611,9 +687,9 @@ export function solveFromPatches(measured, opts = {}) {
 	const colorMatrix = fitted.map((v) => v / peak);
 
 	return {
-		neutral, colorMatrix, ccm, balanced, weights,
+		neutral, colorMatrix, ccm: ccmOut, balanced, weights,
 		light, estimated,
-		fit,
+		fit: fitOut, noise,
 	};
 }
 

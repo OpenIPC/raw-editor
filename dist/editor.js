@@ -12,7 +12,7 @@
  * temperature/tint pair it has no model for yet.
  */
 
-import { solveFromPatches, patchCentres, scoreCcm, CHART_COLS, CHART_ROWS } from './calibrate.js';
+import { solveFromPatches, patchCentres, scoreCcm, noiseGain, NOISE_HEADROOM, CHART_COLS, CHART_ROWS } from './calibrate.js';
 import { parseIni, readColour, fitAwbCurve, gainsForCt, mergeCcmTables, colourFragment,
 	readDefectCorrection, enableDefectCorrection } from './iqprofile.js';
 import { summarise, peakHold, normalise, coarsen, sweepZones, zoneDetail,
@@ -2849,10 +2849,37 @@ export function mountEditor(root, {
 			patches.push(got.raw);
 			clipped.push(got.clipped || 0);
 		}
-		return solveFromPatches(patches, {
-			clipped,
-			colorMatrices: state.info && state.info.colorMatrices,
-		});
+		const opts = { clipped, colorMatrices: state.info && state.info.colorMatrices };
+		const free = solveFromPatches(patches, opts);
+		/*
+		 * No noisier than the camera is today, give or take NOISE_HEADROOM.
+		 *
+		 * The chart cannot say what a matrix costs in noise -- its patches are
+		 * averages -- so the fit is held against the matrix the camera already
+		 * runs at this light, read out of its own profile. A camera whose
+		 * profile cannot be read, or a light that cannot be named, is solved
+		 * free, and the result says so rather than implying it was checked.
+		 */
+		let why = null;
+		if (!(calibrate && calibrate.baseline)) why = 'no-baseline';
+		else if (!free.light) why = 'no-light';
+		else {
+			try {
+				const own = readColour(parseIni(await calibrate.baseline())).ccm;
+				if (!own) why = 'no-baseline';
+				else {
+					const at = vendorCcmAt(own, free.light.cct);
+					const budget = noiseGain(at, free.neutral).map((v) => v * NOISE_HEADROOM);
+					const held = solveFromPatches(patches, { ...opts, noiseBudget: budget });
+					held.noise.camera = noiseGain(at, free.neutral);
+					return held;
+				}
+			} catch {
+				why = 'no-baseline';
+			}
+		}
+		free.noise.unchecked = why;
+		return free;
 	}
 
 	/* The panel, and the way back.
@@ -3055,6 +3082,34 @@ export function mountEditor(root, {
 					duv < -0.006 ? ', magenta — well off daylight' : '') +
 				', read off the camera\'s own colour matrices.';
 			out.append(lt);
+		}
+
+		/*
+		 * What the colour cost in noise, in words a camera's owner can act
+		 * on: how much noisier than today, and what matching the chart
+		 * exactly would have cost instead.
+		 */
+		{
+			const nz = solved.noise;
+			const worst = (g, ref) => Math.max(...g.map((v, k) => v / ref[k]));
+			const n = el('p', 're-note');
+			n.style.margin = '0 0 6px';
+			n.dataset.role = 'noise';
+			if (nz && nz.camera) {
+				const now = worst(nz.gain, nz.camera);
+				n.textContent = nz.held
+					? `Kept to ${now.toFixed(2)}× the noise of the camera's picture today. ` +
+						`Matching the chart as closely as possible would fit at ΔE2000 ` +
+						`${nz.free.fit.meanDeltaE.toFixed(2)} and make the video ` +
+						`${worst(nz.free.gain, nz.camera).toFixed(1)}× as noisy.`
+					: `${now.toFixed(2)}× the noise of the camera's picture today, ` +
+						`inside the ${NOISE_HEADROOM}× allowed.`;
+			} else {
+				n.textContent = 'Not checked against the camera\'s own colour, so how much ' +
+					'noisier this makes the picture is unknown: a close fit on a chart can ' +
+					'amplify the sensor\'s noise several times over.';
+			}
+			out.append(n);
 		}
 
 		out.append(Object.assign(el('h3', 're-cap'), { textContent: 'Live matrix, camera to display' }));
