@@ -9,12 +9,19 @@
  *
  * Three kinds of answer arrive:
  *
- *   a measurement   { width, height, source, thresholdPct, spots: [...] }
+ *   a measurement   { width, height, source, thresholdPct, movingPct,
+ *                   warnings, spots: [...] }
  *   a comparison    the same, plus `baseline`: each spot saved before the
  *                   clean, judged cleared / remains / unjudged, and `new`
  *   a sites answer  { width, height, ircut, spots: [..., site], sites }:
  *                   measured with the IR-cut filter in and out, so a speck
  *                   on the filter can be told from one on the cover glass
+ *
+ * `movingPct` is how much of the picture moved between the frames the camera
+ * took -- clouds, traffic, leaves in wind. A speck cannot be told from a
+ * moving picture, so the camera reports spots there as less certain and does
+ * not judge them, and says so in `warnings` when much of the frame moved.
+ * Cameras that predate it send neither, and are read as before.
  *
  * Coordinates are in the pixels of the frame the camera measured. The frame
  * open here may be another size -- a raw frame where the camera measured its
@@ -40,6 +47,10 @@ function spotOf(s, w, h, extra) {
 	return extra ? Object.assign(out, extra(s)) : out;
 }
 
+function strings(a) {
+	return Array.isArray(a) ? a.filter((w) => typeof w === 'string') : [];
+}
+
 function frameOf(j) {
 	if (!j || typeof j !== 'object')
 		throw new Error('The camera did not answer with a dust measurement.');
@@ -63,6 +74,9 @@ export function readMeasurement(j) {
 		thresholdPct: num(j.thresholdPct, 'threshold', 0, 100),
 		luma: j.luma === undefined ? null : num(j.luma, 'luma', 0, 255),
 		gain: j.gain === undefined ? null : num(j.gain, 'gain', 0, 1e6),
+		movingPct: j.movingPct === undefined ? null
+			: num(j.movingPct, 'share of the picture that moved', 0, 100),
+		warnings: strings(j.warnings),
 		spots: j.spots.map((s) => spotOf(s, width, height)),
 		baseline: null,
 	};
@@ -78,8 +92,7 @@ export function readMeasurement(j) {
 					throw new Error('The camera\'s comparison does not say whether it could judge.');
 				return b.comparable;
 			})(),
-			warnings: Array.isArray(b.warnings)
-				? b.warnings.filter((w) => typeof w === 'string') : [],
+			warnings: strings(b.warnings),
 			spots: b.spots.map((s) => spotOf(s, width, height, (s2) => {
 				if (!STATES.has(s2.state))
 					throw new Error('The camera\'s comparison has a spot with no verdict.');
@@ -106,7 +119,24 @@ export function readSites(j) {
 			outPct: num(s2.outPct, 'spot depth', 0, 100),
 		};
 	}));
-	return { width, height, source: j.source === 'raw' ? 'raw' : null, spots };
+	/* Two measurements, one in each position of the filter: the picture may
+	 * have moved during either, and the more it did is the one that counts. */
+	const side = (k) => {
+		const v = j.ircut && j.ircut[k] && j.ircut[k].movingPct;
+		return v === undefined ? null : num(v, 'share of the picture that moved', 0, 100);
+	};
+	const moved = [side('in'), side('out')].filter((v) => v !== null);
+	return {
+		width, height, source: j.source === 'raw' ? 'raw' : null, spots,
+		movingPct: moved.length ? Math.max(...moved) : null,
+	};
+}
+
+/* Everything the camera warned about, once each: a comparison repeats the
+ * measurement's own warning under the "before" it was judged against. */
+export function warnings(m) {
+	const all = [...(m.warnings || []), ...((m.baseline && m.baseline.warnings) || [])];
+	return [...new Set(all)];
 }
 
 /* Where a spot measured on a `report`-sized frame sits on a `frame`-sized

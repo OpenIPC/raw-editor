@@ -17,7 +17,7 @@ import { parseIni, readColour, fitAwbCurve, gainsForCt, mergeCcmTables, colourFr
 	readDefectCorrection, enableDefectCorrection } from './iqprofile.js';
 import { summarise, peakHold, normalise, coarsen, sweepZones, zoneDetail,
 	sweptOneWay } from './aftune.js';
-import { readMeasurement, readSites, verdict, sitesVerdict, rings } from './dust.js';
+import { readMeasurement, readSites, verdict, sitesVerdict, rings, warnings as dustWarnings } from './dust.js';
 
 const CFA_NAMES = ['RGGB', 'GRBG', 'GBRG', 'BGGR'];
 const DEMOSAIC = [
@@ -5655,11 +5655,27 @@ export function mountEditor(root, {
 			else if (d.source === 'luma') facts.push('measured on the processed picture, ' +
 				'whose tone mapping moves how dark a speck reads');
 			if (d.thresholdPct !== undefined) facts.push(`smallest it can see ${d.thresholdPct.toFixed(1)}%`);
+			/* Said whenever the camera measured it, still scenes included: "0%
+			 * moved" is what makes a clean result worth believing. */
+			if (d.movingPct !== null && d.movingPct !== undefined)
+				facts.push(`${d.movingPct < 1 && d.movingPct > 0 ? '<1'
+					: Math.round(d.movingPct)}% of the picture moved between frames`);
 			if (d.baseline && d.baseline.taken) facts.push(`before saved ${d.baseline.taken}`);
 			if (facts.length)
 				status.append(Object.assign(el('p', 're-note'), { textContent: facts.join(' · ') + '.' }));
-			for (const w of (d.baseline && d.baseline.warnings) || [])
-				status.append(Object.assign(el('p', 're-note'), { textContent: w }));
+			if (dustShown.kind === 'measure') {
+				const said = dustWarnings(d);
+				if (said.length) {
+					const box = el('div', 're-notice re-warn', ICON.warn);
+					box.dataset.act = 'dust-warnings';
+					const list = el('div');
+					for (const w of said)
+						list.append(Object.assign(el('p'), {
+							textContent: w.charAt(0).toUpperCase() + w.slice(1) + '.' }));
+					box.append(list);
+					status.append(box);
+				}
+			}
 			const t = dustTable();
 			if (t) status.append(t);
 			if (!state.info)

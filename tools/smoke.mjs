@@ -1798,6 +1798,29 @@ console.log('\ndust: the camera\'s answer, checked and placed');
 	check('a less certain spot\'s ring is drawn as such',
 		D.rings(m, m).map((r) => r.kind), ['dust', 'dust marginal', 'dust']);
 
+	// How much of the picture moved between the frames, and what the camera
+	// warned about. A camera that predates them sends neither.
+	check('an older camera\'s answer has no motion figure', m.movingPct, null);
+	check('nor any warnings', m.warnings, []);
+	const moving = 'the scene moved between the frames -- clouds, traffic, leaves -- and a ' +
+		'speck cannot be told from a moving picture';
+	const sky = D.readMeasurement(answer({ movingPct: 100, warnings: [moving, 7] }));
+	check('a moving picture is read as such', sky.movingPct, 100);
+	check('and its warning kept, anything not text dropped', sky.warnings, [moving]);
+	{
+		let refused = false;
+		try { D.readMeasurement(answer({ movingPct: 140 })); } catch { refused = true; }
+		assert('more than all of the picture moving is refused', refused);
+		refused = false;
+		try { D.readMeasurement(answer({ movingPct: '5' })); } catch { refused = true; }
+		assert('a motion figure sent as text is refused', refused);
+	}
+	check('a comparison\'s warning repeated under its "before" is said once',
+		D.warnings(D.readMeasurement(answer({ movingPct: 100, warnings: [moving], baseline: {
+			comparable: true, new: [], warnings: [moving, 'another'],
+			spots: [{ x: 1, y: 1, radius: 2, attenuationPct: 9, nowPct: 4, state: 'unjudged' }] } }))),
+		[moving, 'another']);
+
 	// Which glass.
 	const sites = (list) => ({ width: 2592, height: 1944, source: 'raw', spots: list,
 		sites: {} });
@@ -1814,6 +1837,10 @@ console.log('\ndust: the camera\'s answer, checked and placed');
 	let refused = false;
 	try { D.readSites(sites([sp('lens')])); } catch { refused = true; }
 	assert('a site the camera never names is refused', refused);
+	check('which glass, from an older camera, has no motion figure', mixed.movingPct, null);
+	check('and from a newer one, the side that moved more',
+		D.readSites({ ...sites([sp('glass')]), ircut: { in: { movingPct: 2 },
+			out: { movingPct: 31 } } }).movingPct, 31);
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall checks passed');

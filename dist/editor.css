@@ -217,6 +217,8 @@
 .re-notice.re-ok svg { color: #6dbf98; }
 .re-notice svg { flex: 0 0 auto; color: #b6b9c2; }
 .re-notice div { flex: 1 1 auto; font-size: 12px; line-height: 1.45; }
+.re-notice div p { margin: 0; }
+.re-notice div p + p { margin-top: 6px; }
 
 .re-drop { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 10px;
 	align-items: center; justify-content: center; color: #5b606c; }

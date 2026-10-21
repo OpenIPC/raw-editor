@@ -111,13 +111,18 @@ edges all the say: on a synthetic frame with one hard boundary, a mean-square
 estimate read 98 counts where 12 had been added.
 
 **Dust** is the one tab where the camera does the measuring. A speck on the
-glass in front of the sensor is drawn by the lens as a soft, round, darker disc
-that never moves with the scene; the camera looks for them in its own frames —
-on raw where it can, because the tone mapping in front of the delivered picture
-moves how dark a speck reads — and this tab asks it to, then draws a ring at
-each one over the frame on screen. The workflow is a clean with a before and an
-after: **Save as before**, clean the glass, **Compare**, and each spot is judged
-cleared or still there, with anything new named. **Which glass?** moves the
+glass in front of the sensor is drawn by the lens as a soft, round pattern —
+usually a darker disc, rings for a small speck close to the sensor — that never
+moves with the scene; the camera looks for them in its own frames — on raw
+where it can, because the tone mapping in front of the delivered picture moves
+how dark a speck reads — and this tab asks it to, then draws a ring at each one
+over the frame on screen. The workflow is a clean with a before and an after:
+**Save as before**, clean the glass, **Compare**, and each spot is judged
+cleared, still there, or not judged where the picture there could hide it,
+with anything new named. A speck cannot be told from a moving picture either,
+so the tab says how much of the picture moved between the camera's frames and
+passes on the camera's warning when much of it did: clouds and traffic make a
+poor background, a plain wall or a clear sky a good one. **Which glass?** moves the
 IR-cut filter out and back so a speck on the filter can be told from one on the
 cover glass. It is offered only by a host that can.
 
