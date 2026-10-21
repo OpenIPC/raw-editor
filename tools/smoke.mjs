@@ -1700,5 +1700,121 @@ console.log('\nfocus statistics: the grid a person focuses a lens by');
 	}
 }
 
+console.log('\ndust: the camera\'s answer, checked and placed');
+{
+	const D = await import('../src/dust.js');
+	// Shaped like what a camera answers -- a lab hi3516ev300 + imx335 with
+	// specks on its cover glass.
+	const answer = (o = {}) => ({
+		width: 2592, height: 1944, frames: 3, source: 'raw', luma: 54.2,
+		thresholdPct: 2.0, gain: 1.0,
+		spots: [
+			{ x: 1315, y: 1922, radius: 29, attenuationPct: 21.2 },
+			{ x: 978, y: 268, radius: 35, attenuationPct: 15.4, marginal: true },
+			{ x: 1035, y: 1523, radius: 35, attenuationPct: 13.1 },
+		],
+		...o,
+	});
+
+	const m = D.readMeasurement(answer());
+	check('three spots read', m.spots.length, 3);
+	check('the less certain one is marked so', m.spots.map((s) => s.marginal), [false, true, false]);
+	check('the verdict counts them and names the darkest', D.verdict(m),
+		'3 spots found (1 less certain), the darkest taking 21.2% of the light.');
+	check('no spots is said plainly', D.verdict(D.readMeasurement(answer({ spots: [] }))),
+		'No dust found.');
+
+	// Refused whole: a half-believed list puts rings where the camera said
+	// nothing and leaves out the ones it did.
+	for (const [what, bad] of [
+		['no spot list', answer({ spots: undefined })],
+		['a NaN position', answer({ spots: [{ x: NaN, y: 1, radius: 2, attenuationPct: 3 }] })],
+		['a spot off the frame', answer({ spots: [{ x: 3000, y: 1, radius: 2, attenuationPct: 3 }] })],
+		['more light taken than there was', answer({ spots: [{ x: 1, y: 1, radius: 2, attenuationPct: 140 }] })],
+		['a depth sent as text', answer({ spots: [{ x: 1, y: 1, radius: 2, attenuationPct: '3' }] })],
+		['no width', answer({ width: undefined })],
+		['a comparison spot with no verdict', answer({ baseline: { comparable: true, spots: [
+			{ x: 1, y: 1, radius: 2, attenuationPct: 3, nowPct: 1 }], new: [] } })],
+	]) {
+		let refused = false;
+		try { D.readMeasurement(bad); } catch { refused = true; }
+		assert(`an answer with ${what} is refused`, refused);
+	}
+
+	// A comparison: one wiped, one stayed, one new.
+	const cmp = D.readMeasurement(answer({ baseline: {
+		taken: '2026-10-21T05:23:00Z', comparable: true,
+		spots: [
+			{ x: 1315, y: 1922, radius: 29, attenuationPct: 21.2, nowPct: 0.4, state: 'cleared' },
+			{ x: 1035, y: 1523, radius: 35, attenuationPct: 13.1, nowPct: 13.0, state: 'remains' },
+		],
+		new: [{ x: 400, y: 900, radius: 22, attenuationPct: 6.1 }],
+		warnings: ['a spot that stays after a clean is either still on the glass or a mark in the scene itself'],
+	} }));
+	check('the comparison says what cleared, what stayed and what is new', D.verdict(cmp),
+		'1 of 2 spots cleared, 1 remains. 1 new spot.');
+	check('every spot cleared is said so', D.verdict(D.readMeasurement(answer({ baseline: {
+		comparable: true, new: [],
+		spots: [{ x: 1, y: 1, radius: 2, attenuationPct: 9, nowPct: 0, state: 'cleared' }] } }))),
+		'The spot cleared.');
+	{
+		let refused = false;
+		try {
+			D.readMeasurement(answer({ baseline: { new: [], spots: [
+				{ x: 1, y: 1, radius: 2, attenuationPct: 9, nowPct: 0, state: 'cleared' }] } }));
+		} catch { refused = true; }
+		assert('a comparison that does not say whether it could judge is refused', refused);
+	}
+	check('a spot it could not judge is not counted as still there', D.verdict(D.readMeasurement(
+		answer({ baseline: { comparable: true, new: [], spots: [
+			{ x: 1, y: 1, radius: 2, attenuationPct: 9, nowPct: 0, state: 'cleared' },
+			{ x: 9, y: 9, radius: 2, attenuationPct: 9, nowPct: 9, state: 'remains' },
+			{ x: 19, y: 19, radius: 2, attenuationPct: 9, nowPct: 4, state: 'unjudged' }] } }))),
+		'1 of 3 spots cleared, 1 remains, 1 not judged.');
+	check('nor a single one', D.verdict(D.readMeasurement(answer({ baseline: { comparable: true,
+		new: [], spots: [{ x: 1, y: 1, radius: 2, attenuationPct: 9, nowPct: 4, state: 'unjudged' }] } }))),
+		'The spot could not be judged.');
+	check('a comparison it could not judge still rings what only now was found',
+		D.rings(D.readMeasurement(answer({ baseline: { comparable: false, spots: [],
+			new: [{ x: 5, y: 5, radius: 3, attenuationPct: 6 }] } })), { width: 2592, height: 1944 })
+			.map((r) => r.kind), ['unjudged']);
+	const odd = D.readMeasurement(answer({ baseline: { comparable: false, new: [],
+		spots: [{ x: 1, y: 1, radius: 2, attenuationPct: 9, nowPct: 3, state: 'unjudged' }] } }));
+	assert('light too different is not a verdict', /^Not judged/.test(D.verdict(odd)), D.verdict(odd));
+	check('and its rings say unjudged, not cleared',
+		D.rings(odd, { width: 2592, height: 1944 }).map((r) => r.kind), ['unjudged']);
+	check('a comparison\'s rings carry each verdict',
+		D.rings(cmp, { width: 2592, height: 1944 }).map((r) => r.kind),
+		['cleared', 'remains', 'new']);
+
+	// Placed by scaling, each axis on its own: the frame on screen need not be
+	// the size the camera measured.
+	check('a spot on a half-size frame lands at half the position',
+		D.place({ x: 1000, y: 600, radius: 20 }, { width: 2000, height: 1200 },
+			{ width: 1000, height: 600 }), { x: 500, y: 300, radius: 10 });
+	check('and on the same frame where the camera said',
+		D.place({ x: 1315, y: 1922, radius: 29 }, m, { width: 2592, height: 1944 }),
+		{ x: 1315, y: 1922, radius: 29 });
+	check('a less certain spot\'s ring is drawn as such',
+		D.rings(m, m).map((r) => r.kind), ['dust', 'dust marginal', 'dust']);
+
+	// Which glass.
+	const sites = (list) => ({ width: 2592, height: 1944, source: 'raw', spots: list,
+		sites: {} });
+	const sp = (site, o = {}) => ({ x: 100, y: 100, radius: 20, attenuationPct: 9,
+		inPct: 9, outPct: site === 'glass' ? 8.8 : 0.2, site, ...o });
+	const allGlass = D.readSites(sites([sp('glass'), sp('glass', { x: 900 })]));
+	check('all on the cover glass is said so', D.sitesVerdict(allGlass),
+		'All 2 spots are on the sensor\'s cover glass: they stayed when the filter moved.');
+	const mixed = D.readSites(sites([sp('glass'), sp('filter', { x: 900 }), sp('window', { x: 1500 })]));
+	check('a mixed answer names each glass', D.sitesVerdict(mixed),
+		'3 spots: 1 on the cover glass, 1 on the IR-cut filter, 1 on the glass that replaces it at night.');
+	check('and its rings carry the site', D.rings(mixed, mixed).map((r) => r.kind),
+		['glass', 'filter', 'window']);
+	let refused = false;
+	try { D.readSites(sites([sp('lens')])); } catch { refused = true; }
+	assert('a site the camera never names is refused', refused);
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

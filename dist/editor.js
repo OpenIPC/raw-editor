@@ -17,6 +17,7 @@ import { parseIni, readColour, fitAwbCurve, gainsForCt, mergeCcmTables, colourFr
 	readDefectCorrection, enableDefectCorrection } from './iqprofile.js';
 import { summarise, peakHold, normalise, coarsen, sweepZones, zoneDetail,
 	sweptOneWay } from './aftune.js';
+import { readMeasurement, readSites, verdict, sitesVerdict, rings } from './dust.js';
 
 const CFA_NAMES = ['RGGB', 'GRBG', 'GBRG', 'BGGR'];
 const DEMOSAIC = [
@@ -315,6 +316,21 @@ export function mountEditor(root, {
 	 * of its own it read as the place to focus a camera. Without one the
 	 * sentence is simply not said. */
 	focus,
+	/* Dust on the glass in front of the sensor, which the CAMERA measures --
+	 * it has the frames, and it measures on raw where it can, before any tone
+	 * mapping decides how dark a speck reads. Each resolves to the camera's
+	 * answer as parsed JSON, or rejects with an Error whose message can be
+	 * shown as it is:
+	 *
+	 *   { measure(), save(), compare(), forget(), sites() }
+	 *
+	 * measure() finds the specks now; save() does the same and keeps it on
+	 * the camera as the "before" of a clean; compare() judges each kept spot
+	 * cleared or remaining and names new ones; forget() drops the "before".
+	 * sites() is optional: it moves the IR-cut filter to tell a speck on the
+	 * filter from one on the cover glass, and a camera that cannot move one
+	 * should not be given it. Without a provider there is no Dust tab. */
+	dust,
 	/* How long to wait for the module to arrive and answer. The camera's own
 	 * loader gives the CDN eight seconds; a test harness under a virtual clock
 	 * needs a number well above whatever budget the browser is running on. */
@@ -440,6 +456,7 @@ export function mountEditor(root, {
 	// and a host reading the DOM should find only what is really on offer.
 	if (plates) modeItems.push({ label: 'Plates', value: 'plates' });
 	if (focus) modeItems.push({ label: 'Focus', value: 'focus' });
+	if (dust) modeItems.push({ label: 'Dust', value: 'dust' });
 	const modeSeg = segmented(modeItems, 0, (v) => setMode(v), { wide: false });
 	// Not created at all without a provider, rather than created and hidden: a
 	// disabled-looking control that can never work is worse than none, and a
@@ -731,6 +748,7 @@ export function mountEditor(root, {
 			// against it.
 			drawChart();
 			drawPlateMarks();
+			drawDustMarks();
 		} catch (e) {
 			fail(e.message);
 		} finally {
@@ -802,9 +820,17 @@ export function mountEditor(root, {
 		const t = viewTransform();
 		if (!t) return null;
 		const s = stage.getBoundingClientRect();
+		/* The overlays are positioned inside the stage, and the stage scrolls:
+		 * at 100% a frame larger than the stage is panned by scrolling it, and
+		 * everything absolutely placed in it scrolls with the picture. The
+		 * rectangles are measured on screen, where the scroll has already moved
+		 * the canvas, so it is added back -- without it every mark drew offset
+		 * by exactly how far the frame had been scrolled. */
 		return {
-			x: t.rect.left - s.left + t.ox + (x / t.step) * t.scale,
-			y: t.rect.top - s.top + t.oy + (y / t.step) * t.scale,
+			x: t.rect.left - s.left - stage.clientLeft + stage.scrollLeft + t.ox +
+				(x / t.step) * t.scale,
+			y: t.rect.top - s.top - stage.clientTop + stage.scrollTop + t.oy +
+				(y / t.step) * t.scale,
 		};
 	}
 
@@ -839,7 +865,7 @@ export function mountEditor(root, {
 	 * window ever changing. Watching the element itself catches all of those,
 	 * where a window listener catches only the first.
 	 */
-	const onResize = () => { drawChart(); drawMarks(); drawFocusMarks(); moreBar(); };
+	const onResize = () => { drawChart(); drawMarks(); drawFocusMarks(); drawDustMarks(); moreBar(); };
 	let ro = null;
 	if (typeof ResizeObserver === 'function') {
 		ro = new ResizeObserver(onResize);
@@ -2735,6 +2761,13 @@ export function mountEditor(root, {
 	const focusMarks = el('div', 're-chart');
 	focusMarks.hidden = true;
 	stage.append(focusMarks);
+
+	/* Rings where the camera found dust. Its own layer, for the reason the
+	 * focus heatmap has one: what the camera measured, never on screen with
+	 * anything a person placed. */
+	const dustMarks = el('div', 're-chart');
+	dustMarks.hidden = true;
+	stage.append(dustMarks);
 
 	function defaultCorners() {
 		const w = state.info?.width || 0, h = state.info?.height || 0;
@@ -5501,12 +5534,220 @@ export function mountEditor(root, {
 		focusMarks.append(svg);
 	}
 
+	/* ---- Dust: specks on the glass in front of the sensor ----------------
+	 *
+	 * The camera measures and this panel asks it to: find them now, keep that
+	 * as the "before" of a clean, judge the glass against it afterwards, and
+	 * -- where the camera can move its IR-cut filter -- say which glass each
+	 * speck is on. The answer is kept across tab switches and new frames,
+	 * because it is about the camera, not about the frame on screen; the
+	 * frame is only what the rings are drawn over. */
+	let dustShown = null;   /* { kind: 'measure' | 'sites', data } */
+	let dustSaid = null;    /* a line about the last action: { text, warn } */
+	let dustBusy = false;
+
+	function dustRow(cells, head) {
+		const tr = el('tr');
+		for (const c of cells)
+			tr.append(Object.assign(el(head ? 'th' : 'td'), { textContent: c }));
+		return tr;
+	}
+
+	function dustTable() {
+		const d = dustShown && dustShown.data;
+		if (!d) return null;
+		const t = el('table', 're-dust-table');
+		t.dataset.act = 'dust-spots';
+		if (dustShown.kind === 'sites') {
+			if (!d.spots.length) return null;
+			t.append(dustRow(['Where', 'Filter in', 'Filter out', 'On'], true));
+			for (const s of d.spots)
+				t.append(dustRow([`${Math.round(s.x)}, ${Math.round(s.y)}`,
+					s.inPct.toFixed(1) + '%', s.outPct.toFixed(1) + '%',
+					s.site === 'glass' ? 'cover glass'
+						: s.site === 'filter' ? 'IR-cut filter' : 'night glass']));
+			return t;
+		}
+		const b = d.baseline;
+		if (b) {
+			if (!b.spots.length && !b.fresh.length) return null;
+			t.append(dustRow(['Where', 'Before', 'Now', ''], true));
+			for (const s of b.spots)
+				t.append(dustRow([`${Math.round(s.x)}, ${Math.round(s.y)}`,
+					s.pct.toFixed(1) + '%', s.now.toFixed(1) + '%', s.state]));
+			for (const s of b.fresh)
+				t.append(dustRow([`${Math.round(s.x)}, ${Math.round(s.y)}`,
+					'—', s.pct.toFixed(1) + '%', b.comparable ? 'new' : 'unjudged']));
+			return t;
+		}
+		if (!d.spots.length) return null;
+		t.append(dustRow(['Where', 'Light taken', ''], true));
+		for (const s of d.spots)
+			t.append(dustRow([`${Math.round(s.x)}, ${Math.round(s.y)}`,
+				s.pct.toFixed(1) + '%', s.marginal ? 'less certain' : '']));
+		return t;
+	}
+
+	function buildDust() {
+		insp.replaceChildren();
+		const panel = el('div', 're-panel');
+		panel.append(Object.assign(el('div', 're-shead'), {
+			innerHTML: '<h3 class="re-cap">Dust</h3><span class="re-rule"></span>',
+		}));
+		panel.append(Object.assign(el('p', 're-note'), {
+			textContent: 'A speck on the glass in front of the sensor shows as a soft, ' +
+				'round, darker disc that never moves with the scene. The camera ' +
+				'looks for them in its own frames. Save a "before", clean the ' +
+				'glass, then compare: each spot is judged cleared or still there.',
+		}));
+
+		const row = (items) => {
+			const r = el('div');
+			r.style.cssText = 'display:flex;gap:8px;margin-top:9px;flex-wrap:wrap';
+			for (const [act, label, title, pri] of items) {
+				const b = el('button', pri ? 're-btn re-pri' : 're-btn', '');
+				b.dataset.act = 'dust-' + act;
+				b.textContent = label;
+				b.title = title;
+				b.disabled = !!dustBusy;
+				b.addEventListener('click', () => dustRun(act));
+				r.append(b);
+			}
+			return r;
+		};
+		panel.append(row([
+			['measure', 'Measure', 'Find the dust on the glass now', true],
+			['save', 'Save as before', 'Measure, and keep it on the camera to compare a clean against'],
+			['compare', 'Compare', 'Judge the glass against the saved "before"'],
+		]));
+		const more = [];
+		if (typeof dust.sites === 'function')
+			more.push(['sites', 'Which glass?', 'Move the IR-cut filter to tell dust on it from dust on the cover glass']);
+		more.push(['forget', 'Forget before', 'Drop the "before" saved on the camera']);
+		panel.append(row(more));
+		if (typeof dust.sites === 'function')
+			panel.append(Object.assign(el('p', 're-note'), {
+				textContent: 'Which glass? moves the IR-cut filter out and back, about ' +
+					'four seconds, and the live picture changes colour meanwhile.',
+			}));
+
+		const status = el('div');
+		status.dataset.act = 'dust-status';
+		status.style.marginTop = '11px';
+		if (dustBusy) {
+			status.append(Object.assign(el('p', 're-note'), { textContent: dustBusy }));
+		}
+		if (dustSaid) {
+			const box = el('div', dustSaid.warn ? 're-notice re-warn' : 're-notice re-ok',
+				dustSaid.warn ? ICON.warn : '');
+			box.append(Object.assign(el('div'), { textContent: dustSaid.text }));
+			status.append(box);
+		}
+		const d = dustShown && dustShown.data;
+		if (d) {
+			const v = el('p');
+			v.dataset.act = 'dust-verdict';
+			v.style.cssText = 'margin:9px 0 6px;font-weight:600';
+			v.textContent = dustShown.kind === 'sites' ? sitesVerdict(d) : verdict(d);
+			status.append(v);
+			const facts = [];
+			if (d.source === 'raw') facts.push('measured on the raw frame');
+			else if (d.source === 'luma') facts.push('measured on the processed picture, ' +
+				'whose tone mapping moves how dark a speck reads');
+			if (d.thresholdPct !== undefined) facts.push(`smallest it can see ${d.thresholdPct.toFixed(1)}%`);
+			if (d.baseline && d.baseline.taken) facts.push(`before saved ${d.baseline.taken}`);
+			if (facts.length)
+				status.append(Object.assign(el('p', 're-note'), { textContent: facts.join(' · ') + '.' }));
+			for (const w of (d.baseline && d.baseline.warnings) || [])
+				status.append(Object.assign(el('p', 're-note'), { textContent: w }));
+			const t = dustTable();
+			if (t) status.append(t);
+			if (!state.info)
+				status.append(Object.assign(el('p', 're-note'), {
+					textContent: capture ? 'Capture a frame to see where they are.'
+						: 'Open a frame from this camera to see where they are.',
+				}));
+		}
+		panel.append(status);
+		insp.append(panel);
+	}
+
+	async function dustRun(act) {
+		if (dustBusy || !dust || typeof dust[act] !== 'function') return;
+		dustBusy = act === 'sites' ? 'Moving the filter and measuring…'
+			: act === 'forget' ? 'Forgetting…' : 'Measuring…';
+		dustSaid = null;
+		if (mode === 'dust') buildDust();
+		try {
+			const got = await dust[act]();
+			/* Closed while the camera was answering: nothing here is anybody's
+			 * to update, and above all no capture may start for it. */
+			if (dead) return;
+			if (act === 'forget') {
+				dustSaid = { text: 'The saved "before" is gone.' };
+				/* A comparison is a judgement against that "before"; left on
+				 * screen it would go on showing verdicts about a baseline the
+				 * panel has just said is gone. */
+				if (dustShown && dustShown.data.baseline) dustShown = null;
+			} else if (act === 'sites') {
+				dustShown = { kind: 'sites', data: readSites(got) };
+			} else {
+				dustShown = { kind: 'measure', data: readMeasurement(got) };
+				if (act === 'save')
+					dustSaid = { text: 'Saved on the camera as the "before". Clean the ' +
+						'glass, then Compare.' };
+			}
+		} catch (e) {
+			if (dead) return;
+			dustSaid = { text: (e && e.message) || String(e), warn: true };
+		}
+		dustBusy = false;
+		if (mode === 'dust') buildDust();
+		drawDustMarks();
+		/* The rings need a picture under them. Asked for only when there is
+		 * none and the host can provide one -- never over a frame somebody
+		 * opened on purpose, which is why it goes the automatic way: a capture
+		 * of that kind stands down if the host opens a frame of its own while
+		 * it is in flight. */
+		if (dustShown && !state.info && capture) takeFrame(true);
+	}
+
+	function drawDustMarks() {
+		dustMarks.replaceChildren();
+		if (mode !== 'dust' || !dustShown || !state.info) return;
+		const frame = { width: state.info.width, height: state.info.height };
+		const list = rings(dustShown.data, frame);
+		const NS = 'http://www.w3.org/2000/svg';
+		const svg = document.createElementNS(NS, 'svg');
+		svg.setAttribute('class', 're-chart-svg');
+		const t = viewTransform();
+		for (const r of list) {
+			const at = stageCoords(r.x, r.y);
+			if (!at || !t) continue;
+			const rad = Math.max(7, (r.radius / t.step) * t.scale + 4);
+			const c = document.createElementNS(NS, 'circle');
+			c.setAttribute('cx', at.x);
+			c.setAttribute('cy', at.y);
+			c.setAttribute('r', rad);
+			c.setAttribute('class', 're-dust ' + r.kind.split(' ').map((k) => 're-dust-' + k).join(' '));
+			svg.append(c);
+			const tag = document.createElementNS(NS, 'text');
+			tag.setAttribute('x', at.x);
+			tag.setAttribute('y', at.y - rad - 4);
+			tag.setAttribute('class', 're-dust-tag');
+			tag.textContent = r.label;
+			svg.append(tag);
+		}
+		dustMarks.append(svg);
+	}
+
 	function setMode(m) {
 		mode = m;
 		chart.hidden = m !== 'calibrate';
 		marks.hidden = m !== 'diagnose';
 		plateMarks.hidden = m !== 'plates';
 		focusMarks.hidden = m !== 'focus';
+		dustMarks.hidden = m !== 'dust';
 		/* Unconditional now that two panels can arm one. Nobody confirms a
 		 * change they can no longer see, so a mode change ends it the way the
 		 * clock would have: put back. buildCalibrate() does the same on its own
@@ -5533,6 +5774,8 @@ export function mountEditor(root, {
 			buildCalibrate();
 		} else if (m === 'focus') {
 			buildFocus();
+		} else if (m === 'dust') {
+			buildDust();
 		} else if (m === 'diagnose') {
 			buildDiagnose();
 		} else if (state.info) {
@@ -5542,6 +5785,7 @@ export function mountEditor(root, {
 		drawMarks();
 		drawPlateMarks();
 		drawFocusMarks();
+		drawDustMarks();
 	}
 
 	/* ---- inspector ---- */
