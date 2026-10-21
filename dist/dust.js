@@ -129,6 +129,7 @@ export function readSites(j) {
 	return {
 		width, height, source: j.source === 'raw' ? 'raw' : null, spots,
 		movingPct: moved.length ? Math.max(...moved) : null,
+		warnings: strings(j.warnings),
 	};
 }
 

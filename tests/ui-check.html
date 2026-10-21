@@ -3752,6 +3752,9 @@ try {
 		dust: {
 			measure: async () => ({ ...answer, movingPct: 100, warnings: [movedWarn] }),
 			save: async () => null, forget: async () => null,
+			sites: async () => ({ width: 512, height: 512, source: 'raw', warnings: [movedWarn],
+				ircut: { in: { movingPct: 4 }, out: { movingPct: 31 } }, sites: { glass: 1 },
+				spots: [{ ...spots[0], inPct: 9, outPct: 8.8, site: 'glass' }] }),
 			compare: async () => ({ ...answer, movingPct: 100, warnings: [movedWarn],
 				baseline: { comparable: true, new: [], warnings: [movedWarn],
 					spots: [{ ...spots[0], nowPct: 4.0, state: 'unjudged' }] } }),
@@ -3769,6 +3772,13 @@ try {
 		w5 ? w5.textContent.slice(0, 80) : 'no warning');
 	t('and how much of it moved is stated',
 		/100% of the picture moved between frames/.test(q(h5, 'dust-status').textContent),
+		q(h5, 'dust-status').textContent.slice(0, 200));
+	q(h5, 'dust-sites').click();
+	await pause(300);
+	const ws = q(h5, 'dust-warnings');
+	t('"Which glass?" passes on the camera\'s warning too',
+		!!ws && /moved between the frames/.test(ws.textContent) &&
+		/31% of the picture moved/.test(q(h5, 'dust-status').textContent),
 		q(h5, 'dust-status').textContent.slice(0, 200));
 	q(h5, 'dust-compare').click();
 	await pause(300);

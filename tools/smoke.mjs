@@ -1838,6 +1838,9 @@ console.log('\ndust: the camera\'s answer, checked and placed');
 	try { D.readSites(sites([sp('lens')])); } catch { refused = true; }
 	assert('a site the camera never names is refused', refused);
 	check('which glass, from an older camera, has no motion figure', mixed.movingPct, null);
+	check('which glass keeps the camera\'s warnings too',
+		D.warnings(D.readSites({ ...sites([sp('glass')]), warnings: ['the scene moved', 3] })),
+		['the scene moved']);
 	check('and from a newer one, the side that moved more',
 		D.readSites({ ...sites([sp('glass')]), ircut: { in: { movingPct: 2 },
 			out: { movingPct: 31 } } }).movingPct, 31);

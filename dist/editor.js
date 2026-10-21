@@ -5663,7 +5663,7 @@ export function mountEditor(root, {
 			if (d.baseline && d.baseline.taken) facts.push(`before saved ${d.baseline.taken}`);
 			if (facts.length)
 				status.append(Object.assign(el('p', 're-note'), { textContent: facts.join(' · ') + '.' }));
-			if (dustShown.kind === 'measure') {
+			{
 				const said = dustWarnings(d);
 				if (said.length) {
 					const box = el('div', 're-notice re-warn', ICON.warn);
