@@ -3741,6 +3741,52 @@ try {
 		`${caps4} capture(s)`);
 	h4.remove();
 
+	// A moving picture: the camera says how much of it moved and warns, and a
+	// comparison repeats that warning under its "before" -- said once here.
+	const h5 = document.createElement('div');
+	document.body.append(h5);
+	const movedWarn = 'the scene moved between the frames -- clouds, traffic, leaves -- and a ' +
+		'speck cannot be told from a moving picture';
+	const ed5 = mountEditor(h5, {
+		base: '../dist/', styles: false, autoCapture: false,
+		dust: {
+			measure: async () => ({ ...answer, movingPct: 100, warnings: [movedWarn] }),
+			save: async () => null, forget: async () => null,
+			sites: async () => ({ width: 512, height: 512, source: 'raw', warnings: [movedWarn],
+				ircut: { in: { movingPct: 4 }, out: { movingPct: 31 } }, sites: { glass: 1 },
+				spots: [{ ...spots[0], inPct: 9, outPct: 8.8, site: 'glass' }] }),
+			compare: async () => ({ ...answer, movingPct: 100, warnings: [movedWarn],
+				baseline: { comparable: true, new: [], warnings: [movedWarn],
+					spots: [{ ...spots[0], nowPct: 4.0, state: 'unjudged' }] } }),
+		},
+	});
+	await ed5.open(bytes, 'fixture.dng');
+	await pause(300);
+	[...h5.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Dust').click();
+	await pause(50);
+	q(h5, 'dust-measure').click();
+	await pause(300);
+	const w5 = q(h5, 'dust-warnings');
+	t('a moving picture is warned about',
+		!!w5 && w5.classList.contains('re-warn') && /moved between the frames/.test(w5.textContent),
+		w5 ? w5.textContent.slice(0, 80) : 'no warning');
+	t('and how much of it moved is stated',
+		/100% of the picture moved between frames/.test(q(h5, 'dust-status').textContent),
+		q(h5, 'dust-status').textContent.slice(0, 200));
+	q(h5, 'dust-sites').click();
+	await pause(300);
+	const ws = q(h5, 'dust-warnings');
+	t('"Which glass?" passes on the camera\'s warning too',
+		!!ws && /moved between the frames/.test(ws.textContent) &&
+		/31% of the picture moved/.test(q(h5, 'dust-status').textContent),
+		q(h5, 'dust-status').textContent.slice(0, 200));
+	q(h5, 'dust-compare').click();
+	await pause(300);
+	const said = (q(h5, 'dust-status').textContent.match(/moved between the frames --/g) || []).length;
+	t('a comparison repeating the warning says it once', said === 1, `${said} time(s)`);
+	ed5.destroy();
+	h5.remove();
+
 	// At 100% a frame larger than the stage is panned by scrolling it, and a
 	// ring must stay on its spot while it is.
 	const h3 = document.createElement('div');
