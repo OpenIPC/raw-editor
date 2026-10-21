@@ -73,7 +73,11 @@ export function readMeasurement(j) {
 			throw new Error('The camera\'s comparison is incomplete.');
 		m.baseline = {
 			taken: typeof b.taken === 'string' ? b.taken : null,
-			comparable: b.comparable !== false,
+			comparable: (() => {
+				if (typeof b.comparable !== 'boolean')
+					throw new Error('The camera\'s comparison does not say whether it could judge.');
+				return b.comparable;
+			})(),
 			warnings: Array.isArray(b.warnings)
 				? b.warnings.filter((w) => typeof w === 'string') : [],
 			spots: b.spots.map((s) => spotOf(s, width, height, (s2) => {
@@ -124,14 +128,19 @@ export function verdict(m) {
 				'"before" was saved. Measure again in light like it.';
 		const n = b.spots.length;
 		const cleared = b.spots.filter((s) => s.state === 'cleared').length;
+		/* Counted, not inferred as "the rest": a spot the camera could not
+		 * judge is not one it found still there. */
+		const left = b.spots.filter((s) => s.state === 'remains').length;
+		const open = n - cleared - left;
 		const fresh = b.fresh.length;
 		if (!n && !fresh) return 'Nothing then, nothing now: the glass is clean.';
-		const left = n - cleared;
 		let say = n === 0 ? 'The "before" had no spots.'
-			: n === 1 ? (cleared ? 'The spot cleared.' : 'The spot is still there.')
+			: n === 1 ? (cleared ? 'The spot cleared.' : left ? 'The spot is still there.'
+				: 'The spot could not be judged.')
 				: cleared === n ? `All ${n} spots cleared.`
-					: cleared === 0 ? `None of the ${n} spots cleared.`
-						: `${cleared} of ${n} spots cleared, ${left} ${left === 1 ? 'remains' : 'remain'}.`;
+					: cleared === 0 && left === n ? `None of the ${n} spots cleared.`
+						: `${cleared} of ${n} spots cleared, ${left} ${left === 1 ? 'remains' : 'remain'}` +
+							(open ? `, ${open} not judged` : '') + '.';
 		if (fresh) say += ` ${plural(fresh, 'new spot', 'new spots')}.`;
 		return say;
 	}
@@ -173,7 +182,10 @@ export function rings(m, frame) {
 				: `${s.now.toFixed(1)}%`);
 		for (const s of m.baseline.fresh) add(s, 'new', `new ${s.pct.toFixed(1)}%`);
 	} else if (m.baseline) {
+		/* Not judged: every spot is drawn, the ones the "before" held and the
+		 * ones only this measurement found, and none of them as a verdict. */
 		for (const s of m.baseline.spots) add(s, 'unjudged', `${s.pct.toFixed(1)}%`);
+		for (const s of m.baseline.fresh) add(s, 'unjudged', `${s.pct.toFixed(1)}%`);
 	} else if (m.spots[0] && m.spots[0].site) {
 		for (const s of m.spots) add(s, s.site, s.site);
 	} else {

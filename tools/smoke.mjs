@@ -1733,7 +1733,7 @@ console.log('\ndust: the camera\'s answer, checked and placed');
 		['more light taken than there was', answer({ spots: [{ x: 1, y: 1, radius: 2, attenuationPct: 140 }] })],
 		['a depth sent as text', answer({ spots: [{ x: 1, y: 1, radius: 2, attenuationPct: '3' }] })],
 		['no width', answer({ width: undefined })],
-		['a comparison spot with no verdict', answer({ baseline: { spots: [
+		['a comparison spot with no verdict', answer({ baseline: { comparable: true, spots: [
 			{ x: 1, y: 1, radius: 2, attenuationPct: 3, nowPct: 1 }], new: [] } })],
 	]) {
 		let refused = false;
@@ -1757,6 +1757,27 @@ console.log('\ndust: the camera\'s answer, checked and placed');
 		comparable: true, new: [],
 		spots: [{ x: 1, y: 1, radius: 2, attenuationPct: 9, nowPct: 0, state: 'cleared' }] } }))),
 		'The spot cleared.');
+	{
+		let refused = false;
+		try {
+			D.readMeasurement(answer({ baseline: { new: [], spots: [
+				{ x: 1, y: 1, radius: 2, attenuationPct: 9, nowPct: 0, state: 'cleared' }] } }));
+		} catch { refused = true; }
+		assert('a comparison that does not say whether it could judge is refused', refused);
+	}
+	check('a spot it could not judge is not counted as still there', D.verdict(D.readMeasurement(
+		answer({ baseline: { comparable: true, new: [], spots: [
+			{ x: 1, y: 1, radius: 2, attenuationPct: 9, nowPct: 0, state: 'cleared' },
+			{ x: 9, y: 9, radius: 2, attenuationPct: 9, nowPct: 9, state: 'remains' },
+			{ x: 19, y: 19, radius: 2, attenuationPct: 9, nowPct: 4, state: 'unjudged' }] } }))),
+		'1 of 3 spots cleared, 1 remains, 1 not judged.');
+	check('nor a single one', D.verdict(D.readMeasurement(answer({ baseline: { comparable: true,
+		new: [], spots: [{ x: 1, y: 1, radius: 2, attenuationPct: 9, nowPct: 4, state: 'unjudged' }] } }))),
+		'The spot could not be judged.');
+	check('a comparison it could not judge still rings what only now was found',
+		D.rings(D.readMeasurement(answer({ baseline: { comparable: false, spots: [],
+			new: [{ x: 5, y: 5, radius: 3, attenuationPct: 6 }] } })), { width: 2592, height: 1944 })
+			.map((r) => r.kind), ['unjudged']);
 	const odd = D.readMeasurement(answer({ baseline: { comparable: false, new: [],
 		spots: [{ x: 1, y: 1, radius: 2, attenuationPct: 9, nowPct: 3, state: 'unjudged' }] } }));
 	assert('light too different is not a verdict', /^Not judged/.test(D.verdict(odd)), D.verdict(odd));

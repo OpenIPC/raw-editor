@@ -820,9 +820,17 @@ export function mountEditor(root, {
 		const t = viewTransform();
 		if (!t) return null;
 		const s = stage.getBoundingClientRect();
+		/* The overlays are positioned inside the stage, and the stage scrolls:
+		 * at 100% a frame larger than the stage is panned by scrolling it, and
+		 * everything absolutely placed in it scrolls with the picture. The
+		 * rectangles are measured on screen, where the scroll has already moved
+		 * the canvas, so it is added back -- without it every mark drew offset
+		 * by exactly how far the frame had been scrolled. */
 		return {
-			x: t.rect.left - s.left + t.ox + (x / t.step) * t.scale,
-			y: t.rect.top - s.top + t.oy + (y / t.step) * t.scale,
+			x: t.rect.left - s.left - stage.clientLeft + stage.scrollLeft + t.ox +
+				(x / t.step) * t.scale,
+			y: t.rect.top - s.top - stage.clientTop + stage.scrollTop + t.oy +
+				(y / t.step) * t.scale,
 		};
 	}
 
@@ -5537,7 +5545,6 @@ export function mountEditor(root, {
 	let dustShown = null;   /* { kind: 'measure' | 'sites', data } */
 	let dustSaid = null;    /* a line about the last action: { text, warn } */
 	let dustBusy = false;
-	let dustBtns = [];
 
 	function dustRow(cells, head) {
 		const tr = el('tr');
@@ -5570,7 +5577,7 @@ export function mountEditor(root, {
 					s.pct.toFixed(1) + '%', s.now.toFixed(1) + '%', s.state]));
 			for (const s of b.fresh)
 				t.append(dustRow([`${Math.round(s.x)}, ${Math.round(s.y)}`,
-					'—', s.pct.toFixed(1) + '%', 'new']));
+					'—', s.pct.toFixed(1) + '%', b.comparable ? 'new' : 'unjudged']));
 			return t;
 		}
 		if (!d.spots.length) return null;
@@ -5583,7 +5590,6 @@ export function mountEditor(root, {
 
 	function buildDust() {
 		insp.replaceChildren();
-		dustBtns = [];
 		const panel = el('div', 're-panel');
 		panel.append(Object.assign(el('div', 're-shead'), {
 			innerHTML: '<h3 class="re-cap">Dust</h3><span class="re-rule"></span>',
@@ -5605,7 +5611,6 @@ export function mountEditor(root, {
 				b.title = title;
 				b.disabled = !!dustBusy;
 				b.addEventListener('click', () => dustRun(act));
-				dustBtns.push(b);
 				r.append(b);
 			}
 			return r;
@@ -5675,8 +5680,15 @@ export function mountEditor(root, {
 		if (mode === 'dust') buildDust();
 		try {
 			const got = await dust[act]();
+			/* Closed while the camera was answering: nothing here is anybody's
+			 * to update, and above all no capture may start for it. */
+			if (dead) return;
 			if (act === 'forget') {
 				dustSaid = { text: 'The saved "before" is gone.' };
+				/* A comparison is a judgement against that "before"; left on
+				 * screen it would go on showing verdicts about a baseline the
+				 * panel has just said is gone. */
+				if (dustShown && dustShown.data.baseline) dustShown = null;
 			} else if (act === 'sites') {
 				dustShown = { kind: 'sites', data: readSites(got) };
 			} else {
@@ -5686,6 +5698,7 @@ export function mountEditor(root, {
 						'glass, then Compare.' };
 			}
 		} catch (e) {
+			if (dead) return;
 			dustSaid = { text: (e && e.message) || String(e), warn: true };
 		}
 		dustBusy = false;
@@ -5693,8 +5706,10 @@ export function mountEditor(root, {
 		drawDustMarks();
 		/* The rings need a picture under them. Asked for only when there is
 		 * none and the host can provide one -- never over a frame somebody
-		 * opened on purpose. */
-		if (dustShown && !state.info && capture) takeFrame();
+		 * opened on purpose, which is why it goes the automatic way: a capture
+		 * of that kind stands down if the host opens a frame of its own while
+		 * it is in flight. */
+		if (dustShown && !state.info && capture) takeFrame(true);
 	}
 
 	function drawDustMarks() {

@@ -3665,6 +3665,15 @@ try {
 	t('the camera\'s caveat is passed on',
 		/still on the glass or a mark in the scene/.test(q(host, 'dust-status').textContent));
 
+	// Forgetting the "before" takes the comparison against it off the screen.
+	q(host, 'dust-forget').click();
+	await pause(300);
+	t('Forget takes away a comparison that rested on the "before"',
+		seen.forget === 1 && !q(host, 'dust-verdict') &&
+		host.querySelectorAll('circle.re-dust').length === 0 &&
+		/is gone/.test(q(host, 'dust-status').textContent),
+		`verdict ${!!q(host, 'dust-verdict')}, rings ${host.querySelectorAll('circle.re-dust').length}`);
+
 	q(host, 'dust-save').click();
 	await pause(300);
 	t('Save keeps a "before" and says what to do next', seen.save === 1 &&
@@ -3707,6 +3716,72 @@ try {
 	t('its rings say so', h2.querySelectorAll('circle.re-dust-glass').length === 3);
 	ed2.destroy();
 	h2.remove();
+
+	// Closed while the camera is still answering: nothing may be captured for
+	// an editor that is gone.
+	const h4 = document.createElement('div');
+	document.body.append(h4);
+	let late = null, caps4 = 0;
+	const ed4 = mountEditor(h4, {
+		base: '../dist/', styles: false, autoCapture: false,
+		capture: async () => { caps4++; return { bytes, name: 'fixture.dng' }; },
+		dust: {
+			measure: () => new Promise((r) => { late = () => r(answer); }),
+			save: async () => null, compare: async () => null, forget: async () => null,
+		},
+	});
+	[...h4.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Dust').click();
+	await pause(50);
+	q(h4, 'dust-measure').click();
+	await pause(30);
+	ed4.destroy();
+	late();
+	await pause(400);
+	t('a closed editor asks for no frame when the answer comes late', caps4 === 0,
+		`${caps4} capture(s)`);
+	h4.remove();
+
+	// At 100% a frame larger than the stage is panned by scrolling it, and a
+	// ring must stay on its spot while it is.
+	const h3 = document.createElement('div');
+	h3.style.cssText = 'width:760px;height:420px';
+	document.body.append(h3);
+	const big = await calibrationChart();
+	const ed3 = mountEditor(h3, {
+		base: '../dist/', styles: false, autoCapture: false,
+		dust: {
+			measure: async () => ({ width: 640, height: 480, source: 'raw', thresholdPct: 2,
+				spots: [{ x: 400, y: 300, radius: 10, attenuationPct: 9 }] }),
+			save: async () => null, compare: async () => null, forget: async () => null,
+		},
+	});
+	await ed3.open(big, 'chart.dng');
+	await pause(400);
+	[...h3.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Dust').click();
+	await pause(50);
+	[...h3.querySelectorAll('button')].find((b) => b.textContent.trim() === '100%').click();
+	await pause(600);
+	// Scrolled first and measured after, so the rings are drawn into a stage
+	// that is already scrolled -- which is when an offset would show: a ring
+	// drawn before the scroll moves with the picture whatever the arithmetic.
+	const stage3 = h3.querySelector('.re-stage');
+	stage3.scrollLeft = 120;
+	stage3.scrollTop = 90;
+	await pause(100);
+	q(h3, 'dust-measure').click();
+	await pause(300);
+	const ring = h3.querySelector('circle.re-dust');
+	const cr3 = h3.querySelector('canvas').getBoundingClientRect();
+	const rr = ring ? ring.getBoundingClientRect() : null;
+	const scrolled = stage3.scrollLeft > 0 && stage3.scrollTop > 0;
+	t('the stage really scrolled', scrolled, `${stage3.scrollLeft}, ${stage3.scrollTop}`);
+	t('a ring stays on its spot when the stage scrolls', !!rr &&
+		Math.abs(rr.left + rr.width / 2 - (cr3.left + 400)) < 2 &&
+		Math.abs(rr.top + rr.height / 2 - (cr3.top + 300)) < 2,
+		rr ? `ring ${(rr.left + rr.width / 2).toFixed(1)},${(rr.top + rr.height / 2).toFixed(1)} ` +
+			`spot ${(cr3.left + 400).toFixed(1)},${(cr3.top + 300).toFixed(1)}` : 'no ring');
+	ed3.destroy();
+	h3.remove();
 } catch (e) {
 	t('the Dust tab is handled', false, e.message);
 }
