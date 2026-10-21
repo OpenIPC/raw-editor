@@ -3562,6 +3562,155 @@ try {
 	t('the filter designer is handled', false, e.message);
 }
 
+/* Dust: the camera measures, the tab asks it to and shows the answer over the
+ * frame. A provider here answers the way a camera does, at the size of
+ * fixture.dng doubled, so placing the rings has to scale them. */
+try {
+	const tabNames = (el) => [...el.querySelectorAll('.re-seg button')].map((b) => b.textContent.trim());
+	const q = (h, act) => h.querySelector(`[data-act="${act}"]`);
+	const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+	const bare = document.createElement('div');
+	document.body.append(bare);
+	const bareEd = mountEditor(bare, { base: '../dist/', styles: false, autoCapture: false });
+	t('no Dust tab without a dust provider', !tabNames(bare).includes('Dust'),
+		tabNames(bare).join('|'));
+	bareEd.destroy();
+	bare.remove();
+
+	const spots = [
+		{ x: 256, y: 256, radius: 20, attenuationPct: 16.1 },
+		{ x: 300, y: 200, radius: 24, attenuationPct: 13.4, marginal: true },
+		{ x: 400, y: 400, radius: 18, attenuationPct: 7.8 },
+	];
+	const answer = { width: 512, height: 512, frames: 3, source: 'raw', luma: 55,
+		thresholdPct: 2.0, gain: 1.0, spots };
+	const seen = { measure: 0, save: 0, compare: 0, forget: 0, captures: 0 };
+	let release = null;
+	const host = document.createElement('div');
+	document.body.append(host);
+	const bytes = new Uint8Array(await (await fetch('./fixture.dng')).arrayBuffer());
+	const ed = mountEditor(host, {
+		base: '../dist/', styles: false, autoCapture: false,
+		capture: async () => { seen.captures++; return { bytes, name: 'fixture.dng' }; },
+		dust: {
+			measure: () => { seen.measure++; return new Promise((r) => { release = () => r(answer); }); },
+			save: async () => { seen.save++; return answer; },
+			compare: async () => { seen.compare++; return { ...answer, spots: [spots[2]],
+				baseline: { taken: '2026-10-21T05:23:00Z', comparable: true,
+					spots: [
+						{ ...spots[0], nowPct: 0.3, state: 'cleared' },
+						{ ...spots[1], nowPct: 13.0, state: 'remains' },
+					],
+					new: [{ x: 60, y: 450, radius: 16, attenuationPct: 6.0 }],
+					warnings: ['a spot that stays after a clean is either still on the glass or a mark in the scene itself'] } }; },
+			forget: async () => { seen.forget++; return null; },
+		},
+	});
+	t('a dust provider grows a Dust tab', tabNames(host).includes('Dust'), tabNames(host).join('|'));
+	[...host.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Dust').click();
+	await pause(50);
+	t('no "Which glass?" without a way to move the filter', !q(host, 'dust-sites'));
+
+	// No frame open: measuring asks the camera, and then asks for a frame so
+	// the rings have something to sit on.
+	q(host, 'dust-measure').click();
+	await pause(30);
+	t('the buttons wait while the camera measures',
+		q(host, 'dust-measure').disabled && q(host, 'dust-compare').disabled);
+	release();
+	await pause(900);
+	t('Measure asks the camera once', seen.measure === 1, `${seen.measure} call(s)`);
+	const v = q(host, 'dust-verdict');
+	t('and says what it found', !!v && /^3 spots found \(1 less certain\)/.test(v.textContent),
+		v ? v.textContent : 'no verdict');
+	t('with nothing open, a frame is captured to draw the rings over', seen.captures === 1,
+		`${seen.captures} capture(s)`);
+	await pause(400);
+	const table = q(host, 'dust-spots');
+	t('each spot is listed', !!table && table.querySelectorAll('tr').length === 4,
+		table ? `${table.querySelectorAll('tr').length} row(s)` : 'no table');
+	let ringsNow = host.querySelectorAll('circle.re-dust');
+	t('a ring is drawn for every spot', ringsNow.length === 3, `${ringsNow.length} ring(s)`);
+	t('the less certain one is dashed', host.querySelectorAll('circle.re-dust-marginal').length === 1);
+
+	// Rings follow the frame they are drawn on: the camera measured at twice
+	// fixture.dng's size, so its centre spot lands in the middle of the
+	// picture, not a quarter of the way in.
+	const canvas = host.querySelector('canvas');
+	const cr = canvas.getBoundingClientRect(), sr = host.querySelector('.re-stage').getBoundingClientRect();
+	const c0 = host.querySelector('circle.re-dust');
+	const cx = +c0.getAttribute('cx') + sr.left, mid = cr.left + cr.width / 2;
+	t('a spot is placed by scaling to the frame on screen', Math.abs(cx - mid) < 3,
+		`${cx.toFixed(1)} vs ${mid.toFixed(1)}`);
+
+	// A frame already open is never replaced to show a measurement.
+	q(host, 'dust-measure').click();
+	await pause(30);
+	release();
+	await pause(300);
+	t('a second measurement does not capture over the open frame', seen.captures === 1,
+		`${seen.captures} capture(s)`);
+
+	q(host, 'dust-compare').click();
+	await pause(300);
+	const cv = q(host, 'dust-verdict');
+	t('Compare says what cleared, stayed and arrived',
+		!!cv && cv.textContent === '1 of 2 spots cleared, 1 remains. 1 new spot.',
+		cv ? cv.textContent : 'no verdict');
+	t('and the rings carry each verdict',
+		host.querySelectorAll('circle.re-dust-cleared').length === 1 &&
+		host.querySelectorAll('circle.re-dust-remains').length === 1 &&
+		host.querySelectorAll('circle.re-dust-new').length === 1,
+		[...host.querySelectorAll('circle.re-dust')].map((c) => c.getAttribute('class')).join('|'));
+	t('the camera\'s caveat is passed on',
+		/still on the glass or a mark in the scene/.test(q(host, 'dust-status').textContent));
+
+	q(host, 'dust-save').click();
+	await pause(300);
+	t('Save keeps a "before" and says what to do next', seen.save === 1 &&
+		/Clean the glass, then Compare/.test(q(host, 'dust-status').textContent),
+		q(host, 'dust-status').textContent.slice(0, 120));
+	ed.destroy();
+	host.remove();
+
+	// A camera that refuses says why, in its own words; and one that can move
+	// its filter offers to tell the glass apart.
+	const h2 = document.createElement('div');
+	document.body.append(h2);
+	const ed2 = mountEditor(h2, {
+		base: '../dist/', styles: false, autoCapture: false,
+		dust: {
+			measure: () => Promise.reject(new Error('The camera answered 503: A raw capture is running.')),
+			save: async () => answer, compare: async () => answer, forget: async () => null,
+			sites: async () => ({ width: 512, height: 512, source: 'raw',
+				spots: spots.map((s) => ({ ...s, inPct: s.attenuationPct,
+					outPct: s.attenuationPct - 0.4, site: 'glass' })),
+				sites: { glass: 3, filter: 0, window: 0 } }),
+		},
+	});
+	await ed2.open(bytes, 'fixture.dng');
+	await pause(300);
+	[...h2.querySelectorAll('.re-seg button')].find((b) => b.textContent.trim() === 'Dust').click();
+	await pause(50);
+	q(h2, 'dust-measure').click();
+	await pause(200);
+	t('a refusal is shown as the camera gave it',
+		/A raw capture is running/.test(q(h2, 'dust-status').textContent) &&
+		!!q(h2, 'dust-status').querySelector('.re-warn'),
+		q(h2, 'dust-status').textContent.slice(0, 120));
+	t('a camera that can move its filter offers "Which glass?"', !!q(h2, 'dust-sites'));
+	q(h2, 'dust-sites').click();
+	await pause(300);
+	t('and says which glass the dust is on',
+		/^All 3 spots are on the sensor's cover glass/.test(q(h2, 'dust-verdict').textContent),
+		q(h2, 'dust-verdict').textContent);
+	t('its rings say so', h2.querySelectorAll('circle.re-dust-glass').length === 3);
+	ed2.destroy();
+	h2.remove();
+} catch (e) {
+	t('the Dust tab is handled', false, e.message);
+}
+
 // Reported over HTTP rather than through the title: the harness then runs on
 // a real clock. A virtual-time budget fires every timer as fast as it can,
 // which loses the race against the module's own fetches every time.

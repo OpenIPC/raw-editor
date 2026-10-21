@@ -110,6 +110,36 @@ because a frame is mostly flat and occasionally an edge and squaring gives the
 edges all the say: on a synthetic frame with one hard boundary, a mean-square
 estimate read 98 counts where 12 had been added.
 
+**Dust** is the one tab where the camera does the measuring. A speck on the
+glass in front of the sensor is drawn by the lens as a soft, round, darker disc
+that never moves with the scene; the camera looks for them in its own frames —
+on raw where it can, because the tone mapping in front of the delivered picture
+moves how dark a speck reads — and this tab asks it to, then draws a ring at
+each one over the frame on screen. The workflow is a clean with a before and an
+after: **Save as before**, clean the glass, **Compare**, and each spot is judged
+cleared or still there, with anything new named. **Which glass?** moves the
+IR-cut filter out and back so a speck on the filter can be told from one on the
+cover glass. It is offered only by a host that can.
+
+The host supplies it, and it is shaped like the other camera capabilities — each
+call resolves to the camera's answer, or rejects with a message that is shown
+as given:
+
+```js
+dust: {
+	measure: () => getJson('/api/v1/optics/dust'),
+	save:    () => getJson('/api/v1/optics/dust', { method: 'POST' }),
+	compare: () => getJson('/api/v1/optics/dust?compare=1'),
+	forget:  () => getJson('/api/v1/optics/dust', { method: 'DELETE' }),
+	sites:   () => getJson('/api/v1/optics/dust/sites', { method: 'POST' }), // optional
+},
+```
+
+Without one there is no Dust tab. An answer that is malformed anywhere is
+refused whole rather than half-drawn, and spots are placed by scaling from the
+size the camera measured to the frame on screen, so they land in the right
+place over a frame of another size.
+
 **Four demosaics**, scored against the RGB image the test mosaics them from —
 mean error per channel, lower is closer to the picture that was thrown away:
 

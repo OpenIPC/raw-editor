@@ -276,3 +276,20 @@
 	.re-row { height: 44px; }
 	summary { padding: 8px 0; }
 }
+
+/* Dust: what kind of spot a ring marks is carried by its class. Dashed where
+ * the camera was less certain of the shape. */
+.re-dust { fill: none; stroke-width: 2; paint-order: stroke; }
+.re-dust-dust, .re-dust-remains, .re-dust-unjudged { stroke: #ffb648; }
+.re-dust-cleared { stroke: #6dbf98; }
+.re-dust-new { stroke: #ff6ad5; }
+.re-dust-glass { stroke: #7fd4ff; }
+.re-dust-filter { stroke: #ffda6a; }
+.re-dust-window { stroke: #ff6ad5; }
+.re-dust-marginal { stroke-dasharray: 5 3; }
+.re-dust-tag { fill: #fff; stroke: rgba(0,0,0,.72); stroke-width: 3; paint-order: stroke;
+	font-size: 11px; text-anchor: middle; }
+.re-dust-table { width: 100%; border-collapse: collapse; margin-top: 9px; font-size: 11px; }
+.re-dust-table th, .re-dust-table td { text-align: left; padding: 3px 4px;
+	border-bottom: 1px solid #2c313d; }
+.re-dust-table th { color: #a2a6b2; font-weight: 500; }
